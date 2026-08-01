@@ -21,3 +21,11 @@ library.
 Feishu/Lark route types use locally generated neutral document-type badges when
 the linked page is not anonymously accessible. They are not copies of Feishu or
 Lark product artwork.
+
+## Documentation preview artwork
+
+`preview.png` depicts recognizable favicon-style marks for GitHub, MDN Web
+Docs, Google Docs, Tencent Docs, Wikipedia, and Feishu/Lark only to illustrate
+external-link identification and local caching. These marks remain the property
+of their respective owners. The artwork does not imply affiliation, endorsement,
+or redistribution of those marks as Linkmark runtime icon assets.

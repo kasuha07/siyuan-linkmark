@@ -4,7 +4,7 @@
 
 Linkmark automatically discovers, displays, and locally caches website icons for SiYuan links. When no usable favicon is available, it can generate a colorful domain monogram locally.
 
-![Linkmark before and after](preview.png)
+![Linkmark link icons and local cache](preview.png)
 
 ## Credits & Acknowledgements
 

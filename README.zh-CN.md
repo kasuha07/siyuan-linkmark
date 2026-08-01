@@ -4,7 +4,7 @@
 
 链接印记自动为思源链接发现、显示并本地缓存网站图标。无法获得真实 favicon 时，可以在本地生成彩色域名字母图标。
 
-![链接印记启用前后对比](preview.png)
+![链接印记的链接图标与本地缓存](preview.png)
 
 ## 致谢与鸣谢（Credits & Acknowledgements）
 
