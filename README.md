@@ -6,6 +6,14 @@ Linkmark automatically discovers, displays, and locally caches website icons for
 
 ![Linkmark before and after](preview.png)
 
+## Credits & Acknowledgements
+
+Linkmark is an independent fork of [Acetab/auto-favicon](https://github.com/Acetab/auto-favicon). Linkmark and its maintainer are not affiliated with, sponsored by, or endorsed by Acetab or the upstream project.
+
+The idea of displaying icons before links was separately inspired by [Link Icon](https://github.com/chenshinshi/link-icon). Linkmark does not bundle or redistribute code, icons, or other assets from Link Icon. See [Third-party notices](THIRD_PARTY_NOTICES.md) for trademark and platform-icon details.
+
+Copyright is retained by Acetab and 霞葉 (Kasuha). Linkmark is available under the [MIT License](LICENSE).
+
 ## Fork and key differences
 
 Linkmark is maintained independently from its upstream project. Its core user-visible differences are:
@@ -109,14 +117,6 @@ Search for **Linkmark** in the SiYuan Marketplace and install it, or extract `pa
 Report bugs and feature requests through the new repository's [GitHub Issues](https://github.com/kasuha07/siyuan-linkmark/issues).
 
 When reporting a problem, please include the Linkmark and SiYuan versions, operating system, affected public URL, network strategy, favicon provider and fallback setting, and any relevant `[siyuan-linkmark] Unable to cache` console error. Remove private URLs, note content, tokens, and local paths before posting.
-
-## Credits & Acknowledgements
-
-Linkmark is an independent fork of [Acetab/auto-favicon](https://github.com/Acetab/auto-favicon). Linkmark and its maintainer are not affiliated with, sponsored by, or endorsed by Acetab or the upstream project.
-
-The idea of displaying icons before links was separately inspired by [Link Icon](https://github.com/chenshinshi/link-icon). Linkmark does not bundle or redistribute code, icons, or other assets from Link Icon. See [Third-party notices](THIRD_PARTY_NOTICES.md) for trademark and platform-icon details.
-
-Copyright is retained by Acetab and 霞葉 (Kasuha). Linkmark is available under the [MIT License](LICENSE).
 
 ## Recent updates
 

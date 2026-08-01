@@ -6,6 +6,14 @@
 
 ![链接印记启用前后对比](preview.png)
 
+## 致谢与鸣谢（Credits & Acknowledgements）
+
+链接印记是 [Acetab/auto-favicon](https://github.com/Acetab/auto-favicon) 的独立 fork。链接印记及其维护者与 Acetab 或上游项目不存在隶属、赞助或背书关系。
+
+链接前显示图标的思路另受到[「链接图标」](https://github.com/chenshinshi/link-icon)启发。链接印记未捆绑或再分发「链接图标」的代码、图标或其他资源。商标和平台图标的相关说明请见[第三方声明](THIRD_PARTY_NOTICES.md)。
+
+Acetab 与霞葉 (Kasuha) 的版权声明均予保留；链接印记采用 [MIT License](LICENSE) 开源。
+
 ## Fork 与核心差异
 
 链接印记独立于上游项目维护。用户可感知的核心差异为：
@@ -109,14 +117,6 @@
 请仅通过新仓库的 [GitHub Issues](https://github.com/kasuha07/siyuan-linkmark/issues) 反馈问题和功能建议。
 
 反馈时请尽量附上链接印记和思源版本、操作系统、出问题的公开网址、网络策略、图标服务与兜底设置，以及相关的 `[siyuan-linkmark] Unable to cache` 控制台错误。发布前请移除私人网址、笔记内容、令牌和本地路径。
-
-## 致谢与鸣谢（Credits & Acknowledgements）
-
-链接印记是 [Acetab/auto-favicon](https://github.com/Acetab/auto-favicon) 的独立 fork。链接印记及其维护者与 Acetab 或上游项目不存在隶属、赞助或背书关系。
-
-链接前显示图标的思路另受到[「链接图标」](https://github.com/chenshinshi/link-icon)启发。链接印记未捆绑或再分发「链接图标」的代码、图标或其他资源。商标和平台图标的相关说明请见[第三方声明](THIRD_PARTY_NOTICES.md)。
-
-Acetab 与霞葉 (Kasuha) 的版权声明均予保留；链接印记采用 [MIT License](LICENSE) 开源。
 
 ## 最近更新
 
