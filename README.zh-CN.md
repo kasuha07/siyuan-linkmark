@@ -6,6 +6,13 @@ Auto Favicon 自动为思源中的 HTTP/HTTPS 网页链接获取、显示并在�
 
 ![Auto Favicon 启用前后对比](preview.png)
 
+## Fork 与核心差异
+
+本仓库 fork 自 [Acetab/auto-favicon](https://github.com/Acetab/auto-favicon)，并独立维护。与上游相比，用户可感知的核心差异为：
+
+- **独立渲染 Link Icon：** Auto Favicon 不再检测、保留或优先 Link Icon 的图标，而是独立渲染自身选定的图标。
+- **工作区共享缓存：** 图标获取、缓存策略和缓存管理由思源内核负责，在连接同一工作区的所有客户端中共享。
+
 ## 主要功能
 
 - 默认从域名根页面、常见根目录图标（`/favicon.svg`、`/favicon.png`、`/apple-touch-icon.png`、`/favicon.ico`）、Web App Manifest 和可选图标服务发现网站图标，不访问包含文档 ID 的具体路径。
@@ -99,7 +106,7 @@ Auto Favicon 自动为思源中的 HTTP/HTTPS 网页链接获取、显示并在�
 
 ## 问题反馈
 
-不方便访问 GitHub 的用户，可以直接在 [Auto Favicon 社区帖子](https://ld246.com/article/1785052610863)下回复；能够访问 GitHub 的用户也可以通过 [GitHub Issues](https://github.com/Acetab/auto-favicon/issues)反馈。
+不方便访问 GitHub 的用户，可以直接在 [Auto Favicon 社区帖子](https://ld246.com/article/1785052610863)下回复；能够访问 GitHub 的用户也可以通过 [GitHub Issues](https://github.com/kasuha07/auto-favicon/issues)反馈。
 
 反馈时请尽量附上 Auto Favicon 和思源版本、操作系统、出问题的公开网址、网络策略、图标服务与兜底设置，以及相关的 `[auto-favicon] Unable to cache` 控制台错误。发布前请移除私人网址、笔记内容、令牌和本地路径。
 
@@ -118,4 +125,4 @@ Auto Favicon 自动为思源中的 HTTP/HTTPS 网页链接获取、显示并在�
 - 对共享托管域名下的 NoCode 公开部署站点分别建立路径缓存，并发现各应用自行声明的 favicon。
 - 在回退到 `/favicon.ico` 或第三方服务前，补充探测 `/favicon.svg`、`/favicon.png` 和 `/apple-touch-icon.png` 等常见根目录图标。
 
-完整版本历史请查看 [GitHub Releases](https://github.com/Acetab/auto-favicon/releases)。
+完整版本历史请查看 [GitHub Releases](https://github.com/kasuha07/auto-favicon/releases)。

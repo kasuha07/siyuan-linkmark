@@ -6,6 +6,13 @@ Auto Favicon automatically retrieves, displays, and locally caches website icons
 
 ![Auto Favicon before and after](preview.png)
 
+## Fork and key differences
+
+This repository is a fork of [Acetab/auto-favicon](https://github.com/Acetab/auto-favicon) and is maintained independently. Its core user-visible differences are:
+
+- **Independent Link Icon rendering:** Auto Favicon no longer detects, preserves, or prioritizes Link Icon icons; it renders its own selected icon independently.
+- **Shared workspace cache:** SiYuan's kernel owns icon retrieval, cache policy, and cache management, which are shared by every client connected to the same workspace.
+
 ## Features
 
 - By default, discover icons from domain root pages, common root icon files (`/favicon.svg`, `/favicon.png`, `/apple-touch-icon.png`, and `/favicon.ico`), web manifests, and optional services without visiting paths that contain document IDs.
@@ -99,7 +106,7 @@ Search for **Auto Favicon** in the SiYuan Marketplace and install it, or extract
 
 ## Feedback
 
-Users who cannot conveniently access GitHub can reply to the [Auto Favicon community post](https://ld246.com/article/1785052610863). GitHub users can also report problems through [GitHub Issues](https://github.com/Acetab/auto-favicon/issues).
+Users who cannot conveniently access GitHub can reply to the [Auto Favicon community post](https://ld246.com/article/1785052610863). GitHub users can also report problems through [GitHub Issues](https://github.com/kasuha07/auto-favicon/issues).
 
 When reporting a problem, please include the Auto Favicon and SiYuan versions, operating system, affected public URL, network strategy, favicon provider and fallback setting, and any relevant `[auto-favicon] Unable to cache` console error. Remove private URLs, note content, tokens, and local paths before posting.
 
@@ -118,4 +125,4 @@ The idea of displaying icons before links and the original need for this plugin 
 - Keep public NoCode deployments on shared hosting domains in separate route-scoped caches and discover each app's declared favicon.
 - Probe common root icon files such as `/favicon.svg`, `/favicon.png`, and `/apple-touch-icon.png` before falling back to `/favicon.ico` or third-party services.
 
-See [GitHub Releases](https://github.com/Acetab/auto-favicon/releases) for the complete version history.
+See [GitHub Releases](https://github.com/kasuha07/auto-favicon/releases) for the complete version history.

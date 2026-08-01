@@ -4,6 +4,10 @@ Auto Favicon adds and manages website icons for external SiYuan links. Its cache
 
 ## Language
 
+**Upstream project**:
+The original `Acetab/auto-favicon` repository from which this repository is forked.
+_Avoid_: original version, official fork
+
 **Cache authority**:
 The single kernel-plugin owner of favicon resolution, downloads, cache-index mutations, cleanup, and private icon payloads for a workspace.
 _Avoid_: frontend cache, client cache
