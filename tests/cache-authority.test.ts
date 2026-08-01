@@ -150,6 +150,27 @@ describe("KernelCacheAuthority", () => {
     expect(authority.snapshot()["example.com"]).toMatchObject({ source: "test resolver" });
   });
 
+  it("broadcasts isolated cache snapshots without structuredClone in the kernel runtime", async () => {
+    const received: Record<string, CacheEntry>[] = [];
+    vi.stubGlobal("structuredClone", undefined);
+    try {
+      const authority = new KernelCacheAuthority(new MemoryStorage(), {
+        resolve: async () => ({ bytes: new Uint8Array([1]).buffer, contentType: "image/png", source: "test resolver" }),
+      }, () => 100, {
+        onStateChange: (cache) => { received.push(cache); },
+      });
+
+      await expect(authority.getOrQueue(scope())).resolves.toMatchObject({ source: "test resolver" });
+      received[0]["example.com"].source = "subscriber mutation";
+      const snapshot = authority.snapshot();
+      snapshot["example.com"].source = "caller mutation";
+
+      expect(authority.snapshot()["example.com"]).toMatchObject({ source: "test resolver" });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does not let an invalidated download recreate a deleted cache entry", async () => {
     const storage = new MemoryStorage();
     let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;

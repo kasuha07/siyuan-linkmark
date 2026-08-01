@@ -121,7 +121,7 @@ export class KernelCacheAuthority {
   }
 
   snapshot() {
-    return structuredClone(this.cache);
+    return copyCache(this.cache);
   }
 
   setPolicy(policy: CachePolicy) {
@@ -131,8 +131,8 @@ export class KernelCacheAuthority {
   async getOrQueue(scope: LinkScope, force = false, automatic = false): Promise<CacheEntry | null> {
     await this.initialize();
     const existing = this.cache[scope.key];
-    if (automatic && this.policy.pauseAutomaticFetch) return existing ? structuredClone(existing) : null;
-    if (existing && !force && this.isFresh(existing)) return structuredClone(existing);
+    if (automatic && this.policy.pauseAutomaticFetch) return existing ? copyEntry(existing) : null;
+    if (existing && !force && this.isFresh(existing)) return copyEntry(existing);
     const pending = this.inFlight.get(scope.key);
     if (pending) return pending;
 
@@ -207,7 +207,7 @@ export class KernelCacheAuthority {
     await this.removePayload(previous, iconId);
     await this.removePayload(replaced, iconId);
     await this.notify();
-    return structuredClone(this.cache[scope.key]);
+    return copyEntry(this.cache[scope.key]);
   }
 
   async remove(key: string) {
@@ -272,7 +272,7 @@ export class KernelCacheAuthority {
   ) {
     if (generation !== this.generationFor(scope.key)) return null;
     const previous = this.cache[scope.key];
-    if (previous?.pinned) return structuredClone(previous);
+    if (previous?.pinned) return copyEntry(previous);
     const iconId = this.nextIconId(scope.key);
     onStage?.("writing payload");
     await this.storage.put(this.iconPath(iconId), bytesToBase64(resolved.bytes));
@@ -298,7 +298,7 @@ export class KernelCacheAuthority {
     if (previous?.iconId && previous.iconId !== iconId) await this.storage.remove(this.iconPath(previous.iconId));
     onStage?.("broadcasting cache change");
     await this.notify();
-    return structuredClone(this.cache[scope.key]);
+    return copyEntry(this.cache[scope.key]);
   }
 
   private async removePayload(entry: CacheEntry | undefined, replacementIconId?: string) {
@@ -367,6 +367,14 @@ function parseCache(value: string | undefined): Record<string, CacheEntry> {
   } catch {
     return {};
   }
+}
+
+function copyCache(cache: Record<string, CacheEntry>): Record<string, CacheEntry> {
+  return Object.fromEntries(Object.entries(cache).map(([key, entry]) => [key, copyEntry(entry)]));
+}
+
+function copyEntry(entry: CacheEntry): CacheEntry {
+  return { ...entry };
 }
 
 function errorText(error: unknown) {

@@ -28,6 +28,10 @@ _Avoid_: permanent icon, protected file
 The authoritative record associating a link scope with its resolved or pinned private icon and resolution metadata.
 _Avoid_: favicon file, cache row
 
+**Cache snapshot**:
+An isolated view of the authoritative cache that an RPC caller or state-change subscriber may read without changing the cache authority.
+_Avoid_: live cache object, mutable cache reference
+
 **Legacy cache**:
 The pre-kernel-plugin `favicon-cache.json` index and its public icon files that are imported once when the cache authority is first initialized.
 _Avoid_: disposable cache, reset cache
