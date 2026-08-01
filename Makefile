@@ -12,7 +12,8 @@ dev: dev-container
 	@if ! tmux has-session -t "$(DEV_TMUX_SESSION)" 2>/dev/null; then \
 		tmux new-session -d -s "$(DEV_TMUX_SESSION)" -n dev; \
 	fi
-	@tmux send-keys -t "$(DEV_TMUX_SESSION)" "cd '$(CURDIR)' && npm run dev" Enter
+	@tmux respawn-pane -k -t "$(DEV_TMUX_SESSION):dev" \
+		"cd '$(CURDIR)' && npm run dev"
 	@echo "dev server started in tmux session '$(DEV_TMUX_SESSION)'"
 
 dev-build:
@@ -36,6 +37,8 @@ dev-container: dev-build
 	fi
 
 dev-stop:
+	@tmux kill-session -t "$(DEV_TMUX_SESSION)" 2>/dev/null || true
 	@if docker container inspect "$(SIYUAN_CONTAINER)" >/dev/null 2>&1; then \
-		docker container stop "$(SIYUAN_CONTAINER)"; \
+		docker container stop "$(SIYUAN_CONTAINER)" >/dev/null; \
 	fi
+	@echo "Development environment stopped"
