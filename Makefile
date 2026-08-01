@@ -5,12 +5,15 @@ SIYUAN_ACCESS_AUTH_CODE ?= siyuan-linkmark-dev
 SIYUAN_WORKSPACE ?= $(CURDIR)/dev/siyuan-workspace
 DIST_DIR := $(CURDIR)/dist
 
-.PHONY: dev dev-container dev-stop
+.PHONY: dev dev-build dev-container dev-stop
 
 dev: dev-container
 	npm run dev
 
-dev-container:
+dev-build:
+	npm run build
+
+dev-container: dev-build
 	@mkdir -p "$(SIYUAN_WORKSPACE)" "$(DIST_DIR)"
 	@if docker container inspect "$(SIYUAN_CONTAINER)" >/dev/null 2>&1; then \
 		if [ "$$(docker container inspect --format '{{.State.Running}}' "$(SIYUAN_CONTAINER)")" != "true" ]; then \

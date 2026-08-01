@@ -19,8 +19,10 @@ npm run check
 npm run build
 ```
 
-`make dev` starts or reuses the local SiYuan development container and then
-starts the Vite watchers. The container exposes SiYuan only at
+`make dev` first creates a complete Linkmark development build, then starts or
+reuses the local SiYuan development container and starts the Vite watchers. The
+initial build ensures SiYuan discovers the plugin during its startup scan. The
+container exposes SiYuan only at
 `http://127.0.0.1:6806`, persists its workspace in `dev/siyuan-workspace/`, and
 mounts `dist/` as the Linkmark plugin directory. Use `make dev-stop` to stop
 the container without removing its workspace data.
@@ -53,7 +55,8 @@ npm run check
 npm run build
 ```
 
-`make dev` 会启动或复用本地 SiYuan 开发容器，然后启动 Vite 监听构建。容器只在
+`make dev` 会先生成完整的链接印记开发构建，再启动或复用本地 SiYuan 开发容器并启动
+Vite 监听构建。首次构建可确保思源在启动扫描时识别插件。容器只在
 `http://127.0.0.1:6806` 提供服务，工作区保存在 `dev/siyuan-workspace/`，并将
 `dist/` 挂载为 Linkmark（链接印记）插件目录。使用 `make dev-stop` 可停止容器而不删除
 工作区数据。
