@@ -4,11 +4,16 @@ SIYUAN_PORT ?= 6806
 SIYUAN_ACCESS_AUTH_CODE ?= siyuan-linkmark-dev
 SIYUAN_WORKSPACE ?= $(CURDIR)/dev/siyuan-workspace
 DIST_DIR := $(CURDIR)/dist
+DEV_TMUX_SESSION ?= siyuan-linkmark-dev
 
 .PHONY: dev dev-build dev-container dev-stop
 
 dev: dev-container
-	npm run dev
+	@if ! tmux has-session -t "$(DEV_TMUX_SESSION)" 2>/dev/null; then \
+		tmux new-session -d -s "$(DEV_TMUX_SESSION)" -n dev; \
+	fi
+	@tmux send-keys -t "$(DEV_TMUX_SESSION)" "cd '$(CURDIR)' && npm run dev" Enter
+	@echo "dev server started in tmux session '$(DEV_TMUX_SESSION)'"
 
 dev-build:
 	npm run build
