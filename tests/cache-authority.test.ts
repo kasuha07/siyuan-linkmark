@@ -99,9 +99,9 @@ describe("KernelCacheAuthority", () => {
   });
 
   it("matches only its complete private icon route", () => {
-    expect(privateIconIdFromPath("/plugin/private/auto-favicon/icon/example-1", "auto-favicon")).toBe("example-1");
-    expect(privateIconIdFromPath("/icon/example-1", "auto-favicon")).toBeUndefined();
-    expect(privateIconIdFromPath("/plugin/private/auto-favicon/icon/%2Fetc", "auto-favicon")).toBeUndefined();
+    expect(privateIconIdFromPath("/plugin/private/siyuan-linkmark/icon/example-1", "siyuan-linkmark")).toBe("example-1");
+    expect(privateIconIdFromPath("/icon/example-1", "siyuan-linkmark")).toBeUndefined();
+    expect(privateIconIdFromPath("/plugin/private/siyuan-linkmark/icon/%2Fetc", "siyuan-linkmark")).toBeUndefined();
   });
 
   it("keeps manifest discovery in the kernel resolver", async () => {
@@ -183,8 +183,16 @@ describe("KernelCacheAuthority", () => {
       contentType: "image/png",
       source: "test resolver",
     });
-    await expect(first).resolves.toMatchObject({ domain: "example.com", source: "test resolver" });
-    await expect(second).resolves.toMatchObject({ domain: "example.com", source: "test resolver" });
+    await expect(first).resolves.toMatchObject({
+      domain: "example.com",
+      source: "test resolver",
+      url: expect.stringContaining("/api/plugin/private/siyuan-linkmark/icon/"),
+    });
+    await expect(second).resolves.toMatchObject({
+      domain: "example.com",
+      source: "test resolver",
+      url: expect.stringContaining("/api/plugin/private/siyuan-linkmark/icon/"),
+    });
     expect(calls).toBe(1);
   });
 
@@ -492,7 +500,7 @@ describe("KernelCacheAuthority", () => {
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it("imports legacy entries and keeps valid pinned icons", async () => {
+  it("does not import or delete the old plugin cache", async () => {
     const storage = new MemoryStorage();
     storage.files.set("favicon-cache.json", JSON.stringify({
       "pinned.example.com": entry({ domain: "pinned.example.com", pinned: true, url: "/public/auto-favicon/pinned.png" }),
@@ -501,41 +509,33 @@ describe("KernelCacheAuthority", () => {
 
     await authority.initialize();
 
-    expect(authority.snapshot()).toEqual({
-      "pinned.example.com": expect.objectContaining({ pinned: true, url: "/public/auto-favicon/pinned.png" }),
-    });
+    expect(authority.snapshot()).toEqual({});
+    expect(storage.files.has("favicon-cache-v2.json")).toBe(false);
+    expect(storage.files.get("favicon-cache.json")).toContain("pinned.example.com");
   });
 
-  it("keeps the authority available when a legacy payload cannot be read", async () => {
+  it("loads pinned icons already stored in the Linkmark cache", async () => {
     const storage = new MemoryStorage();
-    storage.files.set("favicon-cache.json", JSON.stringify({
-      "legacy.example.com": entry({ domain: "legacy.example.com", url: "/public/auto-favicon/legacy.png" }),
+    storage.files.set("favicon-cache-v2.json", JSON.stringify({
+      "pinned.example.com": entry({
+        domain: "pinned.example.com",
+        pinned: true,
+        url: "/plugin/private/siyuan-linkmark/icon/pinned-1",
+        iconId: "pinned-1",
+        contentType: "image/png",
+      }),
     }));
-    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100, {
-      loadLegacyIcon: async () => { throw new Error("legacy file API unavailable"); },
-    });
+    storage.files.set("icons/pinned-1.base64", Buffer.from([9, 8, 7]).toString("base64"));
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
 
     await authority.initialize();
 
-    expect(authority.snapshot()["legacy.example.com"]).toMatchObject({ url: "/public/auto-favicon/legacy.png" });
-    expect(storage.files.get("favicon-cache-v2.json")).toContain("legacy.example.com");
-  });
-
-  it("moves readable legacy icon bytes behind the private icon route", async () => {
-    const storage = new MemoryStorage();
-    storage.files.set("favicon-cache.json", JSON.stringify({
-      "pinned.example.com": entry({ domain: "pinned.example.com", pinned: true, url: "/public/auto-favicon/pinned.png" }),
-    }));
-    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100, {
-      privateIconUrl: (iconId) => `/plugin/private/auto-favicon/icon/${iconId}`,
-      loadLegacyIcon: async () => ({ bytes: new Uint8Array([9, 8, 7]).buffer, contentType: "image/png" }),
+    expect(authority.snapshot()["pinned.example.com"]).toMatchObject({
+      pinned: true,
+      url: "/plugin/private/siyuan-linkmark/icon/pinned-1",
+      iconId: "pinned-1",
     });
-
-    await authority.initialize();
-
-    const migrated = authority.snapshot()["pinned.example.com"];
-    expect(migrated).toMatchObject({ pinned: true, url: "/plugin/private/auto-favicon/icon/pinned.example.com", iconId: "pinned.example.com" });
-    await expect(authority.icon("pinned.example.com")).resolves.toMatchObject({ contentType: "image/png" });
+    await expect(authority.icon("pinned-1")).resolves.toMatchObject({ contentType: "image/png" });
   });
 
   it("keeps distinct route Link scopes independent", async () => {

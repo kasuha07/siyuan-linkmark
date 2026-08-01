@@ -123,13 +123,13 @@
   "refreshFinished": "Refresh finished: {success} remote icons, {fallback} local monograms, {failed} failed, {skipped} pinned icons skipped",
   "noRefreshableDomains": "Only pinned custom icons remain; there are no domains to refresh",
   "cacheCleared": "Automatic icon cache cleared; pinned custom icons were kept",
-  "toolbarTitle": "Auto Favicon",
+  "toolbarTitle": "Linkmark",
   "toolbarStatus": "{count} cached icon entries",
   "automaticFetchPausedStatus": "automatic retrieval paused",
   "fullPageDiscoveryEnabledStatus": "page discovery allowed",
   "toolbarEnabled": "Enable website icons",
   "openSettings": "Open plugin settings",
-  "feedback": "Community feedback",
-  "pluginEnabled": "Auto Favicon enabled",
-  "pluginDisabled": "Auto Favicon disabled"
+  "feedback": "GitHub Issues",
+  "pluginEnabled": "Linkmark enabled",
+  "pluginDisabled": "Linkmark disabled"
 }

@@ -1,8 +1,8 @@
-# Auto Favicon project instructions
+# Linkmark project instructions
 
 ## Purpose
 
-Auto Favicon is a focused SiYuan plugin that automatically shows website favicons
+Linkmark is a focused SiYuan plugin that automatically shows website favicons
 before external links. Keep the scope narrow and independent of third-party link-icon plugins.
 
 ## Commands
@@ -52,17 +52,12 @@ complete marketplace payload in `dist/`.
 
 ## Current status
 
-- As of 2026-07-31, v0.5.7 is the current release. It separates public NoCode
-  deployments by route and probes common root SVG/PNG favicon files.
-- GitHub Actions run `30622377454` published v0.5.7 from `502640a`; the
-  12-entry online package has SHA-256
-  `4671E5CE60338E7579D8D8625A203DC1621500F1BBF50EA72EF5E31A28CBED51`.
-- GitHub Actions run `30605537368` published v0.5.6 from `9b91217`; the online
-  package, README image references, and reviewed PNG hashes were verified.
-- v0.5.5 added the before/after preview, clearer custom-icon selection, and
-  candidate icon metadata.
-- v0.5.4 fixed first-run caching in a clean workspace and passed real SiYuan
-  validation.
+- Linkmark's first independent version is `0.1.0`. It is intentionally
+  untagged and unpublished until an explicit release request.
+- Linkmark uses the `siyuan-linkmark` plugin, package, storage, and private-route
+  namespace. It neither imports nor deletes `auto-favicon` user data.
+- The project retains explicit upstream and Link Icon acknowledgements and the
+  original Acetab MIT notice alongside the independent maintainer notice.
 - The release package uses forward-slash ZIP entry paths.
 - Missing plugin data can load as an empty string. Normalize loaded settings and
   cache values to plain objects before using them.

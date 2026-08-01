@@ -1,12 +1,48 @@
-# Auto Favicon
+# Linkmark
 
-Auto Favicon adds and manages website icons for external SiYuan links. Its cache is shared by every client connected to one SiYuan workspace.
+Linkmark adds and manages website icons for external SiYuan links. Its cache is shared by every client connected to one SiYuan workspace.
 
 ## Language
 
 **Upstream project**:
 The original `Acetab/auto-favicon` repository from which this repository is forked.
 _Avoid_: original version, official fork
+
+**Linkmark**:
+The public product name of the independent `siyuan-linkmark` plugin, shown as "Linkmark" in English and "链接印记" in Chinese.
+_Avoid_: Auto Favicon, SiYuan Favicon, Link Icon
+
+**Independent maintainer**:
+`霞葉 (Kasuha)`, the canonical human-readable maintainer attribution for Linkmark; `kasuha07` identifies the repository account rather than the display attribution.
+_Avoid_: kasuha07, Acetab
+
+**Fork copyright notice**:
+The paired Acetab and `霞葉 (Kasuha)` copyright notices in Linkmark's MIT license that preserve upstream attribution while identifying independent modifications.
+_Avoid_: replacement copyright, sole copyright
+
+**Upstream credit**:
+The bilingual disclosure that Linkmark is an independently maintained fork of `Acetab/auto-favicon` and has no affiliation with or endorsement from Acetab.
+_Avoid_: official successor, Acetab plugin
+
+**Link Icon acknowledgement**:
+The bilingual disclosure that Linkmark credits `chenshinshi/link-icon` for the link-icon interaction idea while stating that no code or bundled icon assets are included.
+_Avoid_: Link Icon compatibility, code attribution
+
+**Unified Linkmark identity**:
+The `siyuan-linkmark` identifier used for Linkmark's SiYuan plugin, package, standalone repository, storage, and private-route namespaces; it intentionally does not promise an in-place upgrade or data compatibility with the upstream-derived `auto-favicon` plugin.
+_Avoid_: cosmetic rename, split technical identity
+
+**Independent repository**:
+The standalone `kasuha07/siyuan-linkmark` GitHub repository, which retains the project history and credit disclosures without remaining in the `Acetab/auto-favicon` fork network.
+_Avoid_: GitHub fork, upstream repository
+
+**Independent release line**:
+The Linkmark version series beginning at `0.1.0`, with recent updates limited to Linkmark releases rather than the upstream-derived `auto-favicon` release history.
+_Avoid_: fork release, v0.6.x continuation
+
+**Legacy data isolation**:
+The rule that Linkmark starts with an empty `siyuan-linkmark` data namespace and neither imports nor deletes `auto-favicon` settings, cache entries, or pinned icons.
+_Avoid_: migration, cleanup of old plugin data
 
 **Cache authority**:
 The single kernel-plugin owner of favicon resolution, downloads, cache-index mutations, cleanup, and private icon payloads for a workspace.
@@ -37,8 +73,8 @@ An isolated view of the authoritative cache that an RPC caller or state-change s
 _Avoid_: live cache object, mutable cache reference
 
 **Legacy cache**:
-The pre-kernel-plugin `favicon-cache.json` index and its public icon files that are imported once when the cache authority is first initialized.
-_Avoid_: disposable cache, reset cache
+The old `auto-favicon` `favicon-cache.json` index and public icon files that Linkmark deliberately neither imports nor deletes.
+_Avoid_: Linkmark cache, migration source
 
 **Workspace cache operation**:
 An explicit management action whose result applies to the shared cache for every connected frontend client.
@@ -49,11 +85,11 @@ The workspace-wide settings that determine favicon resolution, fallback generati
 _Avoid_: frontend preference, device setting
 
 **Display preference**:
-A frontend-client setting that affects only how that client renders Auto Favicon without changing the shared cache.
+A frontend-client setting that affects only how that client renders Linkmark without changing the shared cache.
 _Avoid_: cache policy, workspace setting
 
 **Independent icon rendering**:
-The frontend behavior that renders Auto Favicon's selected icon according to its own cache and display rules, without detecting, preserving, or prioritizing another plugin's icon.
+The frontend behavior that renders Linkmark's selected icon according to its own cache and display rules, without detecting, preserving, or prioritizing another plugin's icon.
 _Avoid_: Link Icon compatibility, cooperative rendering
 
 **Specific-page discovery**:

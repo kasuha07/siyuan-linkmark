@@ -447,7 +447,7 @@ async function forward(
         timeout,
         contentType,
         headers: [
-          { "User-Agent": "Mozilla/5.0 (compatible; SiYuan Auto Favicon/0.3)" },
+          { "User-Agent": "Mozilla/5.0 (compatible; SiYuan Linkmark/0.1.0)" },
           { Accept: responseEncoding === "text" ? "text/html,application/xhtml+xml,application/json" : "image/avif,image/webp,image/*,*/*" },
         ],
         payload: {},

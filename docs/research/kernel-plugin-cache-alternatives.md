@@ -20,7 +20,7 @@ kernel plugin.
 The minimum safe shape is:
 
 1. Frontends call a plugin RPC `getOrQueue(scope, policy)`; they never mutate
-   the index or write `/data/public/auto-favicon`.
+   the index or write public icon files.
 2. The kernel plugin holds one FIFO/in-flight map by route scope.  It rereads
    its authoritative index before dispatch and coalesces same-scope callers.
 3. A worker uses `client.fetch` to POST the documented forward-proxy payload,
@@ -99,7 +99,7 @@ It uses `SSRFSafeDialer`; source shows that private/loopback/link-local and
 unspecified IPs are prohibited **only when SiYuan Safe Mode is enabled**.  When
 Safe Mode is off they are logged but the dial proceeds.
 [`net.go`](https://github.com/siyuan-note/siyuan/blob/eef10568384e2e7cf547adb029ae46a72e43c287/kernel/util/net.go#L126-L150).
-Treat all candidate URLs as untrusted regardless: retain Auto Favicon's own
+Treat all candidate URLs as untrusted regardless: retain Linkmark's own
 public-host validation and do not forward cookies, authorization headers, or
 workspace URLs.
 

@@ -1,16 +1,16 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-# Auto Favicon
+# Linkmark
 
-Auto Favicon automatically retrieves, displays, and locally caches website icons for HTTP/HTTPS links in SiYuan. When no usable favicon is available, it can generate a colorful domain monogram locally.
+Linkmark automatically discovers, displays, and locally caches website icons for SiYuan links. When no usable favicon is available, it can generate a colorful domain monogram locally.
 
-![Auto Favicon before and after](preview.png)
+![Linkmark before and after](preview.png)
 
 ## Fork and key differences
 
-This repository is a fork of [Acetab/auto-favicon](https://github.com/Acetab/auto-favicon) and is maintained independently. Its core user-visible differences are:
+Linkmark is maintained independently from its upstream project. Its core user-visible differences are:
 
-- **Independent Link Icon rendering:** Auto Favicon no longer detects, preserves, or prioritizes Link Icon icons; it renders its own selected icon independently.
+- **Independent icon rendering:** Linkmark does not detect, preserve, or prioritize icons from other plugins; it renders its own selected icon independently.
 - **Shared workspace cache:** SiYuan's kernel owns icon retrieval, cache policy, and cache management, which are shared by every client connected to the same workspace.
 
 ## Features
@@ -71,8 +71,8 @@ Opening a document scans its web links, but a fresh cached icon is loaded locall
 - Failed domains are paused for 10 minutes during the current plugin session.
 - A failed manual refresh keeps the previous working icon.
 - Manually selected icons are pinned locally until automatic retrieval is restored; normal cache clearing and expiration do not remove them.
-- Icon files: `workspace/data/public/auto-favicon/`.
-- Cache index: `favicon-cache.json`, managed through SiYuan plugin storage. Normal entries retain only the domain; adapted-platform entries may also retain stable routes such as `doc`, `sheet`, `base`, or a public NoCode deployment identifier, never query parameters, fragments, or titles.
+- Icon payloads and the `favicon-cache-v2.json` index are stored in Linkmark's private plugin storage. Normal entries retain only the domain; adapted-platform entries may also retain stable routes such as `doc`, `sheet`, `base`, or a public NoCode deployment identifier, never query parameters, fragments, or titles.
+- Linkmark does not import or delete settings, cache entries, or pinned icons from the previous `auto-favicon` plugin.
 - While automatic retrieval is paused, existing and expired entries remain visible and deleted entries are not rebuilt; manual refresh, candidate selection, and uploads remain available.
 
 Cache management supports refreshing the current document, refreshing every automatically cached domain, searching cached domains, and refreshing or deleting a single domain.
@@ -102,27 +102,27 @@ Localhost, `.local`, loopback, link-local, and private IP addresses are not sent
 
 ## Install and use
 
-Search for **Auto Favicon** in the SiYuan Marketplace and install it, or extract `package.zip` into `workspace/data/plugins/auto-favicon/`. Enable the plugin, choose a network strategy in its settings, then use the Auto Favicon button in the top toolbar for common actions.
+Search for **Linkmark** in the SiYuan Marketplace and install it, or extract `package.zip` into `workspace/data/plugins/siyuan-linkmark/`. Enable the plugin, choose a network strategy in its settings, then use the Linkmark button in the top toolbar for common actions.
 
 ## Feedback
 
-Users who cannot conveniently access GitHub can reply to the [Auto Favicon community post](https://ld246.com/article/1785052610863). GitHub users can also report problems through [GitHub Issues](https://github.com/kasuha07/auto-favicon/issues).
+Report bugs and feature requests through the new repository's [GitHub Issues](https://github.com/kasuha07/siyuan-linkmark/issues).
 
-When reporting a problem, please include the Auto Favicon and SiYuan versions, operating system, affected public URL, network strategy, favicon provider and fallback setting, and any relevant `[auto-favicon] Unable to cache` console error. Remove private URLs, note content, tokens, and local paths before posting.
+When reporting a problem, please include the Linkmark and SiYuan versions, operating system, affected public URL, network strategy, favicon provider and fallback setting, and any relevant `[siyuan-linkmark] Unable to cache` console error. Remove private URLs, note content, tokens, and local paths before posting.
 
-## Credits and license
+## Credits & Acknowledgements
 
-The idea of displaying icons before links and the original need for this plugin were inspired by [Link Icon](https://github.com/chenshinshi/link-icon). Auto Favicon was built through **Vibe Coding** and is licensed under the [MIT License](LICENSE).
+Linkmark is an independent fork of [Acetab/auto-favicon](https://github.com/Acetab/auto-favicon). Linkmark and its maintainer are not affiliated with, sponsored by, or endorsed by Acetab or the upstream project.
+
+The idea of displaying icons before links was separately inspired by [Link Icon](https://github.com/chenshinshi/link-icon). Linkmark does not bundle or redistribute code, icons, or other assets from Link Icon. See [Third-party notices](THIRD_PARTY_NOTICES.md) for trademark and platform-icon details.
+
+Copyright is retained by Acetab and 霞葉 (Kasuha). Linkmark is available under the [MIT License](LICENSE).
 
 ## Recent updates
 
-### 0.6.0
+### Linkmark 0.1.0
 
-- Remove Link Icon-specific settings and rendering behavior; Auto Favicon now renders its selected icons independently with ordinary CSS precedence.
+- Establish the independent Linkmark identity, repository, package namespace, and release line.
+- Discover, display, and locally cache website icons while preserving pinned icons and privacy-focused network controls.
 
-### 0.5.7
-
-- Keep public NoCode deployments on shared hosting domains in separate route-scoped caches and discover each app's declared favicon.
-- Probe common root icon files such as `/favicon.svg`, `/favicon.png`, and `/apple-touch-icon.png` before falling back to `/favicon.ico` or third-party services.
-
-See [GitHub Releases](https://github.com/kasuha07/auto-favicon/releases) for the complete version history.
+See [GitHub Releases](https://github.com/kasuha07/siyuan-linkmark/releases) for the complete version history.

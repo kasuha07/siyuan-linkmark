@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-Auto Favicon currently loads only on SiYuan desktop and mobile frontends, so it
+Linkmark currently loads only on SiYuan desktop and mobile frontends, so it
 does not load in Docker-hosted browser sessions. Its browser-local cache snapshot
 can also overwrite changes made by another browser connected to the same SiYuan
 workspace. This loses favicon entries, can resurrect deleted entries, and cannot
@@ -13,13 +13,13 @@ reliably deduplicate downloads across a desktop browser and a mobile browser.
 Support SiYuan browser frontends and make a SiYuan v3.7 kernel plugin the
 workspace cache authority. Frontend clients render icons and request operations
 through kernel RPC. The authority owns cache policy, the cache entry index,
-favicon downloads, scoped in-flight work, icon payloads, cleanup, migration, and
+favicon downloads, scoped in-flight work, icon payloads, cleanup, and
 state-change broadcasts. It downloads through SiYuan's supported forward-proxy
 API and serves committed icon bytes over an authenticated private icon route.
 
 ## User Stories
 
-1. As a Docker-hosted SiYuan desktop-browser user, I want Auto Favicon to load, so that external links receive icons without installing a desktop client.
+1. As a Docker-hosted SiYuan desktop-browser user, I want Linkmark to load, so that external links receive icons without installing a desktop client.
 2. As a Docker-hosted SiYuan mobile-browser user, I want the plugin to load, so that mobile web sessions behave consistently with other clients.
 3. As a user with two browsers open against one workspace, I want both clients to see the same cache state, so that one client cannot overwrite the other's icon updates.
 4. As a user opening the same link scope on two devices, I want one shared favicon task, so that the workspace does not download the same icon twice.
@@ -27,8 +27,8 @@ API and serves committed icon bytes over an authenticated private icon route.
 6. As a user who pins a custom icon, I want it preserved during ordinary refresh and cache cleanup, so that intentional choices remain stable across devices.
 7. As a user who restores automatic resolution or deletes an icon, I want the change to apply workspace-wide, so that other clients do not continue showing a conflicting selection.
 8. As a user who clears cache while an icon is downloading, I want the deleted icon to stay deleted, so that an old task cannot restore it after I acted.
-9. As a user migrating from the existing plugin version, I want valid legacy entries and pinned icons preserved, so that upgrading does not unexpectedly discard my curated cache.
-10. As a user whose legacy automatic icon is missing or unreadable, I want normal cache validation to recover or remove it, so that stale metadata does not create broken rendering.
+9. As a user who has the old `auto-favicon` plugin installed, I want Linkmark to leave its settings, cache entries, and pinned icons untouched, so that installing Linkmark does not alter old-plugin data.
+10. As a user starting Linkmark without Linkmark data, I want an empty cache, so that no old-plugin metadata appears under the independent identity.
 11. As a user whose browser closes after requesting an icon, I want a kernel-started task to continue while the kernel remains running, so that the shared server can complete work independently of the page.
 12. As a user encountering an unavailable or reloading kernel plugin, I want editing and existing document content to remain unaffected, so that a transient plugin failure does not disrupt documents.
 13. As a user manually refreshing or selecting an icon, I want a useful error when the request fails, so that I can decide whether to retry or change the source.
@@ -41,13 +41,13 @@ API and serves committed icon bytes over an authenticated private icon route.
 
 - The plugin supports desktop, mobile, browser-desktop, and browser-mobile frontends and declares compatibility with all kernel targets. The existing minimum SiYuan version already permits the v3.7 kernel-plugin architecture.
 - A kernel plugin is the sole cache authority. Frontend clients neither persist the cache index nor write icon payloads directly; their compatibility boundary is authenticated kernel RPC.
-- The authority uses SiYuan's documented kernel REST loopback client to call the documented forward-proxy endpoint. It must retain Auto Favicon's public-target validation, pass no cookies or authorization headers to candidate sites, enforce existing image limits, and treat proxy envelope failures separately from transport success.
+- The authority uses SiYuan's documented kernel REST loopback client to call the documented forward-proxy endpoint. It retains Linkmark's public-target validation, passes no cookies or authorization headers to candidate sites, enforces existing image limits, and treats proxy envelope failures separately from transport success.
 - The authority keeps one serialized cache-operation queue and one in-flight map keyed by Link scope. A matching request joins existing work; distinct route-specific scopes remain independent.
 - A Cache entry is authoritative only after icon bytes are validated and its index update commits. Replaced automatic payloads are removed only after the replacement commits.
 - Pinned icons never expire and are excluded from ordinary refresh and clear-cache cleanup. Explicit restore-automatic and delete operations remain workspace cache operations.
 - Delete, restore-automatic, and clear-cache actions invalidate affected In-flight tasks. An invalidated task must not commit either icon bytes or index state, even if its network request completed.
 - Cache policy is workspace-wide: resolver source and mode, fallback, monogram configuration, automatic-fetch pause, full-page discovery, and cache lifetime. Display preferences are per Frontend client: rendering enabled state and icon size.
-- On first authority initialization, well-formed legacy cache entries are imported. Usable pinned icons are retained; automatic entries keep their legacy freshness time and are later refreshed or removed by normal validation if their payload is unavailable.
+- On first authority initialization, only Linkmark's own cache index and private payloads are read. Data from the old `auto-favicon` plugin is neither imported nor deleted.
 - Icon bytes are stored in plugin-private storage and delivered through an authenticated Private icon route. Data URIs are permitted only as a controlled fallback if future Docker-browser validation proves CSS cannot use the private route.
 - The authority broadcasts committed state changes so each connected Frontend client reconciles its rendered rules. During authority startup, reload, or temporary unavailability, rendering fails open: existing usable icons remain visible, cache misses do not block editing, and automatic failures are silent.
 - In-flight work is intentionally not durable in this phase. A kernel restart, hot reload, or plugin stop cancels unfinished tasks; committed entries and cache policy remain available for later scanning or explicit refresh.
@@ -56,7 +56,7 @@ API and serves committed icon bytes over an authenticated private icon route.
 
 - Add a development-only Vitest harness. Tests must assert externally observable cache-authority behavior rather than queue internals.
 - The primary and highest test seam is the kernel cache-authority RPC surface backed by a deterministic in-memory storage adapter and a controllable forward-proxy adapter. Frontend DOM scanning and SiYuan transport are outside this seam.
-- Cover legacy import, same-scope coalescing, distinct route-scope independence, post-delete non-commit, cache-clear invalidation, pinned retention, private-route lookup, cache-policy ownership, client display-preference separation, and fail-open RPC behavior.
+- Cover old-data isolation, same-scope coalescing, distinct route-scope independence, post-delete non-commit, cache-clear invalidation, pinned retention, private-route lookup, cache-policy ownership, client display-preference separation, and fail-open RPC behavior.
 - Check compiled package content as a separate boundary: the distributable must include browser frontend declarations, kernel compatibility declaration, and the kernel entry artifact.
 - Run TypeScript validation and the normal production package build. This repository has no prior test suite; the new authority-level suite is the initial testing precedent.
 - Do not add Docker/browser end-to-end automation in this phase. Real Docker browser behavior, including authenticated CSS access to the Private icon route, is a documented validation gap rather than a claimed proof.

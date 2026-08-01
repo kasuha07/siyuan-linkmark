@@ -25,7 +25,7 @@
 
   <g font-family="Microsoft YaHei, Segoe UI, Arial, sans-serif">
     <text x="512" y="62" text-anchor="middle" fill="#202638" font-size="34" font-weight="700">链接图标，一眼可见</text>
-    <text x="512" y="96" text-anchor="middle" fill="#707A92" font-size="16">Auto Favicon · 自动获取并本地缓存网站图标</text>
+    <text x="512" y="96" text-anchor="middle" fill="#707A92" font-size="16">Linkmark 链接印记 · 自动发现、显示并本地缓存网站图标</text>
 
     <rect x="32" y="130" width="468" height="408" rx="20" fill="#FFFFFF" filter="url(#shadow)"/>
     <rect x="524" y="130" width="468" height="408" rx="20" fill="#FFFFFF" filter="url(#shadow)"/>

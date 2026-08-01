@@ -4,9 +4,9 @@ The plugin must support multiple Docker-hosted browser clients without cache-ind
 
 ## Consequences
 
-The frontend must stop directly writing `favicon-cache.json` and `/data/public/auto-favicon`. The kernel RPC contract becomes the compatibility boundary, and migration must preserve existing cache entries and pinned icons.
+The frontend must stop directly writing the cache index or public icon files. The kernel RPC contract becomes the compatibility boundary. Per ADR 0004, Linkmark intentionally neither imports nor deletes data from the prior `auto-favicon` plugin.
 
-On first initialization, the cache authority imports well-formed legacy entries and their existing public files into private payload storage where readable. It retains usable pinned icons, uses each automatic entry's `fetchedAt` for its existing freshness semantics, and lets normal validation refresh or remove missing or unreadable automatic icons.
+On first initialization, the cache authority reads only its own `favicon-cache-v2.json` index and private payloads. It begins empty when those do not exist; old-plugin settings, entries, public files, and pinned icons remain untouched.
 
 Selecting a custom icon, restoring automatic resolution, deleting an entry, and clearing cache are workspace cache operations. The authority broadcasts the resulting state to connected frontend clients; clearing cache continues to retain pinned icons.
 
@@ -18,7 +18,7 @@ An explicit deletion, restore-automatic action, or cache clear invalidates older
 
 If the cache authority is starting, reloading, or unavailable, frontend rendering fails open: usable cached icons remain visible, cache misses do not block editing, and automatic requests remain silent. Explicit user actions surface actionable errors.
 
-The migration adds a development-only test runner and regression coverage for legacy import, scoped task deduplication, invalidated-task non-commit, pinned-icon retention, and frontend RPC fail-open behavior.
+The implementation adds a development-only test runner and regression coverage for legacy-data isolation, scoped task deduplication, invalidated-task non-commit, pinned-icon retention, and frontend RPC fail-open behavior.
 
 Docker browser end-to-end automation is intentionally outside this phase. Delivery evidence is limited to deterministic cache-service regression tests, TypeScript validation, and package-content checks; live Docker-browser behavior remains an explicit validation gap.
 

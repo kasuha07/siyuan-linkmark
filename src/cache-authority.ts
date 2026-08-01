@@ -52,12 +52,9 @@ export type CacheAuthorityOptions = {
   resolverVersion?: number;
   privateIconUrl?: (iconId: string) => string;
   onStateChange?: (cache: Record<string, CacheEntry>) => Promise<void> | void;
-  loadLegacyIcon?: (url: string) => Promise<{ bytes: ArrayBuffer; contentType: string } | undefined>;
-  removeLegacyIcon?: (url: string) => Promise<void>;
 };
 
 const CACHE_INDEX_FILE = "favicon-cache-v2.json";
-const LEGACY_CACHE_FILE = "favicon-cache.json";
 const ICON_DIRECTORY = "icons";
 const MAX_RESOLUTION_CONCURRENCY = 4;
 
@@ -94,29 +91,6 @@ export class KernelCacheAuthority {
       const stored = await this.storage.get(CACHE_INDEX_FILE);
       if (stored) {
         this.cache = parseCache(stored);
-      } else {
-        this.cache = parseCache(await this.storage.get(LEGACY_CACHE_FILE));
-        for (const [key, entry] of Object.entries(this.cache)) {
-          if (!entry.pinned && entry.source !== "generated monogram" && this.options.resolverVersion !== undefined) {
-            entry.resolverVersion = this.options.resolverVersion;
-          }
-          let legacyIcon: Awaited<ReturnType<NonNullable<CacheAuthorityOptions["loadLegacyIcon"]>>>;
-          try {
-            legacyIcon = await this.options.loadLegacyIcon?.(entry.url);
-          } catch {
-            // Legacy payload migration is best effort. A stale or unsupported
-            // public file must not prevent the cache authority from starting.
-            legacyIcon = undefined;
-          }
-          if (legacyIcon) {
-            const iconId = this.iconIdFor(key);
-            await this.storage.put(this.iconPath(iconId), bytesToBase64(legacyIcon.bytes));
-            entry.iconId = iconId;
-            entry.contentType = legacyIcon.contentType;
-            entry.url = this.privateIconUrl(iconId);
-          }
-        }
-        if (Object.keys(this.cache).length > 0) await this.persist();
       }
     })();
     return this.initializing;
@@ -351,7 +325,6 @@ export class KernelCacheAuthority {
   private async removePayload(entry: CacheEntry | undefined, replacementIconId?: string) {
     if (!entry || entry.iconId === replacementIconId) return;
     if (entry.iconId) await this.storage.remove(this.iconPath(entry.iconId));
-    else await this.options.removeLegacyIcon?.(entry.url);
   }
 
   private enqueueResolution<T>(operation: () => Promise<T>) {
@@ -432,7 +405,7 @@ export class KernelCacheAuthority {
   }
 
   private privateIconUrl(iconId: string) {
-    return (this.options.privateIconUrl ?? ((id) => `/api/plugin/private/auto-favicon/icon/${encodeURIComponent(id)}`))(iconId);
+    return (this.options.privateIconUrl ?? ((id) => `/api/plugin/private/siyuan-linkmark/icon/${encodeURIComponent(id)}`))(iconId);
   }
 }
 

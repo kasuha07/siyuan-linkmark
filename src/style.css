@@ -4,13 +4,13 @@
  * block IAL text such as {: style="..."}.
  */
 
-.auto-favicon-cache-actions {
+.siyuan-linkmark-cache-actions {
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.auto-favicon-cache-manager {
+.siyuan-linkmark-cache-manager {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -19,7 +19,7 @@
   padding: 16px;
 }
 
-.auto-favicon-cache-summary {
+.siyuan-linkmark-cache-summary {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -27,27 +27,27 @@
   gap: 8px 16px;
 }
 
-.auto-favicon-cache-summary code {
+.siyuan-linkmark-cache-summary code {
   color: var(--b3-theme-on-surface);
   font-size: 0.85em;
   word-break: break-all;
 }
 
-.auto-favicon-cache-list {
+.siyuan-linkmark-cache-list {
   min-height: 0;
   overflow: auto;
   border: 1px solid var(--b3-border-color);
   border-radius: var(--b3-border-radius);
 }
 
-.auto-favicon-cache-domain-heading {
+.siyuan-linkmark-cache-domain-heading {
   display: block;
   padding: 9px 12px 5px;
   color: var(--b3-theme-on-surface);
   background: var(--b3-theme-surface);
 }
 
-.auto-favicon-cache-row {
+.siyuan-linkmark-cache-row {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -55,40 +55,40 @@
   border-bottom: 1px solid var(--b3-border-color);
 }
 
-.auto-favicon-cache-row:last-child {
+.siyuan-linkmark-cache-row:last-child {
   border-bottom: 0;
 }
 
-.auto-favicon-cache-info {
+.siyuan-linkmark-cache-info {
   display: grid;
   flex: 1;
   min-width: 0;
   gap: 3px;
 }
 
-.auto-favicon-cache-info strong,
-.auto-favicon-cache-info span {
+.siyuan-linkmark-cache-info strong,
+.siyuan-linkmark-cache-info span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.auto-favicon-cache-info span {
+.siyuan-linkmark-cache-info span {
   color: var(--b3-theme-on-surface);
   font-size: 0.82em;
 }
 
-.auto-favicon-cache-row-actions {
+.siyuan-linkmark-cache-row-actions {
   flex: 0 0 auto;
   gap: 4px;
 }
 
-.auto-favicon-cache-empty {
+.siyuan-linkmark-cache-empty {
   padding: 28px 16px;
   text-align: center;
 }
 
-.auto-favicon-picker {
+.siyuan-linkmark-picker {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
@@ -97,36 +97,36 @@
   padding: 16px;
 }
 
-.auto-favicon-picker-controls {
+.siyuan-linkmark-picker-controls {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
 }
 
-.auto-favicon-picker-controls input[type="file"] {
+.siyuan-linkmark-picker-controls input[type="file"] {
   max-width: 240px;
 }
 
-.auto-favicon-picker-scope {
+.siyuan-linkmark-picker-scope {
   display: flex;
   align-items: center;
   gap: 8px;
   color: var(--b3-theme-on-surface);
 }
 
-.auto-favicon-picker-status {
+.siyuan-linkmark-picker-status {
   flex: 0 0 auto;
 }
 
-.auto-favicon-picker-hint {
+.siyuan-linkmark-picker-hint {
   padding: 8px 10px;
   color: var(--b3-theme-on-surface);
   background: var(--b3-theme-surface);
   border-radius: var(--b3-border-radius);
 }
 
-.auto-favicon-candidate-grid {
+.siyuan-linkmark-candidate-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   gap: 10px;
@@ -134,7 +134,7 @@
   overflow: auto;
 }
 
-.auto-favicon-candidate-card {
+.siyuan-linkmark-candidate-card {
   display: grid;
   justify-items: center;
   gap: 8px;
@@ -147,19 +147,19 @@
   cursor: pointer;
 }
 
-.auto-favicon-candidate-card:hover,
-.auto-favicon-candidate-card:focus {
+.siyuan-linkmark-candidate-card:hover,
+.siyuan-linkmark-candidate-card:focus {
   border-color: var(--b3-theme-primary);
   background: var(--b3-theme-primary-lightest);
 }
 
-.auto-favicon-candidate-card img {
+.siyuan-linkmark-candidate-card img {
   width: 48px;
   height: 48px;
   object-fit: contain;
 }
 
-.auto-favicon-candidate-source {
+.siyuan-linkmark-candidate-source {
   width: 100%;
   overflow: hidden;
   text-align: center;
@@ -167,7 +167,7 @@
   white-space: nowrap;
 }
 
-.auto-favicon-candidate-details {
+.siyuan-linkmark-candidate-details {
   color: var(--b3-theme-on-surface);
   font-size: 0.82em;
   line-height: 1.35;
@@ -175,24 +175,24 @@
 }
 
 @media (max-width: 600px) {
-  .auto-favicon-cache-manager {
+  .siyuan-linkmark-cache-manager {
     padding: 12px;
   }
 
-  .auto-favicon-cache-row {
+  .siyuan-linkmark-cache-row {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .auto-favicon-cache-row-actions {
+  .siyuan-linkmark-cache-row-actions {
     justify-content: flex-end;
   }
 
-  .auto-favicon-picker {
+  .siyuan-linkmark-picker {
     padding: 12px;
   }
 
-  .auto-favicon-picker-controls > * {
+  .siyuan-linkmark-picker-controls > * {
     flex: 1 1 100%;
     max-width: none !important;
   }

@@ -1,16 +1,16 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-# Auto Favicon 自动网站图标
+# Linkmark 链接印记
 
-Auto Favicon 自动为思源中的 HTTP/HTTPS 网页链接获取、显示并在本地缓存网站图标。无法获得真实 favicon 时，可以在本地生成彩色域名字母图标。
+链接印记自动为思源链接发现、显示并本地缓存网站图标。无法获得真实 favicon 时，可以在本地生成彩色域名字母图标。
 
-![Auto Favicon 启用前后对比](preview.png)
+![链接印记启用前后对比](preview.png)
 
 ## Fork 与核心差异
 
-本仓库 fork 自 [Acetab/auto-favicon](https://github.com/Acetab/auto-favicon)，并独立维护。与上游相比，用户可感知的核心差异为：
+链接印记独立于上游项目维护。用户可感知的核心差异为：
 
-- **独立渲染 Link Icon：** Auto Favicon 不再检测、保留或优先 Link Icon 的图标，而是独立渲染自身选定的图标。
+- **独立渲染图标：** 链接印记不检测、保留或优先其他插件的图标，而是独立渲染自身选定的图标。
 - **工作区共享缓存：** 图标获取、缓存策略和缓存管理由思源内核负责，在连接同一工作区的所有客户端中共享。
 
 ## 主要功能
@@ -71,8 +71,8 @@ Auto Favicon 自动为思源中的 HTTP/HTTPS 网页链接获取、显示并在�
 - 获取失败后，本次插件运行期间暂停重试 10 分钟。
 - 主动刷新失败时继续使用原有图标，不会先删除可用缓存。
 - 手动选择的图标会固定保存在本地，普通缓存清理和过期不会删除；恢复自动获取后才解除。
-- 图标文件位置：`工作空间/data/public/auto-favicon/`。
-- 缓存索引：`favicon-cache.json`，由思源插件数据接口管理；普通缓存只保留域名，已适配平台的缓存可额外保留 `doc`、`sheet`、`base` 或 NoCode 公开部署标识等稳定路由，不保存参数、锚点或标题。
+- 图标内容与 `favicon-cache-v2.json` 索引均保存在链接印记的插件私有存储中；普通缓存只保留域名，已适配平台的缓存可额外保留 `doc`、`sheet`、`base` 或 NoCode 公开部署标识等稳定路由，不保存参数、锚点或标题。
+- 链接印记不会导入或删除先前 `auto-favicon` 插件的设置、缓存项或固定图标。
 - 开启“暂停自动获取”后，已有及过期缓存继续显示，删除缓存后不会自动重建；手动刷新、更换候选和上传图片仍可使用。
 
 缓存管理支持重新获取当前文档、重新获取全部自动缓存域名、搜索缓存，以及单独刷新或删除某个域名。
@@ -102,27 +102,27 @@ Auto Favicon 自动为思源中的 HTTP/HTTPS 网页链接获取、显示并在�
 
 ## 安装与使用
 
-可直接在思源集市搜索 **Auto Favicon** 并安装；也可以把 `package.zip` 解压到 `工作空间/data/plugins/auto-favicon/`。启用插件，在设置中选择网络策略，然后使用顶部工具栏的 Auto Favicon 按钮执行常用操作。
+可直接在思源集市搜索 **Linkmark（链接印记）** 并安装；也可以把 `package.zip` 解压到 `工作空间/data/plugins/siyuan-linkmark/`。启用插件，在设置中选择网络策略，然后使用顶部工具栏的链接印记按钮执行常用操作。
 
 ## 问题反馈
 
-不方便访问 GitHub 的用户，可以直接在 [Auto Favicon 社区帖子](https://ld246.com/article/1785052610863)下回复；能够访问 GitHub 的用户也可以通过 [GitHub Issues](https://github.com/kasuha07/auto-favicon/issues)反馈。
+请仅通过新仓库的 [GitHub Issues](https://github.com/kasuha07/siyuan-linkmark/issues) 反馈问题和功能建议。
 
-反馈时请尽量附上 Auto Favicon 和思源版本、操作系统、出问题的公开网址、网络策略、图标服务与兜底设置，以及相关的 `[auto-favicon] Unable to cache` 控制台错误。发布前请移除私人网址、笔记内容、令牌和本地路径。
+反馈时请尽量附上链接印记和思源版本、操作系统、出问题的公开网址、网络策略、图标服务与兜底设置，以及相关的 `[siyuan-linkmark] Unable to cache` 控制台错误。发布前请移除私人网址、笔记内容、令牌和本地路径。
 
-## 致谢与许可
+## 致谢与鸣谢（Credits & Acknowledgements）
 
-本插件对链接前置图标的需求和展示思路受到[「链接图标」](https://github.com/chenshinshi/link-icon)启发，通过 **Vibe Coding** 完成，采用 [MIT License](LICENSE) 开源。
+链接印记是 [Acetab/auto-favicon](https://github.com/Acetab/auto-favicon) 的独立 fork。链接印记及其维护者与 Acetab 或上游项目不存在隶属、赞助或背书关系。
+
+链接前显示图标的思路另受到[「链接图标」](https://github.com/chenshinshi/link-icon)启发。链接印记未捆绑或再分发「链接图标」的代码、图标或其他资源。商标和平台图标的相关说明请见[第三方声明](THIRD_PARTY_NOTICES.md)。
+
+Acetab 与霞葉 (Kasuha) 的版权声明均予保留；链接印记采用 [MIT License](LICENSE) 开源。
 
 ## 最近更新
 
-### 0.6.0
+### Linkmark 0.1.0
 
-- 移除 Link Icon 专用设置和渲染逻辑；Auto Favicon 现在只用普通 CSS 层叠独立渲染所选图标。
+- 建立独立的链接印记品牌、仓库、软件包命名空间与版本线。
+- 在保留固定图标和隐私优先网络控制的同时，发现、显示并本地缓存网站图标。
 
-### 0.5.7
-
-- 对共享托管域名下的 NoCode 公开部署站点分别建立路径缓存，并发现各应用自行声明的 favicon。
-- 在回退到 `/favicon.ico` 或第三方服务前，补充探测 `/favicon.svg`、`/favicon.png` 和 `/apple-touch-icon.png` 等常见根目录图标。
-
-完整版本历史请查看 [GitHub Releases](https://github.com/kasuha07/auto-favicon/releases)。
+完整版本历史请查看 [GitHub Releases](https://github.com/kasuha07/siyuan-linkmark/releases)。

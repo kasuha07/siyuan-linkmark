@@ -10,7 +10,6 @@ import { ForwardProxyIconResolver, type KernelResolverPolicy } from "./kernel-re
 import { privateIconIdFromPath } from "./private-route";
 
 const POLICY_FILE = "cache-policy-v2.json";
-const LEGACY_SETTINGS_FILE = "settings.json";
 
 type CachePolicyState = CachePolicy & KernelResolverPolicy;
 
@@ -52,7 +51,7 @@ class KernelStorage implements CacheStorage {
   }
 }
 
-class AutoFaviconKernel {
+class LinkmarkKernel {
   private policy: CachePolicyState = { ...defaultPolicy };
   private authority?: KernelCacheAuthority;
   private resolver?: ForwardProxyIconResolver;
@@ -73,8 +72,6 @@ class AutoFaviconKernel {
         resolverVersion: 6,
         privateIconUrl: (iconId) => `/plugin/private/${siyuan.plugin.name}/icon/${encodeURIComponent(iconId)}`,
         onStateChange: async (cache) => siyuan.rpc.broadcast("cache.changed", { cache }),
-        loadLegacyIcon: this.loadLegacyIcon.bind(this),
-        removeLegacyIcon: this.removeLegacyIcon.bind(this),
       });
       await this.authority.initialize();
       await siyuan.rpc.bind("cache.snapshot", async () => this.requireAuthority().snapshot(), "Returns the authoritative favicon cache.");
@@ -109,7 +106,7 @@ class AutoFaviconKernel {
         }, resolved.contentType, resolved.bytes, replaceKey);
       }, "Downloads and pins a custom icon URL workspace-wide.");
     } catch (error) {
-      await siyuan.logger.error("Auto Favicon Kernel initialization failed", errorText(error)).catch(() => undefined);
+      await siyuan.logger.error("Linkmark Kernel initialization failed", errorText(error)).catch(() => undefined);
     }
   }
 
@@ -134,7 +131,7 @@ class AutoFaviconKernel {
 
   private async loadPolicy() {
     const storage = new KernelStorage();
-    const stored = await storage.get(POLICY_FILE) ?? await storage.get(LEGACY_SETTINGS_FILE);
+    const stored = await storage.get(POLICY_FILE);
     if (!stored) return { ...defaultPolicy };
     try {
       return { ...defaultPolicy, ...sanitizePolicy(JSON.parse(stored) as Partial<CachePolicyState>) };
@@ -151,7 +148,7 @@ class AutoFaviconKernel {
         method: "GET",
         timeout,
         contentType,
-        headers: [{ "User-Agent": "Mozilla/5.0 (compatible; SiYuan Auto Favicon/0.6)" }, { Accept: responseEncoding === "text" ? "text/html,application/xhtml+xml,application/json" : "image/avif,image/webp,image/*,*/*" }],
+        headers: [{ "User-Agent": "Mozilla/5.0 (compatible; SiYuan Linkmark/0.1.0)" }, { Accept: responseEncoding === "text" ? "text/html,application/xhtml+xml,application/json" : "image/avif,image/webp,image/*,*/*" }],
         payload: {},
         payloadEncoding: "text",
         responseEncoding,
@@ -161,26 +158,6 @@ class AutoFaviconKernel {
     const envelope = await response.json() as { code?: number; data?: { body?: string; contentType?: string; status?: number; url?: string } };
     if (envelope.code !== 0 || !envelope.data?.body || typeof envelope.data.status !== "number") return null;
     return { body: envelope.data.body, contentType: envelope.data.contentType, status: envelope.data.status, url: envelope.data.url };
-  }
-
-  private async loadLegacyIcon(url: string) {
-    if (!url.startsWith("/public/auto-favicon/")) return undefined;
-    const response = await siyuan.client.fetch("/api/file/getFile", {
-      method: "POST",
-      body: JSON.stringify({ path: `/data${url}` }),
-    });
-    if (!response.ok) return undefined;
-    const bytes = await response.arrayBuffer();
-    if (!bytes.byteLength) return undefined;
-    return { bytes, contentType: response.headers["Content-Type"]?.split(";", 1)[0] ?? "application/octet-stream" };
-  }
-
-  private async removeLegacyIcon(url: string) {
-    if (!url.startsWith("/public/auto-favicon/")) return;
-    await siyuan.client.fetch("/api/file/removeFile", {
-      method: "POST",
-      body: JSON.stringify({ path: `/data${url}` }),
-    });
   }
 
   private async handlePrivateRequest(request: kernel.IServerRequest): Promise<kernel.IHttpResponse> {
@@ -196,12 +173,12 @@ class AutoFaviconKernel {
   }
 
   private requireAuthority() {
-    if (!this.authority) throw new Error("Auto Favicon cache authority is not ready");
+    if (!this.authority) throw new Error("Linkmark cache authority is not ready");
     return this.authority;
   }
 
   private requireResolver() {
-    if (!this.resolver) throw new Error("Auto Favicon resolver is not ready");
+    if (!this.resolver) throw new Error("Linkmark resolver is not ready");
     return this.resolver;
   }
 }
@@ -238,4 +215,4 @@ function errorText(error: unknown) {
   }
 }
 
-new AutoFaviconKernel();
+new LinkmarkKernel();

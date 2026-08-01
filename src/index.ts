@@ -54,9 +54,8 @@ type Settings = {
 };
 
 const DISPLAY_SETTINGS_FILE = "display-settings-v2.json";
-const LEGACY_SETTINGS_FILE = "settings.json";
-const RUNTIME_STYLE_ID = "auto-favicon-runtime-style";
-const FEEDBACK_URL = "https://ld246.com/article/1785052610863";
+const RUNTIME_STYLE_ID = "siyuan-linkmark-runtime-style";
+const FEEDBACK_URL = "https://github.com/kasuha07/siyuan-linkmark/issues";
 const RESOLVER_VERSION = 6;
 const FAILURE_COOLDOWN = 10 * 60 * 1000;
 const RULE_RENDER_BATCH_DELAY = 16;
@@ -94,7 +93,7 @@ const defaultSettings: Settings = {
   cacheDays: 30,
 };
 
-export default class AutoFaviconPlugin extends Plugin {
+export default class LinkmarkPlugin extends Plugin {
   private settings: Settings = { ...defaultSettings };
   private cache: Record<string, CacheEntry> = {};
   private pendingDomains = new Set<string>();
@@ -120,11 +119,8 @@ export default class AutoFaviconPlugin extends Plugin {
   async onload() {
     this.addToolbar();
     const loadedDisplaySettings = await this.loadData(DISPLAY_SETTINGS_FILE);
-    const loadedSettings = loadedDisplaySettings && typeof loadedDisplaySettings === "object" && !Array.isArray(loadedDisplaySettings)
+    const saved = (loadedDisplaySettings && typeof loadedDisplaySettings === "object" && !Array.isArray(loadedDisplaySettings)
       ? loadedDisplaySettings
-      : await this.loadData(LEGACY_SETTINGS_FILE);
-    const saved = (loadedSettings && typeof loadedSettings === "object" && !Array.isArray(loadedSettings)
-      ? loadedSettings
       : {}) as Partial<Settings>;
     this.settings = {
       ...defaultSettings,
@@ -155,7 +151,7 @@ export default class AutoFaviconPlugin extends Plugin {
 
   private async callKernel<T>(method: string, ...args: unknown[]): Promise<T> {
     const call = this.kernel?.rpc.call?.[method];
-    if (!call) throw new Error("Auto Favicon kernel cache authority is unavailable");
+    if (!call) throw new Error("Linkmark kernel cache authority is unavailable");
     return call(...args) as Promise<T>;
   }
 
@@ -169,7 +165,7 @@ export default class AutoFaviconPlugin extends Plugin {
       this.applyCachePolicy(policy);
     } catch (error) {
       this.cache = {};
-      console.warn("[auto-favicon] Kernel cache authority is unavailable", error);
+      console.warn("[siyuan-linkmark] Kernel cache authority is unavailable", error);
     }
   }
 
@@ -439,7 +435,7 @@ export default class AutoFaviconPlugin extends Plugin {
     cacheDays.value = String(this.settings.cacheDays);
 
     const cacheActions = document.createElement("div");
-    cacheActions.className = "fn__flex auto-favicon-cache-actions";
+    cacheActions.className = "fn__flex siyuan-linkmark-cache-actions";
     const cacheCount = document.createElement("span");
     cacheCount.className = "b3-label__text";
     this.cacheCountElement = cacheCount;
@@ -581,7 +577,7 @@ export default class AutoFaviconPlugin extends Plugin {
   }
 
   private openToolbarMenu(event: MouseEvent) {
-    const menu = new Menu("auto-favicon-toolbar-menu");
+    const menu = new Menu("siyuan-linkmark-toolbar-menu");
     menu.addItem({
       type: "readonly",
       label: `${this.t("toolbarStatus")
@@ -793,17 +789,17 @@ export default class AutoFaviconPlugin extends Plugin {
   private openCacheManager() {
     const dialog = new Dialog({
       title: this.t("manageCache"),
-      content: '<div class="auto-favicon-cache-manager"></div>',
+      content: '<div class="siyuan-linkmark-cache-manager"></div>',
       width: "min(760px, 92vw)",
       height: "min(640px, 82vh)",
     });
-    const root = dialog.element.querySelector<HTMLElement>(".auto-favicon-cache-manager");
+    const root = dialog.element.querySelector<HTMLElement>(".siyuan-linkmark-cache-manager");
     if (!root) return;
 
     const render = () => {
       root.replaceChildren();
       const summary = document.createElement("div");
-      summary.className = "auto-favicon-cache-summary";
+      summary.className = "siyuan-linkmark-cache-summary";
       const count = document.createElement("strong");
       count.textContent = this.t("cacheCount").replace("{count}", String(Object.keys(this.cache).length));
       const path = document.createElement("code");
@@ -811,7 +807,7 @@ export default class AutoFaviconPlugin extends Plugin {
       summary.append(count, path);
 
       const actions = document.createElement("div");
-      actions.className = "fn__flex auto-favicon-cache-actions";
+      actions.className = "fn__flex siyuan-linkmark-cache-actions";
       actions.append(
         this.actionButton(this.t("refreshCurrent"), "b3-button b3-button--outline", () => {
           void this.refreshCurrentDocument().then(render);
@@ -829,7 +825,7 @@ export default class AutoFaviconPlugin extends Plugin {
       search.className = "b3-text-field fn__block";
       search.placeholder = this.t("cacheSearch");
       const list = document.createElement("div");
-      list.className = "auto-favicon-cache-list";
+      list.className = "siyuan-linkmark-cache-list";
       const renderList = () => {
         list.replaceChildren();
         const query = search.value.trim().toLowerCase();
@@ -838,7 +834,7 @@ export default class AutoFaviconPlugin extends Plugin {
           .sort(([a], [b]) => a.localeCompare(b));
         if (entries.length === 0) {
           const empty = document.createElement("div");
-          empty.className = "b3-label__text auto-favicon-cache-empty";
+          empty.className = "b3-label__text siyuan-linkmark-cache-empty";
           empty.textContent = this.t(Object.keys(this.cache).length === 0 ? "cacheEmpty" : "cacheNoMatches");
           list.append(empty);
           return;
@@ -848,15 +844,15 @@ export default class AutoFaviconPlugin extends Plugin {
           const scope = scopeFromCacheKey(key, entry.domain, entry.pathPrefix);
           if (scope.domain !== previousDomain) {
             const heading = document.createElement("strong");
-            heading.className = "auto-favicon-cache-domain-heading";
+            heading.className = "siyuan-linkmark-cache-domain-heading";
             heading.textContent = scope.domain;
             list.append(heading);
             previousDomain = scope.domain;
           }
           const row = document.createElement("div");
-          row.className = "auto-favicon-cache-row";
+          row.className = "siyuan-linkmark-cache-row";
           const info = document.createElement("div");
-          info.className = "auto-favicon-cache-info";
+          info.className = "siyuan-linkmark-cache-info";
           const name = document.createElement("strong");
           name.textContent = scope.routeKey
             ? this.t("cacheRouteName").replace("{type}", this.scopeTypeLabel(scope))
@@ -869,7 +865,7 @@ export default class AutoFaviconPlugin extends Plugin {
           meta.textContent = `${source} · ${new Date(entry.fetchedAt).toLocaleString()} · ${status}`;
           info.append(name, meta);
           const rowActions = document.createElement("div");
-          rowActions.className = "fn__flex auto-favicon-cache-row-actions";
+          rowActions.className = "fn__flex siyuan-linkmark-cache-row-actions";
           rowActions.append(this.actionButton(this.t("chooseIcon"), "b3-button b3-button--text", () => {
             const current = this.collectDocumentDomains(this.currentDocumentRoot()).get(scope.key);
             this.openIconPicker(scope, current?.targetUrl ?? entry.targetUrl ?? `https://${scope.domain}${scope.pathPrefix ?? "/"}`, render);
@@ -972,7 +968,7 @@ export default class AutoFaviconPlugin extends Plugin {
       showMessage(this.t("customIconSaved").replace("{domain}", scope.domain));
       return true;
     } catch (error) {
-      console.warn(`[auto-favicon] Unable to save custom icon for ${scope.key}`, error);
+      console.warn(`[siyuan-linkmark] Unable to save custom icon for ${scope.key}`, error);
       showMessage(this.t("customIconSaveFailed"));
       return false;
     }
@@ -1009,18 +1005,18 @@ export default class AutoFaviconPlugin extends Plugin {
     const objectUrls: string[] = [];
     const dialog = new Dialog({
       title: this.t("chooseIconFor").replace("{domain}", domain),
-      content: '<div class="auto-favicon-picker"></div>',
+      content: '<div class="siyuan-linkmark-picker"></div>',
       width: "min(720px, 92vw)",
       height: "min(620px, 82vh)",
       destroyCallback: () => objectUrls.forEach((url) => URL.revokeObjectURL(url)),
     });
-    const root = dialog.element.querySelector<HTMLElement>(".auto-favicon-picker");
+    const root = dialog.element.querySelector<HTMLElement>(".siyuan-linkmark-picker");
     if (!root) return;
 
     const sharedDomain = this.shareDomainFor(domain);
 
     const controls = document.createElement("div");
-    controls.className = "auto-favicon-picker-controls";
+    controls.className = "siyuan-linkmark-picker-controls";
     const fileInput = document.createElement("input");
     fileInput.type = "file";
     fileInput.accept = "image/png,image/jpeg,image/webp,image/gif,image/svg+xml,image/x-icon,.ico";
@@ -1053,19 +1049,19 @@ export default class AutoFaviconPlugin extends Plugin {
       scopeSelect.add(new Option(this.t("applyToSubdomains").replace("{domain}", sharedDomain), "subdomains"));
     }
     const shareRow = document.createElement("label");
-    shareRow.className = "auto-favicon-picker-scope";
+    shareRow.className = "siyuan-linkmark-picker-scope";
     const shareText = document.createElement("span");
     shareText.textContent = this.t("pinScopeTitle");
     shareRow.append(shareText, scopeSelect);
 
     const status = document.createElement("div");
-    status.className = "b3-label__text auto-favicon-picker-status";
+    status.className = "b3-label__text siyuan-linkmark-picker-status";
     status.textContent = this.t("loadingCandidates");
     const hint = document.createElement("div");
-    hint.className = "b3-label__text auto-favicon-picker-hint";
+    hint.className = "b3-label__text siyuan-linkmark-picker-hint";
     hint.textContent = this.t("candidateHint");
     const grid = document.createElement("div");
-    grid.className = "auto-favicon-candidate-grid";
+    grid.className = "siyuan-linkmark-candidate-grid";
     const loadPageCandidates = this.actionButton(
       this.t("loadPageCandidates"),
       "b3-button b3-button--outline",
@@ -1145,17 +1141,17 @@ export default class AutoFaviconPlugin extends Plugin {
           const blob = this.base64ToBlob(candidate.base64, candidate.contentType);
           const card = document.createElement("button");
           card.type = "button";
-          card.className = "auto-favicon-candidate-card";
+          card.className = "siyuan-linkmark-candidate-card";
           const preview = document.createElement("img");
           const objectUrl = URL.createObjectURL(blob);
           objectUrls.push(objectUrl);
           preview.src = objectUrl;
           preview.alt = candidate.source;
           const label = document.createElement("span");
-          label.className = "auto-favicon-candidate-source";
+          label.className = "siyuan-linkmark-candidate-source";
           label.textContent = this.resolverSourceLabel(candidate.source);
           const details = document.createElement("small");
-          details.className = "auto-favicon-candidate-details";
+          details.className = "siyuan-linkmark-candidate-details";
           const format = this.iconFormat(blob);
           const size = this.formatFileSize(blob.size);
           details.textContent = format === "SVG"
@@ -1173,7 +1169,7 @@ export default class AutoFaviconPlugin extends Plugin {
           grid.append(card);
         }
       } catch (error) {
-        console.warn(`[auto-favicon] Unable to discover candidates for ${selectedScope.key}`, error);
+        console.warn(`[siyuan-linkmark] Unable to discover candidates for ${selectedScope.key}`, error);
         if (root.isConnected && !urlButton.hasAttribute("disabled")) status.textContent = this.t("candidateLoadFailed");
       } finally {
         loadPageCandidates.removeAttribute("disabled");
@@ -1422,7 +1418,7 @@ export default class AutoFaviconPlugin extends Plugin {
     } catch (error) {
       this.updateCacheCount();
       if (invalidated()) return "failure";
-      console.warn(`[auto-favicon] Unable to cache ${scope.key}`, error);
+      console.warn(`[siyuan-linkmark] Unable to cache ${scope.key}`, error);
       this.failureReasons.set(scope.key, `${scope.key} · kernel resolve · ${this.errorText(error)}`);
       this.failedDomains.set(scope.key, Date.now());
       // Do not create a pseudo-element when no verified image exists, which

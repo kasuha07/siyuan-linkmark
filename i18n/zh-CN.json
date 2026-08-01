@@ -123,13 +123,13 @@
   "refreshFinished": "重新获取完成：远程图标 {success} 个，本地字母图标 {fallback} 个，失败 {failed} 个，跳过固定图标 {skipped} 个",
   "noRefreshableDomains": "当前只有固定的自定义图标，没有需要重新获取的域名",
   "cacheCleared": "自动图标缓存已清除，已固定的自定义图标保留",
-  "toolbarTitle": "自动网站图标",
+  "toolbarTitle": "链接印记",
   "toolbarStatus": "缓存 {count} 个图标项",
   "automaticFetchPausedStatus": "自动获取已暂停",
   "fullPageDiscoveryEnabledStatus": "已允许页面探测",
   "toolbarEnabled": "启用网站图标",
   "openSettings": "打开插件设置",
-  "feedback": "问题反馈",
-  "pluginEnabled": "自动网站图标已启用",
-  "pluginDisabled": "自动网站图标已停用"
+  "feedback": "GitHub Issues 问题反馈",
+  "pluginEnabled": "链接印记已启用",
+  "pluginDisabled": "链接印记已停用"
 }

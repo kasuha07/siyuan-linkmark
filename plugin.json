@@ -1,22 +1,22 @@
 {
-  "name": "auto-favicon",
-  "author": "Acetab",
-  "url": "https://github.com/Acetab/auto-favicon",
-  "version": "0.6.0",
+  "name": "siyuan-linkmark",
+  "author": "霞葉 (Kasuha)",
+  "url": "https://github.com/kasuha07/siyuan-linkmark",
+  "version": "0.1.0",
   "minAppVersion": "3.7.0",
   "kernels": ["all"],
   "backends": ["all"],
   "frontends": ["desktop", "mobile", "browser-desktop", "browser-mobile"],
   "disabledInPublish": false,
   "displayName": {
-    "default": "Auto Favicon",
-    "en": "Auto Favicon",
-    "zh-CN": "自动网站图标"
+    "default": "Linkmark",
+    "en": "Linkmark",
+    "zh-CN": "链接印记"
   },
   "description": {
-    "default": "Automatically fetch and cache favicons for SiYuan web links, with multiple sources and local monogram fallbacks.",
-    "en": "Automatically fetch and cache favicons for SiYuan web links, with multiple sources and local monogram fallbacks.",
-    "zh-CN": "自动为思源网页链接获取并缓存网站图标，支持多来源和本地字母兜底。"
+    "default": "Automatically discovers, displays, and locally caches website icons for SiYuan links.",
+    "en": "Automatically discovers, displays, and locally caches website icons for SiYuan links.",
+    "zh-CN": "自动为思源链接发现、显示并本地缓存网站图标。"
   },
   "readme": {
     "default": "README.md",
@@ -27,5 +27,5 @@
     "openCollective": "",
     "custom": []
   },
-  "keywords": ["网站图标", "自动图标", "网页链接", "外链", "favicon", "链接", "website icon", "Vibe Coding"]
+  "keywords": ["链接印记", "网站图标", "自动图标", "网页链接", "外链", "favicon", "链接", "website icon", "Linkmark"]
 }

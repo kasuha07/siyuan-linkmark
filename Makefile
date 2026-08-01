@@ -1,7 +1,7 @@
-SIYUAN_CONTAINER ?= auto-favicon-siyuan-dev
+SIYUAN_CONTAINER ?= siyuan-linkmark-siyuan-dev
 SIYUAN_IMAGE ?= b3log/siyuan:latest
 SIYUAN_PORT ?= 6806
-SIYUAN_ACCESS_AUTH_CODE ?= auto-favicon-dev
+SIYUAN_ACCESS_AUTH_CODE ?= siyuan-linkmark-dev
 SIYUAN_WORKSPACE ?= $(CURDIR)/dev/siyuan-workspace
 DIST_DIR := $(CURDIR)/dist
 
@@ -20,7 +20,7 @@ dev-container:
 		docker run --detach \
 			--name "$(SIYUAN_CONTAINER)" \
 			--publish "127.0.0.1:$(SIYUAN_PORT):6806" \
-			--volume "$(DIST_DIR):/siyuan/workspace/data/plugins/auto-favicon" \
+			--volume "$(DIST_DIR):/siyuan/workspace/data/plugins/siyuan-linkmark" \
 			--volume "$(SIYUAN_WORKSPACE):/siyuan/workspace" \
 			"$(SIYUAN_IMAGE)" serve \
 			--workspace=/siyuan/workspace \
