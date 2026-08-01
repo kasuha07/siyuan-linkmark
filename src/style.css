@@ -174,30 +174,6 @@
   text-align: center;
 }
 
-.auto-favicon-debug-report {
-  display: grid;
-  gap: 12px;
-  min-height: 0;
-  padding: 16px;
-}
-
-.auto-favicon-debug-report p {
-  margin: 0;
-}
-
-.auto-favicon-debug-report pre {
-  min-height: 0;
-  margin: 0;
-  padding: 12px;
-  overflow: auto;
-  color: var(--b3-theme-on-background);
-  background: var(--b3-theme-surface);
-  border: 1px solid var(--b3-border-color);
-  border-radius: var(--b3-border-radius);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 @media (max-width: 600px) {
   .auto-favicon-cache-manager {
     padding: 12px;

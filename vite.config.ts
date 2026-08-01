@@ -2,10 +2,7 @@ import { resolve } from "node:path";
 import { defineConfig } from "vite";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 
-export default defineConfig(({ mode }) => ({
-  define: {
-    __AUTO_FAVICON_DEBUG__: JSON.stringify(mode === "debug"),
-  },
+export default defineConfig({
   plugins: [
     viteStaticCopy({
       targets: [
@@ -21,7 +18,7 @@ export default defineConfig(({ mode }) => ({
     }),
   ],
   build: {
-    outDir: mode === "debug" ? "dist-debug" : "dist",
+    outDir: "dist",
     emptyOutDir: true,
     lib: {
       entry: resolve(__dirname, "src/index.ts"),
@@ -37,4 +34,4 @@ export default defineConfig(({ mode }) => ({
       },
     },
   },
-}));
+});

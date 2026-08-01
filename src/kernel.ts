@@ -1,7 +1,6 @@
 import type * as kernel from "siyuan/kernel";
 import {
   KernelCacheAuthority,
-  type CacheDiagnostic,
   type CacheEntry,
   type CachePolicy,
   type CacheStorage,
@@ -57,8 +56,6 @@ class AutoFaviconKernel {
   private policy: CachePolicyState = { ...defaultPolicy };
   private authority?: KernelCacheAuthority;
   private resolver?: ForwardProxyIconResolver;
-  private kernelReady = false;
-  private initializationError?: string;
 
   constructor() {
     siyuan.plugin.lifecycle.onload = this.onload.bind(this);
@@ -67,9 +64,6 @@ class AutoFaviconKernel {
   }
 
   private async onload() {
-    if (__AUTO_FAVICON_DEBUG__) {
-      await siyuan.rpc.bind("cache.debug.status", async () => ({ ready: this.kernelReady, error: this.initializationError }), "Debug-only: returns Kernel initialization state.");
-    }
     try {
       this.policy = await this.loadPolicy();
       this.resolver = new ForwardProxyIconResolver(this.forward.bind(this), () => this.policy);
@@ -113,25 +107,13 @@ class AutoFaviconKernel {
           includeSubdomains,
         }, resolved.contentType, resolved.bytes, replaceKey);
       }, "Downloads and pins a custom icon URL workspace-wide.");
-      if (__AUTO_FAVICON_DEBUG__) {
-        await siyuan.rpc.bind("cache.debug.resolve", async (scope: LinkScope) => {
-          try {
-            return await this.requireAuthority().diagnose(normalizeScope(scope));
-          } catch (error) {
-            return failedDiagnostic("initializing", error);
-          }
-        }, "Debug-only: resolves and commits one favicon while returning its failure stage.");
-      }
-      this.kernelReady = true;
     } catch (error) {
-      this.initializationError = errorText(error);
-      await siyuan.logger.error("Auto Favicon Kernel initialization failed", this.initializationError).catch(() => undefined);
+      await siyuan.logger.error("Auto Favicon Kernel initialization failed", errorText(error)).catch(() => undefined);
     }
   }
 
   private async onunload() {
     const methods = ["cache.snapshot", "cache.get-or-queue", "cache.remove", "cache.clear", "cache.clear-generated", "cache.policy.get", "cache.policy.set", "cache.pin", "cache.candidates", "cache.pin-url"];
-    if (__AUTO_FAVICON_DEBUG__) methods.push("cache.debug.status", "cache.debug.resolve");
     for (const method of methods) {
       await siyuan.rpc.unbind(method);
     }
@@ -240,10 +222,6 @@ function sanitizePolicy(policy: Partial<CachePolicyState>) {
 
 function notFound(): kernel.IHttpResponse {
   return { statusCode: 404, body: { string: { format: "Not found" } } };
-}
-
-function failedDiagnostic(stage: CacheDiagnostic["stage"], error: unknown): CacheDiagnostic {
-  return { outcome: "failed", stage, error: errorText(error) };
 }
 
 function errorText(error: unknown) {

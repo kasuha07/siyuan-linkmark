@@ -114,12 +114,6 @@ Auto Favicon 自动为思源中的 HTTP/HTTPS 网页链接获取、显示并在�
 
 可直接在思源集市搜索 **Auto Favicon** 并安装；也可以把 `package.zip` 解压到 `工作空间/data/plugins/auto-favicon/`。启用插件，在设置中选择网络和显示策略，然后使用顶部工具栏的 Auto Favicon 按钮执行常用操作。
 
-## 开发调试
-
-执行 `npm run build:debug` 会生成可单独安装的 `dist-debug/` 调试包。它会在顶部工具栏增加“**调试：诊断当前文档**”，报告会先检查 Kernel 初始化，再说明失败发生在解析、私有图标存储、缓存索引写入、旧图标清理还是缓存变更广播，并保留 Kernel 未包装的错误。
-
-诊断操作会执行与手动刷新相同的解析和缓存写入路径，因此可能更新非固定缓存。该功能不会出现在 `npm run build` 的正式包中，也不得发布到集市；分享报告前请检查其中的网址和错误详情。
-
 ## 问题反馈
 
 不方便访问 GitHub 的用户，可以直接在 [Auto Favicon 社区帖子](https://ld246.com/article/1785052610863)下回复；能够访问 GitHub 的用户也可以通过 [GitHub Issues](https://github.com/Acetab/auto-favicon/issues)反馈。

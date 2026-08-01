@@ -35,15 +35,6 @@ export type ResolvedIcon = {
   source: string;
 };
 
-export type CacheDiagnostic = {
-  outcome: "success" | "no-icon" | "invalidated" | "skipped-pinned" | "failed";
-  stage: "initializing" | "resolving" | "writing payload" | "writing cache index" | "cleaning previous payload" | "broadcasting cache change";
-  source?: string;
-  contentType?: string;
-  byteLength?: number;
-  error?: string;
-};
-
 export interface CacheStorage {
   get(path: string): Promise<string | undefined>;
   put(path: string, content: string): Promise<void>;
@@ -150,36 +141,6 @@ export class KernelCacheAuthority {
     return task;
   }
 
-  /**
-   * Runs the ordinary resolution and commit path while preserving the stage
-   * that failed. This is intentionally exposed only by the debug kernel build.
-   */
-  async diagnose(scope: LinkScope): Promise<CacheDiagnostic> {
-    let stage: CacheDiagnostic["stage"] = "initializing";
-    try {
-      await this.initialize();
-      if (this.cache[scope.key]?.pinned) return { outcome: "skipped-pinned", stage };
-      const generation = this.generationFor(scope.key);
-      return await this.enqueueResolution(async () => {
-        if (generation !== this.generationFor(scope.key)) return { outcome: "invalidated", stage };
-        stage = "resolving";
-        const resolved = await this.resolver.resolve(scope);
-        if (!resolved) return { outcome: "no-icon", stage };
-        const entry = await this.commitResolved(scope, resolved, generation, (nextStage) => { stage = nextStage; });
-        if (!entry) return { outcome: "invalidated", stage };
-        return {
-          outcome: "success",
-          stage: "broadcasting cache change",
-          source: resolved.source,
-          contentType: resolved.contentType,
-          byteLength: resolved.bytes.byteLength,
-        };
-      });
-    } catch (error) {
-      return { outcome: "failed", stage, error: errorText(error) };
-    }
-  }
-
   async putPinned(scope: LinkScope, entry: CacheEntry, contentType: string, bytes: ArrayBuffer, replaceKey?: string) {
     await this.initialize();
     this.invalidate(scope.key);
@@ -268,13 +229,11 @@ export class KernelCacheAuthority {
     scope: LinkScope,
     resolved: ResolvedIcon,
     generation: number,
-    onStage?: (stage: Exclude<CacheDiagnostic["stage"], "initializing" | "resolving">) => void,
   ) {
     if (generation !== this.generationFor(scope.key)) return null;
     const previous = this.cache[scope.key];
     if (previous?.pinned) return copyEntry(previous);
     const iconId = this.nextIconId(scope.key);
-    onStage?.("writing payload");
     await this.storage.put(this.iconPath(iconId), bytesToBase64(resolved.bytes));
     if (generation !== this.generationFor(scope.key)) {
       await this.storage.remove(this.iconPath(iconId));
@@ -292,11 +251,8 @@ export class KernelCacheAuthority {
       contentType: resolved.contentType,
       resolverVersion: this.options.resolverVersion,
     };
-    onStage?.("writing cache index");
     await this.persist();
-    onStage?.("cleaning previous payload");
     if (previous?.iconId && previous.iconId !== iconId) await this.storage.remove(this.iconPath(previous.iconId));
-    onStage?.("broadcasting cache change");
     await this.notify();
     return copyEntry(this.cache[scope.key]);
   }
@@ -377,14 +333,6 @@ function copyEntry(entry: CacheEntry): CacheEntry {
   return { ...entry };
 }
 
-function errorText(error: unknown) {
-  if (error instanceof Error) return error.stack ?? `${error.name}: ${error.message}`;
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return String(error);
-  }
-}
 
 function bytesToBase64(bytes: ArrayBuffer) {
   return Buffer.from(bytes).toString("base64");

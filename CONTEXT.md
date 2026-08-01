@@ -67,7 +67,3 @@ _Avoid_: public static icon URL, direct storage path
 **In-flight task**:
 A kernel-resident favicon resolution task that may continue after a frontend closes but is cancelled when the kernel plugin stops or reloads.
 _Avoid_: durable job, resumable task
-
-**Debug build**:
-A separately installed developer package that exposes diagnostics for the normal workspace cache operation and is never the marketplace release artifact.
-_Avoid_: production debug switch, user setting

@@ -613,24 +613,6 @@ export default class AutoFaviconPlugin extends Plugin {
       label: this.t("refreshCurrent"),
       click: () => void this.refreshCurrentDocument(),
     });
-    if (__AUTO_FAVICON_DEBUG__) {
-      menu.addItem({
-        label: this.t("debugDiagnoseCurrent"),
-        click: () => {
-          void import("./debug-ui").then(({ diagnoseCurrentDocument }) => diagnoseCurrentDocument({
-            domains: new Map([...this.collectDocumentDomains(this.currentDocumentRoot())]
-              .map(([key, { scope, targetUrl }]) => [key, { scope, targetUrl }])),
-            callKernel: this.callKernel.bind(this),
-            sanitizeTargetUrl: this.sanitizeTargetUrl.bind(this),
-            replaceCache: (cache) => { this.cache = cache as Record<string, CacheEntry>; },
-            rebuildRules: this.rebuildRules.bind(this),
-            errorText: this.errorText.bind(this),
-            t: this.t.bind(this),
-            actionButton: this.actionButton.bind(this),
-          }));
-        },
-      });
-    }
     menu.addItem({
       label: this.t("manageCache"),
       click: () => this.openCacheManager(),

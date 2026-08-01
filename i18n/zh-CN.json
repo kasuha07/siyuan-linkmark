@@ -137,11 +137,5 @@
   "feedback": "问题反馈",
   "pluginEnabled": "自动网站图标已启用",
   "pluginDisabled": "自动网站图标已停用",
-  "modeChanged": "显示策略已切换为：{mode}",
-  "debugDiagnoseCurrent": "调试：诊断当前文档",
-  "debugReportTitle": "Auto Favicon 调试报告",
-  "debugReportHint": "此功能仅存在于调试包，会执行与正常获取相同的解析和缓存写入流程。分享前请检查并移除网址或错误详情中的敏感信息。",
-  "debugCopyReport": "复制报告",
-  "debugReportCopied": "调试报告已复制",
-  "debugCopyFailed": "无法复制调试报告"
+  "modeChanged": "显示策略已切换为：{mode}"
 }

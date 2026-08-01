@@ -120,36 +120,6 @@ describe("KernelCacheAuthority", () => {
     expect(resolve).not.toHaveBeenCalled();
   });
 
-  it("reports the exact cache stage when a diagnostic refresh cannot write its payload", async () => {
-    const storage = new MemoryStorage();
-    storage.failNextPut = true;
-    const authority = new KernelCacheAuthority(storage, {
-      resolve: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer, contentType: "image/png", source: "test resolver" }),
-    }, () => 100);
-
-    await expect(authority.diagnose(scope())).resolves.toMatchObject({
-      outcome: "failed",
-      stage: "writing payload",
-      error: expect.stringContaining("simulated storage failure"),
-    });
-    expect(authority.snapshot()).toEqual({});
-  });
-
-  it("records a successful diagnostic refresh after the normal cache commit", async () => {
-    const authority = new KernelCacheAuthority(new MemoryStorage(), {
-      resolve: async () => ({ bytes: new Uint8Array([1]).buffer, contentType: "image/png", source: "test resolver" }),
-    }, () => 100);
-
-    await expect(authority.diagnose(scope())).resolves.toMatchObject({
-      outcome: "success",
-      stage: "broadcasting cache change",
-      source: "test resolver",
-      contentType: "image/png",
-      byteLength: 1,
-    });
-    expect(authority.snapshot()["example.com"]).toMatchObject({ source: "test resolver" });
-  });
-
   it("broadcasts isolated cache snapshots without structuredClone in the kernel runtime", async () => {
     const received: Record<string, CacheEntry>[] = [];
     vi.stubGlobal("structuredClone", undefined);
