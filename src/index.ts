@@ -1,11 +1,8 @@
 import { confirm, Dialog, Menu, Plugin, Setting, showMessage } from "siyuan";
 import "./style.css";
 import {
-  discoverIconCandidates,
   isDecodableImage,
   parentDomainOf,
-  resolveBestIcon,
-  resolveIconUrl,
   type FallbackMode,
   type MonogramColorMode,
   type MonogramShape,
@@ -13,7 +10,7 @@ import {
   type ProviderPreset,
   type ResolverMode,
 } from "./icon-resolver";
-import { safePageDiscoveryUrl, scopeForUrl, scopeFromCacheKey, scopeMatchTarget, type LinkScope } from "./url-scope";
+import { scopeForUrl, scopeFromCacheKey, scopeMatchTarget, type LinkScope } from "./url-scope";
 
 type CacheEntry = {
   url: string;
@@ -51,15 +48,12 @@ type Settings = {
   cacheDays: number;
 };
 
-const SETTINGS_FILE = "settings.json";
-const CACHE_FILE = "favicon-cache.json";
-const PUBLIC_DIR = "/data/public/auto-favicon";
-const PUBLIC_URL = "/public/auto-favicon";
+const DISPLAY_SETTINGS_FILE = "display-settings-v2.json";
+const LEGACY_SETTINGS_FILE = "settings.json";
 const RUNTIME_STYLE_ID = "auto-favicon-runtime-style";
 const FEEDBACK_URL = "https://ld246.com/article/1785052610863";
 const RESOLVER_VERSION = 6;
 const FAILURE_COOLDOWN = 10 * 60 * 1000;
-const MAX_CONCURRENT_FETCHES = 4;
 
 const defaultSettings: Settings = {
   enabled: true,
@@ -99,9 +93,6 @@ export default class AutoFaviconPlugin extends Plugin {
   private enabledInput?: HTMLInputElement;
   private linkIconModeSelect?: HTMLSelectElement;
   private cacheCountElement?: HTMLElement;
-  private activeFetches = 0;
-  private fetchWaiters: Array<() => void> = [];
-  private cacheSaveQueue: Promise<void> = Promise.resolve();
   private failureReasons = new Map<string, string>();
   private automaticFetchGeneration = 0;
   private cacheGeneration = 0;
@@ -109,7 +100,10 @@ export default class AutoFaviconPlugin extends Plugin {
 
   async onload() {
     this.addToolbar();
-    const loadedSettings = await this.loadData(SETTINGS_FILE);
+    const loadedDisplaySettings = await this.loadData(DISPLAY_SETTINGS_FILE);
+    const loadedSettings = loadedDisplaySettings && typeof loadedDisplaySettings === "object" && !Array.isArray(loadedDisplaySettings)
+      ? loadedDisplaySettings
+      : await this.loadData(LEGACY_SETTINGS_FILE);
     const saved = (loadedSettings && typeof loadedSettings === "object" && !Array.isArray(loadedSettings)
       ? loadedSettings
       : {}) as Partial<Settings> & { preferDynamic?: boolean };
@@ -119,12 +113,8 @@ export default class AutoFaviconPlugin extends Plugin {
       linkIconMode: saved.linkIconMode ?? (saved.preferDynamic ? "auto" : "smart"),
       monogramOverrides: { ...defaultSettings.monogramOverrides, ...(saved.monogramOverrides ?? {}) },
     };
-    const loadedCache = await this.loadData(CACHE_FILE);
-    this.cache = loadedCache && typeof loadedCache === "object" && !Array.isArray(loadedCache)
-      ? loadedCache as Record<string, CacheEntry>
-      : {};
-    await this.sanitizeCachedTargets();
-    await this.migrateCacheEntries();
+    await this.loadKernelState();
+    await this.subscribeToKernelChanges();
     this.addSetting();
     await this.rebuildRules();
     this.startObserver();
@@ -144,13 +134,66 @@ export default class AutoFaviconPlugin extends Plugin {
     return String(this.i18n[key] ?? key);
   }
 
-  private saveCache() {
-    const snapshot = structuredClone(this.cache);
-    const save = this.cacheSaveQueue
-      .catch(() => undefined)
-      .then(() => this.saveData(CACHE_FILE, snapshot));
-    this.cacheSaveQueue = save;
-    return save;
+  private async callKernel<T>(method: string, ...args: unknown[]): Promise<T> {
+    const call = this.kernel?.rpc.call?.[method];
+    if (!call) throw new Error("Auto Favicon kernel cache authority is unavailable");
+    return call(...args) as Promise<T>;
+  }
+
+  private async loadKernelState() {
+    try {
+      const [cache, policy] = await Promise.all([
+        this.callKernel<Record<string, CacheEntry>>("cache.snapshot"),
+        this.callKernel<Partial<Settings>>("cache.policy.get"),
+      ]);
+      this.cache = cache && typeof cache === "object" ? cache : {};
+      this.applyCachePolicy(policy);
+    } catch (error) {
+      this.cache = {};
+      console.warn("[auto-favicon] Kernel cache authority is unavailable", error);
+    }
+  }
+
+  private async subscribeToKernelChanges() {
+    const bind = this.kernel?.rpc.bind;
+    if (!bind) return;
+    await bind("cache.changed", async (params) => {
+      const cache = params?.cache ?? params?.params?.cache;
+      if (!cache || typeof cache !== "object") return;
+      this.cache = cache as Record<string, CacheEntry>;
+      await this.rebuildRules();
+    });
+    await bind("cache.policy.changed", async (params) => {
+      this.applyCachePolicy(params?.policy ?? params?.params?.policy);
+    });
+  }
+
+  private applyCachePolicy(policy: Partial<Settings> | undefined) {
+    if (!policy || typeof policy !== "object") return;
+    const keys: Array<keyof Settings> = [
+      "pauseAutomaticFetch", "allowFullPageDiscovery", "provider", "providerPreset", "resolverMode", "fallbackMode",
+      "monogramColorMode", "monogramPrimary", "monogramSecondary", "monogramText", "monogramShape", "monogramOverrides", "cacheDays",
+    ];
+    for (const key of keys) {
+      if (policy[key] !== undefined) this.settings[key] = policy[key] as never;
+    }
+  }
+
+  private async saveDisplaySettings() {
+    const { enabled, linkIconMode, iconSize } = this.settings;
+    await this.saveData(DISPLAY_SETTINGS_FILE, { enabled, linkIconMode, iconSize });
+  }
+
+  private async saveCachePolicy() {
+    const {
+      pauseAutomaticFetch, allowFullPageDiscovery, provider, providerPreset, resolverMode, fallbackMode,
+      monogramColorMode, monogramPrimary, monogramSecondary, monogramText, monogramShape, monogramOverrides, cacheDays,
+    } = this.settings;
+    const policy = await this.callKernel<Partial<Settings>>("cache.policy.set", {
+      pauseAutomaticFetch, allowFullPageDiscovery, provider, providerPreset, resolverMode, fallbackMode,
+      monogramColorMode, monogramPrimary, monogramSecondary, monogramText, monogramShape, monogramOverrides, cacheDays,
+    });
+    this.applyCachePolicy(policy);
   }
 
   private sanitizeTargetUrl(targetUrl: string, domain: string) {
@@ -161,50 +204,6 @@ export default class AutoFaviconPlugin extends Plugin {
       // Fall through to a safe domain-only URL.
     }
     return `https://${domain}/`;
-  }
-
-  private async sanitizeCachedTargets() {
-    let changed = false;
-    for (const [key, entry] of Object.entries(this.cache)) {
-      const domain = entry.domain ?? key.split("::")[0];
-      if (entry.domain !== domain) {
-        entry.domain = domain;
-        changed = true;
-      }
-      if (!entry.targetUrl) continue;
-      const sanitized = this.sanitizeTargetUrl(entry.targetUrl, domain);
-      if (entry.targetUrl !== sanitized) {
-        entry.targetUrl = sanitized;
-        changed = true;
-      }
-    }
-    if (changed) await this.saveCache();
-  }
-
-  private async migrateCacheEntries() {
-    let changed = false;
-    for (const entry of Object.values(this.cache)) {
-      if (entry.pinned || entry.resolverVersion === RESOLVER_VERSION) continue;
-      if (entry.source !== "generated monogram") {
-        entry.resolverVersion = RESOLVER_VERSION;
-        changed = true;
-      }
-    }
-    if (changed) await this.saveCache();
-  }
-
-  private async acquireFetchSlot() {
-    if (this.activeFetches < MAX_CONCURRENT_FETCHES) {
-      this.activeFetches += 1;
-      return;
-    }
-    await new Promise<void>((resolve) => this.fetchWaiters.push(resolve));
-  }
-
-  private releaseFetchSlot() {
-    const next = this.fetchWaiters.shift();
-    if (next) next();
-    else this.activeFetches -= 1;
   }
 
   private addSetting() {
@@ -465,11 +464,12 @@ export default class AutoFaviconPlugin extends Plugin {
         this.settings.monogramOverrides = { ...draftOverrides };
         this.settings.iconSize = this.clamp(Number(iconSize.value), 0.7, 1.8, 1);
         this.settings.cacheDays = this.clamp(Number(cacheDays.value), 0, 365, 30);
+        await this.saveDisplaySettings();
+        await this.saveCachePolicy();
         if (previousMonogramSignature !== this.monogramSignature(this.settings)) {
           await this.invalidateGeneratedMonograms();
         }
         if (!wasPaused && this.settings.pauseAutomaticFetch) this.automaticFetchGeneration += 1;
-        await this.saveData(SETTINGS_FILE, this.settings);
         await this.rebuildRules();
         if (this.settings.enabled && !this.settings.pauseAutomaticFetch) this.scheduleScan();
       },
@@ -653,7 +653,7 @@ export default class AutoFaviconPlugin extends Plugin {
   private async setEnabled(enabled: boolean) {
     this.settings.enabled = enabled;
     if (this.enabledInput) this.enabledInput.checked = enabled;
-    await this.saveData(SETTINGS_FILE, this.settings);
+    await this.saveDisplaySettings();
     await this.rebuildRules();
     if (enabled && !this.settings.pauseAutomaticFetch) this.scheduleScan();
     showMessage(this.t(enabled ? "pluginEnabled" : "pluginDisabled"));
@@ -663,7 +663,7 @@ export default class AutoFaviconPlugin extends Plugin {
     if (this.settings.linkIconMode === mode) return;
     this.settings.linkIconMode = mode;
     if (this.linkIconModeSelect) this.linkIconModeSelect.value = mode;
-    await this.saveData(SETTINGS_FILE, this.settings);
+    await this.saveDisplaySettings();
     await this.rebuildRules();
     this.scheduleScan();
     showMessage(this.t("modeChanged").replace("{mode}", this.t(mode === "smart" ? "linkIconSmart" : "linkIconAuto")));
@@ -771,14 +771,12 @@ export default class AutoFaviconPlugin extends Plugin {
     showMessage(`${summary}${details}`);
   }
 
-  private async removeCachedDomain(key: string, save = true) {
-    const entry = this.cache[key];
-    if (entry) await this.removeCachedFile(entry.url);
-    delete this.cache[key];
+  private async removeCachedDomain(key: string) {
+    await this.callKernel("cache.remove", key);
+    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.delete(key);
     this.iconRules.delete(key);
     this.forceDomains.delete(key);
-    if (save) await this.saveCache();
     this.renderRules();
     this.updateCacheCount();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
@@ -801,7 +799,7 @@ export default class AutoFaviconPlugin extends Plugin {
       const count = document.createElement("strong");
       count.textContent = this.t("cacheCount").replace("{count}", String(Object.keys(this.cache).length));
       const path = document.createElement("code");
-      path.textContent = "workspace/data/public/auto-favicon/";
+      path.textContent = "plugin private icon storage";
       summary.append(count, path);
 
       const actions = document.createElement("div");
@@ -937,14 +935,15 @@ export default class AutoFaviconPlugin extends Plugin {
     }
     const pending = this.pendingFetches.get(selectedScope.key);
     if (pending) await pending.promise;
-    const previous = this.cache[scope.key];
-    const replaced = selectedScope.key === scope.key ? undefined : this.cache[selectedScope.key];
-    let storedUrl: string | undefined;
     try {
-      storedUrl = await this.storeIcon(scope.key, blob, `-custom-${Date.now()}`);
-      if (!await this.isStoredIconUsable(storedUrl)) throw new Error("custom icon could not be loaded back from SiYuan");
-      this.cache[scope.key] = {
-        url: storedUrl,
+      const selected = await this.callKernel<CacheEntry>("cache.pin", {
+        key: scope.key,
+        domain: scope.domain,
+        targetUrl: this.sanitizeTargetUrl(targetUrl, scope.domain),
+        routeKey: scope.routeKey,
+        pathPrefix: scope.pathPrefix,
+      }, {
+        url: "",
         fetchedAt: Date.now(),
         resolverVersion: RESOLVER_VERSION,
         source,
@@ -954,18 +953,9 @@ export default class AutoFaviconPlugin extends Plugin {
         pathPrefix: scope.pathPrefix,
         pinned: true,
         includeSubdomains,
-      };
+      }, blob.type || "image/png", await this.blobToBase64(blob), selectedScope.key);
+      this.cache[scope.key] = selected;
       if (selectedScope.key !== scope.key) delete this.cache[selectedScope.key];
-      try {
-        await this.saveCache();
-      } catch (error) {
-        if (previous) this.cache[scope.key] = previous;
-        else delete this.cache[scope.key];
-        if (replaced) this.cache[selectedScope.key] = replaced;
-        throw error;
-      }
-      if (previous && previous.url !== storedUrl) await this.removeCachedFile(previous.url);
-      if (replaced && replaced.url !== storedUrl && replaced.url !== previous?.url) await this.removeCachedFile(replaced.url);
       this.failedDomains.delete(scope.key);
       this.failedDomains.delete(selectedScope.key);
       await this.rebuildRules();
@@ -974,29 +964,32 @@ export default class AutoFaviconPlugin extends Plugin {
       showMessage(this.t("customIconSaved").replace("{domain}", scope.domain));
       return true;
     } catch (error) {
-      if (storedUrl && storedUrl !== previous?.url) {
-        try {
-          await this.removeCachedFile(storedUrl);
-        } catch {
-          // Keep the original error as the useful diagnostic.
-        }
-      }
-      if (previous) this.cache[scope.key] = previous;
-      else delete this.cache[scope.key];
-      if (replaced) this.cache[selectedScope.key] = replaced;
       console.warn(`[auto-favicon] Unable to save custom icon for ${scope.key}`, error);
       showMessage(this.t("customIconSaveFailed"));
       return false;
     }
   }
 
+  private async blobToBase64(blob: Blob) {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    let binary = "";
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary);
+  }
+
+  private base64ToBlob(base64: string, contentType: string) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+    return new Blob([bytes], { type: contentType });
+  }
+
   private async restoreAutomaticIcon(key: string) {
     const entry = this.cache[key];
     if (!entry?.pinned) return;
-    await this.removeCachedFile(entry.url);
-    delete this.cache[key];
+    await this.callKernel("cache.remove", key);
+    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.delete(key);
-    await this.saveCache();
     await this.rebuildRules();
     this.updateCacheCount();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
@@ -1076,16 +1069,19 @@ export default class AutoFaviconPlugin extends Plugin {
     root.append(hint, status, grid);
 
     let saving = false;
-    const saveAndClose = async (blob: Blob, source: string) => {
-      if (saving) return;
-      saving = true;
+    const targetScopeForSelection = () => {
       const selection = scopeSelect.value;
-      const targetScope = selection === "type"
+      return selection === "type"
         ? selectedScope
         : selection === "subdomains" && sharedDomain
           ? { key: sharedDomain, domain: sharedDomain }
           : { key: domain, domain };
-      const includeSubdomains = selection === "subdomains";
+    };
+    const saveAndClose = async (blob: Blob, source: string) => {
+      if (saving) return;
+      saving = true;
+      const targetScope = targetScopeForSelection();
+      const includeSubdomains = scopeSelect.value === "subdomains";
       if (!await this.pinScopedIcon(targetScope, selectedScope, targetUrl, blob, source, includeSubdomains)) {
         saving = false;
         return;
@@ -1104,19 +1100,21 @@ export default class AutoFaviconPlugin extends Plugin {
       if (!value) return;
       urlButton.setAttribute("disabled", "true");
       status.textContent = this.t("loadingCustomUrl");
-      await this.acquireFetchSlot();
       try {
-        const resolved = await resolveIconUrl(value);
-        if (!resolved) {
-          status.textContent = this.t("customIconInvalid");
-          return;
-        }
+        const targetScope = targetScopeForSelection();
+        const selected = await this.callKernel<CacheEntry>("cache.pin-url", {
+          ...targetScope,
+          targetUrl: this.sanitizeTargetUrl(targetUrl, targetScope.domain),
+        }, value, scopeSelect.value === "subdomains", selectedScope.key);
         if (!root.isConnected) return;
-        await saveAndClose(resolved.blob, "custom URL");
+        this.cache[targetScope.key] = selected;
+        if (targetScope.key !== selectedScope.key) delete this.cache[selectedScope.key];
+        await this.rebuildRules();
+        dialog.destroy();
+        afterChange();
       } catch {
         status.textContent = this.t("customIconInvalid");
       } finally {
-        this.releaseFetchSlot();
         urlButton.removeAttribute("disabled");
       }
     };
@@ -1125,31 +1123,23 @@ export default class AutoFaviconPlugin extends Plugin {
       loadPageCandidates.setAttribute("disabled", "true");
       status.textContent = this.t("loadingCandidates");
       grid.replaceChildren();
-      await this.acquireFetchSlot();
       try {
         const discoverPage = allowFullPageDiscovery || Boolean(selectedScope.discoverPage);
-        const discoveryTarget = discoverPage
-          ? safePageDiscoveryUrl(targetUrl)
-          : `https://${selectedScope.domain}/`;
-        const candidates = await discoverIconCandidates(discoveryTarget, {
-          provider: this.settings.provider,
-          providerPreset: this.settings.providerPreset,
-          mode: this.settings.resolverMode,
-          fallback: this.settings.fallbackMode,
-          monogramStyle: this.monogramStyleFor(domain),
-          scope: selectedScope,
-          allowFullPageDiscovery: discoverPage,
-        });
+        const candidates = await this.callKernel<Array<{ base64: string; contentType: string; source: string }>>("cache.candidates", {
+          ...selectedScope,
+          targetUrl: this.sanitizeTargetUrl(targetUrl, selectedScope.domain),
+        }, discoverPage);
         if (!root.isConnected) return;
         if (!urlButton.hasAttribute("disabled")) {
           status.textContent = candidates.length === 0 ? this.t("noCandidates") : this.t("candidateCount").replace("{count}", String(candidates.length));
         }
         for (const candidate of candidates) {
+          const blob = this.base64ToBlob(candidate.base64, candidate.contentType);
           const card = document.createElement("button");
           card.type = "button";
           card.className = "auto-favicon-candidate-card";
           const preview = document.createElement("img");
-          const objectUrl = URL.createObjectURL(candidate.blob);
+          const objectUrl = URL.createObjectURL(blob);
           objectUrls.push(objectUrl);
           preview.src = objectUrl;
           preview.alt = candidate.source;
@@ -1158,8 +1148,8 @@ export default class AutoFaviconPlugin extends Plugin {
           label.textContent = this.resolverSourceLabel(candidate.source);
           const details = document.createElement("small");
           details.className = "auto-favicon-candidate-details";
-          const format = this.iconFormat(candidate.blob);
-          const size = this.formatFileSize(candidate.blob.size);
+          const format = this.iconFormat(blob);
+          const size = this.formatFileSize(blob.size);
           details.textContent = format === "SVG"
             ? `${format} · ${this.t("vectorIcon")} · ${size}`
             : `${format} · ${size}`;
@@ -1170,7 +1160,7 @@ export default class AutoFaviconPlugin extends Plugin {
           }, { once: true });
           card.append(preview, label, details);
           card.addEventListener("click", () => {
-            void saveAndClose(candidate.blob, `selected candidate:${candidate.source}`);
+            void saveAndClose(blob, `selected candidate:${candidate.source}`);
           });
           grid.append(card);
         }
@@ -1178,7 +1168,6 @@ export default class AutoFaviconPlugin extends Plugin {
         console.warn(`[auto-favicon] Unable to discover candidates for ${selectedScope.key}`, error);
         if (root.isConnected && !urlButton.hasAttribute("disabled")) status.textContent = this.t("candidateLoadFailed");
       } finally {
-        this.releaseFetchSlot();
         loadPageCandidates.removeAttribute("disabled");
       }
     };
@@ -1239,28 +1228,21 @@ export default class AutoFaviconPlugin extends Plugin {
   }
 
   private async invalidateGeneratedMonograms() {
-    const generated = Object.entries(this.cache).filter(([, entry]) => entry.source === "generated monogram");
-    await Promise.all(generated.map(([, entry]) => this.removeCachedFile(entry.url)));
-    for (const [domain] of generated) {
-      delete this.cache[domain];
-      this.failedDomains.delete(domain);
-      this.iconRules.delete(domain);
-    }
+    await this.callKernel("cache.clear-generated");
+    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+    this.failedDomains.clear();
+    this.iconRules.clear();
     this.renderRules();
-    await this.saveCache();
     this.updateCacheCount();
   }
 
   private async clearCache() {
     this.cacheGeneration += 1;
-    const pinned = Object.fromEntries(Object.entries(this.cache).filter(([, entry]) => entry.pinned));
-    const removable = Object.values(this.cache).filter((entry) => !entry.pinned);
-    await Promise.all(removable.map(({ url }) => this.removeCachedFile(url)));
-    this.cache = pinned;
+    await this.callKernel("cache.clear");
+    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.clear();
     this.iconRules.clear();
     this.forceDomains.clear();
-    await this.saveCache();
     await this.rebuildRules();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
   }
@@ -1410,115 +1392,35 @@ export default class AutoFaviconPlugin extends Plugin {
     automaticGeneration: number,
     cacheGeneration: number,
   ) {
-    const previous = this.cache[scope.key];
-    let storedUrl: string | undefined;
-    let stage = "resolve";
-    let cacheUpdated = false;
-    let previousRemoved = false;
-    let discarded = false;
     const invalidated = () => cacheGeneration !== this.cacheGeneration
       || (trigger === "automatic" && (
         automaticGeneration !== this.automaticFetchGeneration
         || this.settings.pauseAutomaticFetch
       ));
-    const ensureActive = () => {
-      if (!invalidated()) return;
-      discarded = true;
-      throw new Error("fetch result discarded because automatic retrieval or cache state changed");
-    };
     this.pendingDomains.add(scope.key);
-    await this.acquireFetchSlot();
     try {
-      ensureActive();
-      const discoverPage = this.settings.allowFullPageDiscovery || Boolean(scope.discoverPage);
-      const discoveryTarget = discoverPage
-        ? safePageDiscoveryUrl(targetUrl)
-        : `https://${scope.domain}/`;
-      const resolved = await resolveBestIcon(discoveryTarget, {
-        provider: this.settings.provider,
-        providerPreset: this.settings.providerPreset,
-        mode: this.settings.resolverMode,
-        fallback: this.settings.fallbackMode,
-        monogramStyle: this.monogramStyleFor(scope.domain),
-        scope,
-        allowFullPageDiscovery: discoverPage,
-      });
-      ensureActive();
-      if (!resolved) throw new Error("no usable icon source returned an image");
-      const suffix = preserveExisting && previous ? `-refresh-${Date.now()}` : "";
-      stage = "write";
-      const url = await this.storeIcon(scope.key, resolved.blob, suffix);
-      storedUrl = url;
-      ensureActive();
-      stage = "verify-write";
-      if (!await this.isStoredIconUsable(url)) {
-        throw new Error("cached icon could not be loaded back from SiYuan");
-      }
-      ensureActive();
-      stage = "update-cache";
-      this.cache[scope.key] = {
-        url,
-        fetchedAt: Date.now(),
-        resolverVersion: RESOLVER_VERSION,
-        source: resolved.source,
+      const entry = await this.callKernel<CacheEntry | null>("cache.get-or-queue", {
+        ...scope,
         targetUrl: this.sanitizeTargetUrl(targetUrl, scope.domain),
-        domain: scope.domain,
-        routeKey: scope.routeKey,
-        pathPrefix: scope.pathPrefix,
-      };
-      cacheUpdated = true;
-      stage = "save-cache";
-      try {
-        await this.saveCache();
-      } catch (error) {
-        if (previous) this.cache[scope.key] = previous;
-        else delete this.cache[scope.key];
-        throw error;
-      }
-      ensureActive();
-      if (previous && previous.url !== url) {
-        try {
-          await this.removeCachedFile(previous.url);
-          previousRemoved = true;
-        } catch (error) {
-          console.warn(`[auto-favicon] Unable to remove old cache for ${scope.key}`, error);
-        }
-      }
-      stage = "apply";
+      }, preserveExisting, trigger === "automatic");
+      if (invalidated()) return false;
+      if (!entry) throw new Error("no usable icon source returned an image");
+      this.cache[scope.key] = entry;
       this.updateCacheCount();
       this.failedDomains.delete(scope.key);
       this.failureReasons.delete(scope.key);
-      this.setRule(scope, url, resolved.source);
+      this.setRule(scope, entry.url, entry.source);
       return true;
     } catch (error) {
-      if (storedUrl && storedUrl !== previous?.url) {
-        try {
-          await this.removeCachedFile(storedUrl);
-        } catch {
-          // Keep the original error as the useful diagnostic.
-        }
-      }
-      if (cacheGeneration === this.cacheGeneration) {
-        if (previous && !previousRemoved) this.cache[scope.key] = previous;
-        else delete this.cache[scope.key];
-        if (cacheUpdated) {
-          try {
-            await this.saveCache();
-          } catch {
-            // A later explicit cache operation remains authoritative.
-          }
-        }
-      }
       this.updateCacheCount();
-      if (discarded || invalidated()) return false;
+      if (invalidated()) return false;
       console.warn(`[auto-favicon] Unable to cache ${scope.key}`, error);
-      this.failureReasons.set(scope.key, `${scope.key} · ${stage} · ${this.errorText(error)}`);
+      this.failureReasons.set(scope.key, `${scope.key} · kernel resolve · ${this.errorText(error)}`);
       this.failedDomains.set(scope.key, Date.now());
       // Do not create a pseudo-element when no verified image exists. This
       // prevents an empty gap and lets link-icon keep its own valid icon.
       return false;
     } finally {
-      this.releaseFetchSlot();
       this.pendingDomains.delete(scope.key);
     }
   }
@@ -1530,45 +1432,6 @@ export default class AutoFaviconPlugin extends Plugin {
     } catch {
       return String(error);
     }
-  }
-
-  private async storeIcon(domain: string, blob: Blob, suffix = ""): Promise<string> {
-    const extension = this.extensionFor(blob.type);
-    const safeName = domain.replace(/[^a-z0-9.-]/gi, "_");
-    const filename = `${safeName}${suffix}.${extension}`;
-    const form = new FormData();
-    form.append("path", `${PUBLIC_DIR}/${filename}`);
-    form.append("isDir", "false");
-    form.append("modTime", String(Math.floor(Date.now() / 1000)));
-    form.append("file", new File([blob], filename, { type: blob.type }));
-    const response = await fetch("/api/file/putFile", { method: "POST", body: form });
-    const result = await response.json() as { code?: number; msg?: string };
-    if (!response.ok || result.code !== 0) {
-      throw new Error(result.msg ?? "could not write favicon cache");
-    }
-    return `${PUBLIC_URL}/${filename}`;
-  }
-
-  private extensionFor(mime: string) {
-    if (mime.includes("svg")) return "svg";
-    if (mime.includes("icon") || mime.includes("ico")) return "ico";
-    if (mime.includes("webp")) return "webp";
-    if (mime.includes("jpeg")) return "jpg";
-    if (mime.includes("gif")) return "gif";
-    return "png";
-  }
-
-  private monogramStyleFor(domain: string): MonogramStyle {
-    const rootDomain = domain.startsWith("www.") ? domain.slice(4) : domain;
-    const override = this.settings.monogramOverrides[domain] ?? this.settings.monogramOverrides[rootDomain];
-    if (override) return { colorMode: "custom", ...override };
-    return {
-      colorMode: this.settings.monogramColorMode,
-      primary: this.settings.monogramPrimary,
-      secondary: this.settings.monogramSecondary,
-      text: this.settings.monogramText,
-      shape: this.settings.monogramShape,
-    };
   }
 
   private isCacheEntryFresh(entry: CacheEntry) {
@@ -1583,11 +1446,10 @@ export default class AutoFaviconPlugin extends Plugin {
     this.pendingDomains.add(key);
     try {
       if (this.cache[key] !== expected) return;
-      await this.removeCachedFile(expected.url);
-      delete this.cache[key];
+      await this.callKernel("cache.remove", key);
+      this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
       this.iconRules.delete(key);
       this.renderRules();
-      await this.saveCache();
       this.updateCacheCount();
     } finally {
       this.pendingDomains.delete(key);
@@ -1597,7 +1459,6 @@ export default class AutoFaviconPlugin extends Plugin {
 
   private async rebuildRules() {
     this.iconRules.clear();
-    let cacheChanged = false;
     if (this.settings.enabled) {
       const entries = Object.entries(this.cache).sort(([a], [b]) => Number(a.includes("::")) - Number(b.includes("::")));
       for (const [key, entry] of entries) {
@@ -1609,29 +1470,14 @@ export default class AutoFaviconPlugin extends Plugin {
           && entry.resolverVersion !== RESOLVER_VERSION;
         const current = entry.pinned || entry.resolverVersion === RESOLVER_VERSION || pausedLegacyMonogram;
         const fresh = this.settings.pauseAutomaticFetch || this.isCacheEntryFresh(entry);
-        if (current && fresh && await this.isStoredIconUsable(entry.url)) {
+        if (current && fresh) {
           const scope = scopeFromCacheKey(key, entry.domain, entry.pathPrefix);
           this.iconRules.set(key, this.createRule(scope, entry.url, entry.source));
-        } else {
-          await this.removeCachedFile(entry.url);
-          delete this.cache[key];
-          cacheChanged = true;
         }
       }
     }
-    if (cacheChanged) await this.saveCache();
     this.updateCacheCount();
     this.renderRules();
-  }
-
-  private async isStoredIconUsable(url: string) {
-    try {
-      const response = await fetch(url, { cache: "no-store" });
-      if (!response.ok) return false;
-      return await isDecodableImage(await response.blob());
-    } catch {
-      return false;
-    }
   }
 
   private setRule(scope: LinkScope, url: string, source?: string) {
@@ -1698,12 +1544,4 @@ export default class AutoFaviconPlugin extends Plugin {
       .join("\n");
   }
 
-  private async removeCachedFile(publicUrl: string) {
-    if (!publicUrl.startsWith(PUBLIC_URL)) return;
-    await fetch("/api/file/removeFile", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: `/data${publicUrl}` }),
-    });
-  }
 }

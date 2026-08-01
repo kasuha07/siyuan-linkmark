@@ -42,6 +42,12 @@ declare module "siyuan" {
   export class Plugin {
     setting?: Setting;
     i18n: Record<string, any>;
+    kernel?: {
+      rpc: {
+        call: Record<string, (...args: any[]) => Promise<any>>;
+        bind: (name: string, handler: (params: any) => void | Promise<void>) => void;
+      };
+    };
     loadData<T = any>(name: string): Promise<T>;
     saveData(name: string, data: unknown): Promise<void>;
     addTopBar(options: {

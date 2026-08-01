@@ -4,8 +4,9 @@
   "url": "https://github.com/Acetab/auto-favicon",
   "version": "0.5.7",
   "minAppVersion": "3.7.0",
+  "kernels": ["all"],
   "backends": ["all"],
-  "frontends": ["desktop", "mobile"],
+  "frontends": ["desktop", "mobile", "browser-desktop", "browser-mobile"],
   "disabledInPublish": false,
   "displayName": {
     "default": "Auto Favicon",
