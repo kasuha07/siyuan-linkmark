@@ -72,10 +72,14 @@ class LinkmarkKernel {
         resolverVersion: 6,
         privateIconUrl: (iconId) => `/plugin/private/${siyuan.plugin.name}/icon/${encodeURIComponent(iconId)}`,
         onStateChange: async (cache) => siyuan.rpc.broadcast("cache.changed", { cache }),
+        onResolutionFailure: async (scope, category) => siyuan.rpc.broadcast("cache.resolution-failed", { key: scope.key, category }),
       });
       await this.authority.initialize();
       await siyuan.rpc.bind("cache.snapshot", async () => this.requireAuthority().snapshot(), "Returns the authoritative favicon cache.");
-      await siyuan.rpc.bind("cache.get-or-queue", async (scope: LinkScope, force = false, automatic = false) => this.requireAuthority().getOrQueue(normalizeScope(scope), force, automatic), "Returns a cached icon or queues server-side resolution.");
+      await siyuan.rpc.bind("cache.get-or-queue", async (scope: LinkScope, force = false, automatic = false) => {
+        if (!this.authority) return { status: "unavailable" as const };
+        return this.requireAuthority().getOrQueue(normalizeScope(scope), force, automatic);
+      }, "Returns a cached icon, a queue acknowledgement, or an explicit unavailable result.");
       await siyuan.rpc.bind("cache.remove", async (key: string) => this.requireAuthority().remove(key), "Removes one cache entry workspace-wide.");
       await siyuan.rpc.bind("cache.clear", async () => this.requireAuthority().clear(), "Clears non-pinned cache entries workspace-wide.");
       await siyuan.rpc.bind("cache.clear-generated", async () => this.requireAuthority().clearGenerated(), "Clears generated monograms after policy changes.");

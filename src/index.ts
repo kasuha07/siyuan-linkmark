@@ -1,5 +1,6 @@
 import { confirm, Dialog, Menu, Plugin, Setting, showMessage } from "siyuan";
 import "./style.css";
+import type { CacheRequestResult } from "./cache-authority";
 import {
   isDecodableImage,
   parentDomainOf,
@@ -58,6 +59,7 @@ const RUNTIME_STYLE_ID = "siyuan-linkmark-runtime-style";
 const FEEDBACK_URL = "https://github.com/kasuha07/siyuan-linkmark/issues";
 const RESOLVER_VERSION = 6;
 const FAILURE_COOLDOWN = 10 * 60 * 1000;
+const MANUAL_FAILURE_WINDOW = 60 * 1000;
 const RULE_RENDER_BATCH_DELAY = 16;
 const LINK_SELECTOR = [
   ".protyle-wysiwyg span[data-type~='a'][data-href]",
@@ -112,6 +114,7 @@ export default class LinkmarkPlugin extends Plugin {
   private enabledInput?: HTMLInputElement;
   private cacheCountElement?: HTMLElement;
   private failureReasons = new Map<string, string>();
+  private manualRefreshKeys = new Map<string, number>();
   private automaticFetchGeneration = 0;
   private cacheGeneration = 0;
   private readonly inputListener = (event: Event) => this.scheduleInputScan(event.target);
@@ -176,8 +179,26 @@ export default class LinkmarkPlugin extends Plugin {
       const cache = params?.cache ?? params?.params?.cache;
       if (!cache || typeof cache !== "object") return;
       this.cache = cache as Record<string, CacheEntry>;
+      for (const key of this.manualRefreshKeys.keys()) {
+        if (this.cache[key]) this.manualRefreshKeys.delete(key);
+      }
       this.requestRuleRebuild();
       this.scheduleScan();
+    });
+    await bind("cache.resolution-failed", (params) => {
+      const key = params?.key ?? params?.params?.key;
+      const category = params?.category ?? params?.params?.category;
+      if (typeof key !== "string" || !key) return;
+      // Automatic and manual failures keep the existing failure cooldown so
+      // scans do not re-queue a scope that just exhausted its budget.
+      this.failedDomains.set(key, Date.now());
+      if (typeof category === "string") this.failureReasons.set(key, `kernel resolve · ${category}`);
+      const queuedAt = this.manualRefreshKeys.get(key);
+      this.manualRefreshKeys.delete(key);
+      if (queuedAt !== undefined && Date.now() - queuedAt <= MANUAL_FAILURE_WINDOW) {
+        const failedScope = scopeFromCacheKey(key);
+        showMessage(this.t("manualRefreshFailed").replace("{domain}", failedScope.domain));
+      }
     });
     await bind("cache.policy.changed", async (params) => {
       this.applyCachePolicy(params?.policy ?? params?.params?.policy);
@@ -744,8 +765,7 @@ export default class LinkmarkPlugin extends Plugin {
   ) {
     const items = [...targets];
     let completed = 0;
-    let success = 0;
-    let fallback = 0;
+    let queued = 0;
     let skipped = 0;
     let failed = 0;
     const failures: string[] = [];
@@ -753,8 +773,7 @@ export default class LinkmarkPlugin extends Plugin {
       if (this.cachedIconForScope(scope)?.entry.pinned) skipped += 1;
       else {
         const outcome = await this.fetchAndCache(scope, targetUrl, true, "manual");
-        if (outcome === "success") success += 1;
-        else if (outcome === "fallback") fallback += 1;
+        if (outcome === "queued" || outcome === "success" || outcome === "fallback") queued += 1;
         else {
           failed += 1;
           const reason = this.failureReasons.get(key);
@@ -764,13 +783,12 @@ export default class LinkmarkPlugin extends Plugin {
       completed += 1;
       onProgress?.(completed, items.length);
     }));
-    return { success, fallback, failed, skipped, failures };
+    return { queued, failed, skipped, failures };
   }
 
-  private showRefreshResult(result: { success: number; fallback: number; failed: number; skipped: number; failures?: string[] }) {
+  private showRefreshResult(result: { queued: number; failed: number; skipped: number; failures?: string[] }) {
     const summary = this.t("refreshFinished")
-      .replace("{success}", String(result.success))
-      .replace("{fallback}", String(result.fallback))
+      .replace("{queued}", String(result.queued))
       .replace("{failed}", String(result.failed))
       .replace("{skipped}", String(result.skipped));
     const details = result.failures?.length ? `\n${result.failures.join("\n")}` : "";
@@ -781,6 +799,7 @@ export default class LinkmarkPlugin extends Plugin {
     await this.callKernel("cache.remove", key);
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.delete(key);
+    this.manualRefreshKeys.delete(key);
     this.requestRuleRebuild();
     this.updateCacheCount();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
@@ -962,6 +981,8 @@ export default class LinkmarkPlugin extends Plugin {
       if (selectedScope.key !== scope.key) delete this.cache[selectedScope.key];
       this.failedDomains.delete(scope.key);
       this.failedDomains.delete(selectedScope.key);
+      this.manualRefreshKeys.delete(scope.key);
+      this.manualRefreshKeys.delete(selectedScope.key);
       this.requestRuleRebuild();
       if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
       this.updateCacheCount();
@@ -994,6 +1015,7 @@ export default class LinkmarkPlugin extends Plugin {
     await this.callKernel("cache.remove", key);
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.delete(key);
+    this.manualRefreshKeys.delete(key);
     this.requestRuleRebuild();
     this.updateCacheCount();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
@@ -1235,6 +1257,7 @@ export default class LinkmarkPlugin extends Plugin {
     await this.callKernel("cache.clear-generated");
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.clear();
+    this.manualRefreshKeys.clear();
     this.requestRuleRebuild();
     this.updateCacheCount();
   }
@@ -1244,6 +1267,7 @@ export default class LinkmarkPlugin extends Plugin {
     await this.callKernel("cache.clear");
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.clear();
+    this.manualRefreshKeys.clear();
     this.requestRuleRebuild();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
   }
@@ -1403,20 +1427,37 @@ export default class LinkmarkPlugin extends Plugin {
       ));
     this.pendingDomains.add(scope.key);
     try {
-      const entry = await this.callKernel<CacheEntry | null>("cache.get-or-queue", {
+      const result = await this.callKernel<CacheRequestResult>("cache.get-or-queue", {
         ...scope,
         targetUrl: this.sanitizeTargetUrl(targetUrl, scope.domain),
       }, preserveExisting, trigger === "automatic");
       if (invalidated()) return "failure";
-      if (!entry) throw new Error("no usable icon source returned an image");
-      this.cache[scope.key] = entry;
-      this.updateCacheCount();
-      this.failedDomains.delete(scope.key);
-      this.failureReasons.delete(scope.key);
-      if (this.setRule(scope, entry.url)) this.requestRulePublication();
-      return fetchOutcomeFor(entry);
+      if (result.status === "ready") {
+        const entry = result.entry;
+        this.cache[scope.key] = entry;
+        this.updateCacheCount();
+        this.failedDomains.delete(scope.key);
+        this.failureReasons.delete(scope.key);
+        this.manualRefreshKeys.delete(scope.key);
+        if (this.setRule(scope, entry.url)) this.requestRulePublication();
+        return fetchOutcomeFor(entry);
+      }
+      if (result.status === "queued") {
+        // Resolution continues in the kernel; a committed entry arrives
+        // through the cache.changed broadcast and a failure through the
+        // cache.resolution-failed broadcast. Keep the scope out of the
+        // failed-domain cooldown and do not create a placeholder icon.
+        if (trigger === "manual") this.manualRefreshKeys.set(scope.key, Date.now());
+        return "queued";
+      }
+      // The Cache authority declined the request, for example while the
+      // kernel plugin is still loading. Fail open without treating the
+      // outcome as an icon failure.
+      this.manualRefreshKeys.delete(scope.key);
+      return "unavailable";
     } catch (error) {
       this.updateCacheCount();
+      this.manualRefreshKeys.delete(scope.key);
       if (invalidated()) return "failure";
       console.warn(`[siyuan-linkmark] Unable to cache ${scope.key}`, error);
       this.failureReasons.set(scope.key, `${scope.key} · kernel resolve · ${this.errorText(error)}`);

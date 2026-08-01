@@ -60,6 +60,10 @@ _Avoid_: background tab, browser worker
 The authenticated JSON-RPC boundary through which a frontend client invokes and receives state changes from the cache authority.
 _Avoid_: direct cache-file access, frontend persistence API
 
+**Queue acknowledgement**:
+The immediate Kernel RPC response for a cache miss. It confirms that a new or coalesced In-flight task owns the Link scope, without representing an icon result or a failed resolution.
+_Avoid_: cache miss, icon result, resolution failure
+
 **Frontend client**:
 A desktop, mobile, or browser plugin instance that renders icons and requests cache operations from the cache authority through RPC.
 _Avoid_: cache writer, cache owner
@@ -77,7 +81,7 @@ An isolated view of the authoritative cache that an RPC caller or state-change s
 _Avoid_: live cache object, mutable cache reference
 
 **Cache persistence batch**:
-One durable cache-index write that commits all compatible cache-entry changes collected during a short scheduling window. Each affected operation returns and publishes state only after that write succeeds.
+One durable cache-index write that commits all compatible cache-entry changes collected during a short scheduling window. Each committed resolution publishes state only after that write succeeds; its earlier Queue acknowledgement does not represent a commit.
 _Avoid_: deferred best-effort save, per-entry index write
 
 **Legacy cache**:
@@ -101,7 +105,7 @@ The frontend behavior that renders Linkmark's selected icon according to its own
 _Avoid_: Link Icon compatibility, cooperative rendering
 
 **Specific-page discovery**:
-An optional workspace cache policy that permits retrieving an external link's path, without its query parameters or fragment, to discover a page-specific icon. It is disabled by default.
+An optional workspace cache policy that permits retrieving an external link's path, without its query parameters or fragment, to discover a page-specific icon. It is disabled by default; default resolution probes standard root icon paths and configured providers without retrieving HTML documents or manifests.
 _Avoid_: ordinary favicon retrieval, automatic page visit
 
 **Link scope**:
@@ -121,9 +125,13 @@ The authenticated kernel-plugin HTTP endpoint that returns the bytes of an icon 
 _Avoid_: public static icon URL, direct storage path
 
 **In-flight task**:
-A kernel-resident favicon resolution task that may continue after a frontend closes but is cancelled when the kernel plugin stops or reloads.
+A kernel-resident favicon resolution task that may continue after a frontend closes but is cancelled when the kernel plugin stops or reloads. A cache-miss request receives a queue acknowledgement without waiting for this task to resolve; a committed result is delivered through a cache-state change.
 _Avoid_: durable job, resumable task
 
+**Resolution outcome notification**:
+A cache-authority broadcast marking an In-flight task as committed or exhausted. A committed task sends the authoritative cache snapshot; an exhausted task sends only its Link scope and a sanitized failure category. Automatic failures remain silent, while a manual refresh may present one actionable message.
+_Avoid_: RPC error, remote response payload, retry loop
+
 **Resolution concurrency**:
-The workspace-wide limit on simultaneous favicon resolution tasks for different link scopes.
+The workspace-wide limit of four simultaneous favicon resolution tasks for different Link scopes. Each task has a ten-second total budget and examines at most four candidates.
 _Avoid_: per-client concurrency, unbounded parallelism

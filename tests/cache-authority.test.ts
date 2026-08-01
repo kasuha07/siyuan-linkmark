@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   KernelCacheAuthority,
+  ResolutionError,
   type CacheEntry,
   type CacheStorage,
-  type IconResolver,
   type LinkScope,
 } from "../src/cache-authority";
 import { privateIconIdFromPath } from "../src/private-route";
-import { fetchOutcomeFor } from "../src/refresh-outcome";
+import { fetchOutcomeFor, outcomeForCacheRequest } from "../src/refresh-outcome";
 import { ForwardProxyIconResolver, type ForwardProxy, type KernelResolverPolicy } from "../src/kernel-resolver";
 
 class MemoryStorage implements CacheStorage {
@@ -100,11 +100,41 @@ const resolverPolicy: KernelResolverPolicy = {
   monogramShape: "rounded", monogramOverrides: {},
 };
 
+const resolved = (source = "test resolver"): { bytes: ArrayBuffer; contentType: string; source: string } => ({
+  bytes: new Uint8Array([1, 2, 3]).buffer,
+  contentType: "image/png",
+  source,
+});
+
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+type Subscriber<T> = {
+  events: T[];
+  waitFor(predicate: (events: T[]) => boolean, description: string): Promise<void>;
+};
+
+function subscribers() {
+  const cacheEvents: Array<Record<string, CacheEntry>> = [];
+  const waitFor = async (predicate: (events: Array<Record<string, CacheEntry>>) => boolean, description: string) => {
+    await vi.waitFor(() => {
+      if (!predicate(cacheEvents)) throw new Error(`timed out waiting for ${description}`);
+    }, { timeout: 2000 });
+  };
+  return {
+    cacheEvents,
+    waitForCache: waitFor,
+  };
+}
+
 describe("KernelCacheAuthority", () => {
   it("does not report a generated monogram as a remote refresh success", () => {
     expect(fetchOutcomeFor(entry({ source: "FaviconKit" }))).toBe("success");
     expect(fetchOutcomeFor(entry({ source: "generated monogram" }))).toBe("fallback");
     expect(fetchOutcomeFor(null)).toBe("failure");
+    expect(outcomeForCacheRequest({ status: "ready", entry: entry({ source: "FaviconKit" }) })).toBe("success");
+    expect(outcomeForCacheRequest({ status: "ready", entry: entry({ source: "generated monogram" }) })).toBe("fallback");
+    expect(outcomeForCacheRequest({ status: "queued" })).toBe("queued");
+    expect(outcomeForCacheRequest({ status: "unavailable" })).toBe("unavailable");
   });
 
   it("matches only its complete private icon route", () => {
@@ -113,96 +143,96 @@ describe("KernelCacheAuthority", () => {
     expect(privateIconIdFromPath("/plugin/private/siyuan-linkmark/icon/%2Fetc", "siyuan-linkmark")).toBeUndefined();
   });
 
-  it("keeps manifest discovery in the kernel resolver", async () => {
-    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
-      if (url === "https://example.com/") return {
-        body: '<link rel="manifest" href="/site.webmanifest">', contentType: "text/html", status: 200, url,
-      };
-      if (url === "https://example.com/site.webmanifest") return {
-        body: JSON.stringify({ icons: [{ src: "/icon.png" }] }), contentType: "application/manifest+json", status: 200, url,
-      };
-      if (url === "https://example.com/icon.png" && encoding === "base64") return {
-        body: Buffer.from([1, 2, 3]).toString("base64"), contentType: "image/png", status: 200, url,
-      };
-      return null;
+  it("returns a fresh cache hit as ready without resolver work", async () => {
+    const resolve = vi.fn(async () => null);
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => 100, {
+      cachePolicy: { cacheDays: 30 },
     });
-    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+    await authority.initialize();
+    const pinned = await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([9]).buffer);
 
-    await expect(resolver.resolve(scope())).resolves.toMatchObject({ source: "root rel=icon · web app manifest", contentType: "image/png" });
-    expect(forward).toHaveBeenCalledWith("https://example.com/site.webmanifest", "text", "application/manifest+json");
+    const result = await authority.getOrQueue(scope());
+
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: pinned.iconId, pinned: true }) });
+    expect(resolve).not.toHaveBeenCalled();
   });
 
-  it("limits automatic resolution to sixteen icon downloads", async () => {
-    const downloads: string[] = [];
-    const links = Array.from({ length: 17 }, (_, index) => `<link rel="icon" href="/icon-${index}.png">`).join("");
-    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
-      if (encoding === "text") return { body: links, contentType: "text/html", status: 200, url };
-      downloads.push(url);
-      return null;
+  it("returns a committed cache hit as ready without resolver work", async () => {
+    const watched = subscribers();
+    const resolve = vi.fn(async () => resolved());
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => 100, {
+      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
     });
-    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+    await authority.initialize();
 
-    await expect(resolver.resolve(scope(), "automatic")).resolves.toBeNull();
-    expect(downloads).toHaveLength(16);
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await watched.waitForCache((events) => events.length === 1, "the first commit broadcast");
+    expect(resolve).toHaveBeenCalledTimes(1);
+
+    const result = await authority.getOrQueue(scope());
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ source: "test resolver" }) });
+    expect(resolve).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps manual candidate discovery beyond the automatic download limit", async () => {
-    const downloads: string[] = [];
-    const links = Array.from({ length: 17 }, (_, index) => `<link rel="icon" href="/icon-${index}.png">`).join("");
-    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
-      if (encoding === "text") return { body: links, contentType: "text/html", status: 200, url };
-      downloads.push(url);
-      if (url.endsWith("/icon-16.png")) {
-        return {
-          body: Buffer.from([1, 2, 3]).toString("base64"),
-          contentType: "image/png",
-          status: 200,
-          url,
-        };
-      }
-      return null;
-    });
-    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+  it("acknowledges a cache miss as queued before resolution or persistence completes", async () => {
+    let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => await new Promise((resolve) => { resolveDownload = resolve; }),
+    }, () => 100);
+    await authority.initialize();
 
-    await expect(resolver.candidates(scope(), false)).resolves.toEqual([
-      expect.objectContaining({ source: "root rel=icon" }),
-    ]);
-    expect(downloads).toContain("https://example.com/icon-16.png");
+    const result = await authority.getOrQueue(scope());
+
+    expect(result).toEqual({ status: "queued" });
+    expect(authority.snapshot()).toEqual({});
+    await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
+    expect(authority.snapshot()).toEqual({});
+  });
+
+  it("returns queued while the cache-index persistence of an earlier task is still in flight", async () => {
+    const storage = new BlockingCacheIndexStorage();
+    const watched = subscribers();
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => resolved() }, () => 100, {
+      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+    });
+    await authority.initialize();
+    const indexWriteStarted = storage.blockNextCacheIndexWrite();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await indexWriteStarted;
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    storage.releaseCacheIndexWrite();
+
+    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    expect(authority.snapshot()["example.com"]).toMatchObject({ source: "test resolver" });
   });
 
   it("coalesces concurrent requests for the same Link scope", async () => {
-    const storage = new MemoryStorage();
+    const watched = subscribers();
     let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;
     let calls = 0;
-    const resolver: IconResolver = {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
       resolve: async () => {
         calls += 1;
         return await new Promise((resolve) => { resolveDownload = resolve; });
       },
-    };
-    const authority = new KernelCacheAuthority(storage, resolver, () => 100);
+    }, () => 100, {
+      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+    });
     await authority.initialize();
 
-    const first = authority.getOrQueue(scope());
-    const second = authority.getOrQueue(scope());
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(calls).toBe(1));
 
-    resolveDownload?.({
-      bytes: new Uint8Array([1, 2, 3]).buffer,
-      contentType: "image/png",
-      source: "test resolver",
-    });
-    await expect(first).resolves.toMatchObject({
-      domain: "example.com",
-      source: "test resolver",
-      url: expect.stringContaining("/api/plugin/private/siyuan-linkmark/icon/"),
-    });
-    await expect(second).resolves.toMatchObject({
-      domain: "example.com",
-      source: "test resolver",
-      url: expect.stringContaining("/api/plugin/private/siyuan-linkmark/icon/"),
-    });
+    resolveDownload?.(resolved());
+    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
     expect(calls).toBe(1);
+    expect(watched.cacheEvents[0]["example.com"]).toMatchObject({
+      domain: "example.com",
+      source: "test resolver",
+      url: expect.stringContaining("/api/plugin/private/siyuan-linkmark/icon/"),
+    });
   });
 
   it("resolves at most four distinct Link scopes concurrently while coalescing matching requests", async () => {
@@ -217,20 +247,25 @@ describe("KernelCacheAuthority", () => {
         peakActive = Math.max(peakActive, active);
         await new Promise<void>((resolve) => releases.set(requested.key, resolve));
         active -= 1;
-        return {
-          bytes: new Uint8Array([requested.key.length]).buffer,
-          contentType: "image/png",
-          source: requested.key,
-        };
+        return resolved(requested.key);
       },
     }, () => 100);
     await authority.initialize();
 
-    const requests = ["one.example.com", "two.example.com", "three.example.com", "four.example.com", "five.example.com"]
-      .map((key) => authority.getOrQueue(scope(key)));
-    const matchingRequest = authority.getOrQueue(scope("one.example.com"));
+    const results = await Promise.all([
+      authority.getOrQueue(scope("one.example.com")),
+      authority.getOrQueue(scope("two.example.com")),
+      authority.getOrQueue(scope("three.example.com")),
+      authority.getOrQueue(scope("four.example.com")),
+      authority.getOrQueue(scope("five.example.com")),
+      authority.getOrQueue(scope("one.example.com")),
+    ]);
+    expect(results).toEqual([
+      { status: "queued" }, { status: "queued" }, { status: "queued" },
+      { status: "queued" }, { status: "queued" }, { status: "queued" },
+    ]);
 
-    await vi.waitFor(() => expect(active).toBe(4), { timeout: 100 });
+    await vi.waitFor(() => expect(active).toBe(4));
     expect(calls).toBe(4);
 
     releases.get("one.example.com")?.();
@@ -240,7 +275,7 @@ describe("KernelCacheAuthority", () => {
       releases.get(key)?.();
     }
 
-    await expect(Promise.all([...requests, matchingRequest])).resolves.toHaveLength(6);
+    await settle();
     expect(calls).toBe(5);
     expect(peakActive).toBe(4);
   });
@@ -248,6 +283,7 @@ describe("KernelCacheAuthority", () => {
   it("does not start an invalidated Link scope that is waiting for a resolution slot", async () => {
     const releases = new Map<string, () => void>();
     const calls: string[] = [];
+    const failures: Array<{ key: string; category: string }> = [];
     let active = 0;
     const authority = new KernelCacheAuthority(new MemoryStorage(), {
       resolve: async (requested) => {
@@ -255,43 +291,65 @@ describe("KernelCacheAuthority", () => {
         active += 1;
         await new Promise<void>((resolve) => releases.set(requested.key, resolve));
         active -= 1;
-        return {
-          bytes: new Uint8Array([requested.key.length]).buffer,
-          contentType: "image/png",
-          source: requested.key,
-        };
+        return resolved(requested.key);
       },
-    }, () => 100);
+    }, () => 100, {
+      onResolutionFailure: (failedScope, category) => { failures.push({ key: failedScope.key, category }); },
+    });
     await authority.initialize();
 
     const running = ["one.example.com", "two.example.com", "three.example.com", "four.example.com"]
       .map((key) => authority.getOrQueue(scope(key)));
+    await Promise.all(running);
     await vi.waitFor(() => expect(active).toBe(4));
-    const queued = authority.getOrQueue(scope("queued.example.com"));
+    await expect(authority.getOrQueue(scope("queued.example.com"))).resolves.toEqual({ status: "queued" });
     await authority.remove("queued.example.com");
 
     releases.get("one.example.com")?.();
-    await expect(queued).resolves.toBeNull();
+    await settle();
     expect(calls).not.toContain("queued.example.com");
+    expect(failures).toEqual([]);
 
     for (const key of ["two.example.com", "three.example.com", "four.example.com"]) releases.get(key)?.();
-    await expect(Promise.all(running)).resolves.toHaveLength(4);
+    await settle();
   });
 
-  it("does not start a new automatic download while the workspace policy is paused", async () => {
+  it("declines automatic work while the workspace policy is paused", async () => {
     const storage = new MemoryStorage();
-    const resolve = vi.fn(async () => ({
-      bytes: new Uint8Array([1]).buffer,
-      contentType: "image/png",
-      source: "test resolver",
-    }));
+    const resolve = vi.fn(async () => resolved());
     const authority = new KernelCacheAuthority(storage, { resolve }, () => 100, {
       cachePolicy: { cacheDays: 30, pauseAutomaticFetch: true },
     });
     await authority.initialize();
 
-    await expect(authority.getOrQueue(scope(), false, true)).resolves.toBeNull();
+    await expect(authority.getOrQueue(scope(), false, true)).resolves.toEqual({ status: "unavailable" });
     expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("still serves an existing entry when automatic work is paused", async () => {
+    const storage = new MemoryStorage();
+    const resolve = vi.fn(async () => null);
+    const authority = new KernelCacheAuthority(storage, { resolve }, () => 100, {
+      cachePolicy: { cacheDays: 30, pauseAutomaticFetch: true },
+    });
+    await authority.initialize();
+    await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
+
+    const result = await authority.getOrQueue(scope(), false, true);
+
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ pinned: true }) });
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("keeps manual refresh work available while the policy is paused", async () => {
+    const resolve = vi.fn(async () => resolved());
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => 100, {
+      cachePolicy: { cacheDays: 30, pauseAutomaticFetch: true },
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope(), false, false)).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(resolve).toHaveBeenCalled());
   });
 
   it("broadcasts isolated cache snapshots without structuredClone in the kernel runtime", async () => {
@@ -299,12 +357,14 @@ describe("KernelCacheAuthority", () => {
     vi.stubGlobal("structuredClone", undefined);
     try {
       const authority = new KernelCacheAuthority(new MemoryStorage(), {
-        resolve: async () => ({ bytes: new Uint8Array([1]).buffer, contentType: "image/png", source: "test resolver" }),
+        resolve: async () => resolved(),
       }, () => 100, {
         onStateChange: (cache) => { received.push(cache); },
       });
+      await authority.initialize();
 
-      await expect(authority.getOrQueue(scope())).resolves.toMatchObject({ source: "test resolver" });
+      await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+      await vi.waitFor(() => expect(received).toHaveLength(1));
       received[0]["example.com"].source = "subscriber mutation";
       const snapshot = authority.snapshot();
       snapshot["example.com"].source = "caller mutation";
@@ -323,47 +383,62 @@ describe("KernelCacheAuthority", () => {
     }, () => 100);
     await authority.initialize();
 
-    const pending = authority.getOrQueue(scope());
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
     await authority.remove(scope().key);
-    resolveDownload?.({
-      bytes: new Uint8Array([1, 2, 3]).buffer,
-      contentType: "image/png",
-      source: "test resolver",
-    });
+    resolveDownload?.(resolved());
 
-    await expect(pending).resolves.toBeNull();
+    await settle();
     expect(authority.snapshot()).toEqual({});
     expect(storage.files.has("icons/example.com.base64")).toBe(false);
   });
 
+  it("does not broadcast a failure for an invalidated task", async () => {
+    const storage = new MemoryStorage();
+    let resolveDownload: ((value: null) => void) | undefined;
+    const failures: Array<{ key: string; category: string }> = [];
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => await new Promise((resolve) => { resolveDownload = resolve; }),
+    }, () => 100, {
+      onResolutionFailure: (failedScope, category) => { failures.push({ key: failedScope.key, category }); },
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
+    await authority.remove(scope().key);
+    resolveDownload?.(null);
+
+    await settle();
+    expect(failures).toEqual([]);
+    expect(authority.snapshot()).toEqual({});
+  });
+
   it("starts a replacement task after an invalidated scope finishes", async () => {
+    const watched = subscribers();
     const releases: Array<() => void> = [];
     let calls = 0;
     const authority = new KernelCacheAuthority(new MemoryStorage(), {
       resolve: async () => {
         const call = ++calls;
         await new Promise<void>((resolve) => releases.push(resolve));
-        return {
-          bytes: new Uint8Array([call]).buffer,
-          contentType: "image/png",
-          source: `resolver ${call}`,
-        };
+        return resolved(`resolver ${call}`);
       },
-    }, () => 100);
+    }, () => 100, {
+      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+    });
     await authority.initialize();
 
-    const invalidated = authority.getOrQueue(scope());
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(calls).toBe(1));
     await authority.remove(scope().key);
-    const replacement = authority.getOrQueue(scope());
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
 
     releases[0]?.();
     await vi.waitFor(() => expect(calls).toBe(2));
     releases[1]?.();
 
-    await expect(invalidated).resolves.toBeNull();
-    await expect(replacement).resolves.toMatchObject({ source: "resolver 2" });
+    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the replacement commit broadcast");
     expect(authority.snapshot()).toEqual({
       "example.com": expect.objectContaining({ source: "resolver 2" }),
     });
@@ -376,11 +451,7 @@ describe("KernelCacheAuthority", () => {
     const authority = new KernelCacheAuthority(storage, {
       resolve: async (requested) => {
         await new Promise<void>((resolve) => { releaseDownloads.push(resolve); });
-        return {
-          bytes: new Uint8Array([requested.key.length]).buffer,
-          contentType: "image/png",
-          source: requested.key,
-        };
+        return resolved(requested.key);
       },
     }, () => 100, {
       onStateChange: (cache) => { received.push(cache); },
@@ -389,10 +460,12 @@ describe("KernelCacheAuthority", () => {
 
     const first = authority.getOrQueue(scope("first.example.com"));
     const second = authority.getOrQueue(scope("second.example.com"));
+    await expect(first).resolves.toEqual({ status: "queued" });
+    await expect(second).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(releaseDownloads).toHaveLength(2));
     releaseDownloads.forEach((release) => release());
-    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
 
+    await vi.waitFor(() => expect(received).toHaveLength(1));
     expect(storage.cacheIndexWrites).toBe(1);
     expect(received).toEqual([
       {
@@ -409,27 +482,24 @@ describe("KernelCacheAuthority", () => {
   it("does not publish any resolved scope when its cache-index batch fails", async () => {
     const storage = new FailingCacheIndexStorage();
     const received: Record<string, CacheEntry>[] = [];
+    const failures: Array<{ key: string; category: string }> = [];
     const authority = new KernelCacheAuthority(storage, {
-      resolve: async (requested) => ({
-        bytes: new Uint8Array([requested.key.length]).buffer,
-        contentType: "image/png",
-        source: requested.key,
-      }),
+      resolve: async (requested) => resolved(requested.key),
     }, () => 100, {
       onStateChange: (cache) => { received.push(cache); },
+      onResolutionFailure: (failedScope, category) => { failures.push({ key: failedScope.key, category }); },
     });
     await authority.initialize();
 
     const first = authority.getOrQueue(scope("first.example.com"));
     const second = authority.getOrQueue(scope("second.example.com"));
-    const results = await Promise.allSettled([first, second]);
+    await expect(first).resolves.toEqual({ status: "queued" });
+    await expect(second).resolves.toEqual({ status: "queued" });
 
-    expect(results).toEqual([
-      { status: "rejected", reason: expect.any(Error) },
-      { status: "rejected", reason: expect.any(Error) },
-    ]);
+    await settle();
     expect(storage.cacheIndexWrites).toBe(1);
     expect(received).toEqual([]);
+    expect(failures).toEqual([]);
     expect(authority.snapshot()).toEqual({});
     expect([...storage.files.keys()].filter((path) => path.startsWith("icons/"))).toEqual([]);
   });
@@ -437,18 +507,18 @@ describe("KernelCacheAuthority", () => {
   it("does not return an entry removed while its cache-index write is in flight", async () => {
     const storage = new BlockingCacheIndexStorage();
     const authority = new KernelCacheAuthority(storage, {
-      resolve: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer, contentType: "image/png", source: "test resolver" }),
+      resolve: async () => resolved(),
     }, () => 100);
     await authority.initialize();
     const indexWriteStarted = storage.blockNextCacheIndexWrite();
 
-    const pending = authority.getOrQueue(scope());
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await indexWriteStarted;
     const removal = authority.remove(scope().key);
     storage.releaseCacheIndexWrite();
 
-    await expect(pending).resolves.toBeNull();
     await removal;
+    await settle();
     expect(authority.snapshot()).toEqual({});
     expect(storage.files.has("icons/example.com.base64")).toBe(false);
   });
@@ -461,31 +531,27 @@ describe("KernelCacheAuthority", () => {
     }, () => 100);
     await authority.initialize();
 
-    const pending = authority.getOrQueue(scope());
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
     await authority.clear();
-    resolveDownload?.({
-      bytes: new Uint8Array([1, 2, 3]).buffer,
-      contentType: "image/png",
-      source: "test resolver",
-    });
+    resolveDownload?.(resolved());
 
-    await expect(pending).resolves.toBeNull();
+    await settle();
     expect(authority.snapshot()).toEqual({});
   });
 
   it("retains pinned entries when clearing the workspace cache", async () => {
     const storage = new MemoryStorage();
+    const received: Record<string, CacheEntry>[] = [];
     const authority = new KernelCacheAuthority(storage, {
-      resolve: async () => ({
-        bytes: new Uint8Array([1]).buffer,
-        contentType: "image/png",
-        source: "test resolver",
-      }),
-    }, () => 100);
+      resolve: async () => resolved(),
+    }, () => 100, {
+      onStateChange: (cache) => { received.push(cache); },
+    });
     await authority.initialize();
     await authority.putPinned(scope("pinned.example.com"), entry({ domain: "pinned.example.com", pinned: true }), "image/png", new Uint8Array([9]).buffer);
-    await authority.getOrQueue(scope());
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
 
     await authority.clear();
 
@@ -506,7 +572,8 @@ describe("KernelCacheAuthority", () => {
 
     expect(authority.snapshot()["example.com"]).toMatchObject({ iconId: first.iconId, pinned: true });
     await expect(authority.icon(first.iconId!)).resolves.toMatchObject({ contentType: "image/png" });
-    await expect(authority.getOrQueue(scope())).resolves.toMatchObject({ iconId: first.iconId, pinned: true });
+    const result = await authority.getOrQueue(scope());
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: first.iconId, pinned: true }) });
     expect(resolve).not.toHaveBeenCalled();
   });
 
@@ -542,7 +609,8 @@ describe("KernelCacheAuthority", () => {
 
     await expect(replacement).rejects.toThrow("superseded");
     await removal;
-    await expect(authority.getOrQueue(scope("first.example.com"))).resolves.toMatchObject({ iconId: original.iconId, pinned: true });
+    const result = await authority.getOrQueue(scope("first.example.com"));
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: original.iconId, pinned: true }) });
     expect(resolve).not.toHaveBeenCalled();
   });
 
@@ -585,15 +653,12 @@ describe("KernelCacheAuthority", () => {
   });
 
   it("keeps distinct route Link scopes independent", async () => {
-    const storage = new MemoryStorage();
-    const resolver: IconResolver = {
-      resolve: async (requested) => ({
-        bytes: new Uint8Array([requested.key.length]).buffer,
-        contentType: "image/png",
-        source: requested.key,
-      }),
-    };
-    const authority = new KernelCacheAuthority(storage, resolver, () => 100);
+    const received: Record<string, CacheEntry>[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async (requested) => resolved(requested.key),
+    }, () => 100, {
+      onStateChange: (cache) => { received.push(cache); },
+    });
     await authority.initialize();
 
     await Promise.all([
@@ -601,6 +666,7 @@ describe("KernelCacheAuthority", () => {
       authority.getOrQueue({ ...scope("docs.example.com::sheet"), domain: "docs.example.com" }),
     ]);
 
+    await vi.waitFor(() => expect(received).toHaveLength(1));
     expect(authority.snapshot()).toEqual({
       "docs.example.com::doc": expect.objectContaining({ source: "docs.example.com::doc" }),
       "docs.example.com::sheet": expect.objectContaining({ source: "docs.example.com::sheet" }),
@@ -609,17 +675,193 @@ describe("KernelCacheAuthority", () => {
 
   it("publishes a refreshed icon under a new private payload before cleaning the old payload", async () => {
     const storage = new MemoryStorage();
+    const received: Record<string, CacheEntry>[] = [];
     let byte = 1;
     const authority = new KernelCacheAuthority(storage, {
-      resolve: async () => ({ bytes: new Uint8Array([byte++]).buffer, contentType: "image/png", source: "test resolver" }),
-    }, () => 100);
+      resolve: async () => resolved(`test resolver ${byte++}`),
+    }, () => 100, {
+      onStateChange: (cache) => { received.push(cache); },
+    });
     await authority.initialize();
 
-    const first = await authority.getOrQueue(scope());
-    const second = await authority.getOrQueue(scope(), true);
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    const first = received[0]["example.com"];
 
-    expect(first?.iconId).not.toBe(second?.iconId);
-    await expect(authority.icon(first!.iconId!)).resolves.toBeUndefined();
-    await expect(authority.icon(second!.iconId!)).resolves.toMatchObject({ contentType: "image/png" });
+    await expect(authority.getOrQueue(scope(), true)).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+    const second = received[1]["example.com"];
+
+    expect(first.iconId).not.toBe(second.iconId);
+    await expect(authority.icon(first.iconId!)).resolves.toBeUndefined();
+    await expect(authority.icon(second.iconId!)).resolves.toMatchObject({ contentType: "image/png" });
+  });
+
+  it("broadcasts a sanitized resolution failure without an entry or payload leak", async () => {
+    const storage = new MemoryStorage();
+    const failures: Array<{ key: string; category: string }> = [];
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => { throw new ResolutionError("network"); },
+    }, () => 100, {
+      onResolutionFailure: (failedScope, category) => { failures.push({ key: failedScope.key, category }); },
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(failures).toHaveLength(1));
+    expect(failures[0]).toEqual({ key: "example.com", category: "network" });
+    expect(authority.snapshot()).toEqual({});
+    expect([...storage.files.keys()].filter((path) => path.startsWith("icons/"))).toEqual([]);
+  });
+
+  it("reports resolver exhaustion as a sanitized failure", async () => {
+    const failures: Array<{ key: string; category: string }> = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => null,
+    }, () => 100, {
+      onResolutionFailure: (failedScope, category) => { failures.push({ key: failedScope.key, category }); },
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(failures).toHaveLength(1));
+    expect(failures[0]).toEqual({ key: "example.com", category: "exhausted" });
+    expect(authority.snapshot()).toEqual({});
+  });
+});
+
+describe("ForwardProxyIconResolver", () => {
+  it("skips HTML and manifest retrieval on the default fast path", async () => {
+    const forward = vi.fn<ForwardProxy>(async () => null);
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).rejects.toMatchObject({ category: "exhausted" });
+    expect(forward).toHaveBeenCalledTimes(4);
+    for (const call of forward.mock.calls) expect(call[1]).toBe("base64");
+  });
+
+  it("does not probe parent-domain or provider candidates on the default fast path", async () => {
+    const forward = vi.fn<ForwardProxy>(async () => null);
+    const policy = { ...resolverPolicy, providerPreset: "custom", resolverMode: "mainland" as const };
+    const resolver = new ForwardProxyIconResolver(forward, () => policy);
+    const multiLabelScope: LinkScope = {
+      key: "docs.example.co.uk",
+      domain: "docs.example.co.uk",
+      targetUrl: "https://docs.example.co.uk/",
+    };
+
+    await expect(resolver.resolve(multiLabelScope)).rejects.toMatchObject({ category: "exhausted" });
+    const requested = forward.mock.calls.map(([url]) => url);
+    expect(requested).toEqual([
+      "https://docs.example.co.uk/favicon.ico",
+      "https://docs.example.co.uk/favicon.png",
+      "https://example.com/favicon/docs.example.co.uk",
+      "https://docs.example.co.uk/favicon.svg",
+    ]);
+  });
+
+  it("limits resolution to four candidate downloads even under Specific-page discovery", async () => {
+    const downloads: string[] = [];
+    const links = Array.from({ length: 17 }, (_, index) => `<link rel="icon" href="/icon-${index}.png">`).join("");
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding === "text") return { body: links, contentType: "text/html", status: 200, url };
+      downloads.push(url);
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve({ ...scope(), discoverPage: true }, "automatic")).rejects.toMatchObject({ category: "exhausted" });
+    expect(downloads).toHaveLength(4);
+  });
+
+  it("stops resolution when the ten-second budget expires", async () => {
+    vi.useFakeTimers();
+    try {
+      const forward = vi.fn<ForwardProxy>(async () => await new Promise(() => {}));
+      const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+      const pending = resolver.resolve(scope());
+      const timeout = expect(pending).rejects.toMatchObject({ category: "timeout" });
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await timeout;
+      expect(forward).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("turns a rejected Forward-proxy transport into a network failure", async () => {
+    const forward = vi.fn<ForwardProxy>(async () => { throw new Error("proxy refused"); });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).rejects.toMatchObject({ category: "network" });
+  });
+
+  it("turns malformed proxy data into an invalid failure", async () => {
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding === "base64") return { body: "!!not-base64!!", contentType: "image/png", status: 200, url };
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).rejects.toMatchObject({ category: "invalid" });
+  });
+
+  it("discovers page and manifest icons only under Specific-page discovery", async () => {
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (url === "https://example.com/" && encoding === "text") return {
+        body: '<link rel="manifest" href="/site.webmanifest">', contentType: "text/html", status: 200, url,
+      };
+      if (url === "https://example.com/site.webmanifest") return {
+        body: JSON.stringify({ icons: [{ src: "/icon.png" }] }), contentType: "application/manifest+json", status: 200, url,
+      };
+      if (url === "https://example.com/icon.png" && encoding === "base64") return {
+        body: Buffer.from([1, 2, 3]).toString("base64"), contentType: "image/png", status: 200, url,
+      };
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).rejects.toMatchObject({ category: "exhausted" });
+    expect(forward).not.toHaveBeenCalledWith("https://example.com/", "text", "text/html", 5000);
+
+    await expect(resolver.resolve({ ...scope(), discoverPage: true })).resolves.toMatchObject({
+      source: "root rel=icon · web app manifest",
+      contentType: "image/png",
+    });
+    expect(forward).toHaveBeenCalledWith("https://example.com/site.webmanifest", "text", "application/manifest+json", 5000);
+  });
+
+  it("keeps manual candidate discovery for the icon picker", async () => {
+    const downloads: string[] = [];
+    const links = Array.from({ length: 17 }, (_, index) => `<link rel="icon" href="/icon-${index}.png">`).join("");
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding === "text") return { body: links, contentType: "text/html", status: 200, url };
+      downloads.push(url);
+      if (url.endsWith("/icon-16.png")) {
+        return {
+          body: Buffer.from([1, 2, 3]).toString("base64"),
+          contentType: "image/png",
+          status: 200,
+          url,
+        };
+      }
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.candidates(scope(), true)).resolves.toEqual([
+      expect.objectContaining({ source: "root rel=icon" }),
+    ]);
+    expect(downloads).toContain("https://example.com/icon-16.png");
+  });
+
+  it("generates a monogram fallback after fast-path exhaustion", async () => {
+    const forward = vi.fn<ForwardProxy>(async () => null);
+    const policy = { ...resolverPolicy, fallbackMode: "monogram" as const };
+    const resolver = new ForwardProxyIconResolver(forward, () => policy);
+
+    await expect(resolver.resolve(scope())).resolves.toMatchObject({ source: "generated monogram", contentType: "image/svg+xml" });
   });
 });

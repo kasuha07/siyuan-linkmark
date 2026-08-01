@@ -37,6 +37,31 @@ export type ResolvedIcon = {
 
 export type ResolutionTrigger = "automatic" | "manual";
 
+export type ResolutionFailureCategory = "timeout" | "network" | "invalid" | "exhausted";
+
+/**
+ * A resolution task failed with a category that is safe to expose to a
+ * Frontend client. It carries no remote response body, URL, or credential.
+ */
+export class ResolutionError extends Error {
+  constructor(public readonly category: ResolutionFailureCategory) {
+    super(`icon resolution failed: ${category}`);
+    this.name = "ResolutionError";
+  }
+}
+
+/**
+ * The three-state result of a cache-miss request. `ready` carries a committed
+ * Cache entry, `queued` acknowledges that a new or coalesced In-flight task
+ * owns the Link scope, and `unavailable` means the Cache authority declined
+ * to accept the work. A queued response is neither an icon result nor a
+ * resolution failure.
+ */
+export type CacheRequestResult =
+  | { status: "ready"; entry: CacheEntry }
+  | { status: "queued" }
+  | { status: "unavailable" };
+
 export interface CacheStorage {
   get(path: string): Promise<string | undefined>;
   put(path: string, content: string): Promise<void>;
@@ -52,6 +77,7 @@ export type CacheAuthorityOptions = {
   resolverVersion?: number;
   privateIconUrl?: (iconId: string) => string;
   onStateChange?: (cache: Record<string, CacheEntry>) => Promise<void> | void;
+  onResolutionFailure?: (scope: LinkScope, category: ResolutionFailureCategory) => Promise<void> | void;
 };
 
 const CACHE_INDEX_FILE = "favicon-cache-v2.json";
@@ -60,7 +86,7 @@ const MAX_RESOLUTION_CONCURRENCY = 4;
 
 type InFlightTask = {
   generation: number;
-  promise: Promise<CacheEntry | null>;
+  promise: Promise<void>;
 };
 
 type ResolvedCommit = {
@@ -116,23 +142,38 @@ export class KernelCacheAuthority {
     this.policy = { ...policy };
   }
 
-  async getOrQueue(scope: LinkScope, force = false, automatic = false): Promise<CacheEntry | null> {
+  async getOrQueue(scope: LinkScope, force = false, automatic = false): Promise<CacheRequestResult> {
     await this.initialize();
     const existing = this.invalidationGenerations.has(scope.key) ? undefined : this.cache[scope.key];
-    if (automatic && this.policy.pauseAutomaticFetch) return existing ? copyEntry(existing) : null;
-    if (existing && !force && this.isFresh(existing)) return copyEntry(existing);
+    if (automatic && this.policy.pauseAutomaticFetch) {
+      // A paused workspace policy cannot accept automatic work. Serve an
+      // existing entry or decline explicitly so the Frontend client can
+      // fail open without treating the pause as an icon failure.
+      return existing ? { status: "ready", entry: copyEntry(existing) } : { status: "unavailable" };
+    }
+    if (existing && !force && this.isFresh(existing)) return { status: "ready", entry: copyEntry(existing) };
     const generation = this.generationFor(scope.key);
     const pending = this.inFlight.get(scope.key);
-    if (pending?.generation === generation) return pending.promise;
+    if (pending?.generation === generation) return { status: "queued" };
 
     const resolve = async () => {
       const trigger: ResolutionTrigger = automatic ? "automatic" : "manual";
-      const resolved = await this.enqueueResolution(async () => {
+      const outcome = await this.enqueueResolution(async () => {
         if (!this.isCurrentGeneration(scope.key, generation)) return null;
-        return this.resolver.resolve(scope, trigger);
+        try {
+          return await this.resolver.resolve(scope, trigger);
+        } catch (error) {
+          return new ResolutionError(this.resolutionCategoryOf(error));
+        }
       });
-      if (!resolved || !this.isCurrentGeneration(scope.key, generation)) return null;
-      return this.commitResolved(scope, resolved, generation);
+      if (!this.isCurrentGeneration(scope.key, generation)) return;
+      if (outcome instanceof ResolutionError) {
+        await this.notifyResolutionFailure(scope, outcome.category);
+      } else if (outcome) {
+        await this.commitResolved(scope, outcome, generation);
+      } else {
+        await this.notifyResolutionFailure(scope, "exhausted");
+      }
     };
     // An invalidated task cannot supply a replacement result. Keep the newer
     // task distinct, but wait for the obsolete one so a Link scope cannot use
@@ -142,7 +183,7 @@ export class KernelCacheAuthority {
     void task.finally(() => {
       if (this.inFlight.get(scope.key)?.promise === task) this.inFlight.delete(scope.key);
     }).catch(() => undefined);
-    return task;
+    return { status: "queued" };
   }
 
   async putPinned(scope: LinkScope, entry: CacheEntry, contentType: string, bytes: ArrayBuffer, replaceKey?: string) {
@@ -425,6 +466,14 @@ export class KernelCacheAuthority {
 
   private async notify(cache = this.cache) {
     await this.options.onStateChange?.(copyCache(cache));
+  }
+
+  private async notifyResolutionFailure(scope: LinkScope, category: ResolutionFailureCategory) {
+    await this.options.onResolutionFailure?.(scope, category);
+  }
+
+  private resolutionCategoryOf(error: unknown): ResolutionFailureCategory {
+    return error instanceof ResolutionError ? error.category : "network";
   }
 
   private isFresh(entry: CacheEntry) {

@@ -1,4 +1,4 @@
-import type { IconResolver, LinkScope, ResolvedIcon, ResolutionTrigger } from "./cache-authority";
+import { ResolutionError, type IconResolver, type LinkScope, type ResolvedIcon, type ResolutionTrigger } from "./cache-authority";
 
 export type KernelResolverPolicy = {
   provider: string;
@@ -19,7 +19,15 @@ export type ForwardProxy = (url: string, responseEncoding: "text" | "base64", co
 
 type Candidate = { url: string; source: string };
 const MAX_ICON_BYTES = 2 * 1024 * 1024;
-const MAX_AUTOMATIC_CANDIDATE_ATTEMPTS = 16;
+const MAX_RESOLUTION_CANDIDATE_ATTEMPTS = 4;
+const MAX_RESOLUTION_BUDGET_MS = 10_000;
+
+type DownloadOutcome =
+  | { kind: "resolved"; resolved: ResolvedIcon }
+  | { kind: "failed" }
+  | { kind: "invalid" }
+  | { kind: "network" }
+  | { kind: "timeout" };
 
 export class ForwardProxyIconResolver implements IconResolver {
   constructor(private readonly forward: ForwardProxy, private readonly policy: () => KernelResolverPolicy) {}
@@ -32,13 +40,20 @@ export class ForwardProxyIconResolver implements IconResolver {
       return null;
     }
     if (!isSafePublicTarget(target)) return null;
-    const candidates = await this.candidateUrls(target, scope, this.policy().allowFullPageDiscovery || Boolean(scope.discoverPage));
-    const attempts = trigger === "automatic" ? candidates.slice(0, MAX_AUTOMATIC_CANDIDATE_ATTEMPTS) : candidates;
+    const deadline = Date.now() + MAX_RESOLUTION_BUDGET_MS;
+    const candidates = await this.candidateUrls(target, scope, this.policy().allowFullPageDiscovery || Boolean(scope.discoverPage), deadline);
+    const attempts = candidates.slice(0, MAX_RESOLUTION_CANDIDATE_ATTEMPTS);
+    let networkFailure = false;
+    let invalidData = false;
     for (const candidate of attempts) {
-      const resolved = await this.download(candidate);
-      if (resolved) return resolved;
+      const outcome = await this.tryDownload(candidate, deadline);
+      if (outcome.kind === "resolved") return outcome.resolved;
+      if (outcome.kind === "network") networkFailure = true;
+      if (outcome.kind === "invalid") invalidData = true;
+      if (outcome.kind === "timeout") throw new ResolutionError("timeout");
     }
-    return this.policy().fallbackMode === "monogram" ? this.monogram(target.hostname) : null;
+    if (this.policy().fallbackMode === "monogram") return this.monogram(target.hostname);
+    throw new ResolutionError(networkFailure ? "network" : invalidData ? "invalid" : "exhausted");
   }
 
   async candidates(scope: LinkScope, allowFullPageDiscovery = this.policy().allowFullPageDiscovery) {
@@ -50,9 +65,9 @@ export class ForwardProxyIconResolver implements IconResolver {
     }
     if (!isSafePublicTarget(target)) return [];
     const results: ResolvedIcon[] = [];
-    for (const candidate of await this.candidateUrls(target, scope, allowFullPageDiscovery)) {
-      const resolved = await this.download(candidate);
-      if (resolved) results.push(resolved);
+    for (const candidate of await this.candidateUrls(target, scope, allowFullPageDiscovery, Infinity)) {
+      const outcome = await this.tryDownload(candidate, Infinity);
+      if (outcome.kind === "resolved") results.push(outcome.resolved);
       if (results.length >= 8) break;
     }
     return results;
@@ -69,10 +84,14 @@ export class ForwardProxyIconResolver implements IconResolver {
     }
   }
 
-  private async candidateUrls(target: URL, scope: LinkScope, allowFullPageDiscovery: boolean) {
+  private async candidateUrls(target: URL, scope: LinkScope, allowFullPageDiscovery: boolean, deadline: number) {
     const policy = this.policy();
     const candidates: Candidate[] = [];
-    if (allowFullPageDiscovery) candidates.push(...await this.discoverPageIcons(target, target, "page rel=icon"));
+    const root = new URL("/", target.origin);
+    if (allowFullPageDiscovery) {
+      candidates.push(...await this.discoverPageIcons(target, target, "page rel=icon", deadline));
+      candidates.push(...await this.discoverPageIcons(root, target, "root rel=icon", deadline));
+    }
     if (scope.platformIconUrl) {
       try {
         const platformUrl = new URL(scope.platformIconUrl);
@@ -81,32 +100,33 @@ export class ForwardProxyIconResolver implements IconResolver {
         // Ignore malformed reviewed route mappings.
       }
     }
-    const root = new URL("/", target.origin);
-    candidates.push(...await this.discoverPageIcons(root, target, "root rel=icon"));
+    // Default resolution is the fast path: standard root icon paths and
+    // configured providers, without HTML or manifest retrieval.
     candidates.push(
-      { url: new URL("/favicon.svg", target.origin).href, source: "root favicon.svg" },
-      { url: new URL("/favicon.png", target.origin).href, source: "root favicon.png" },
-      { url: new URL("/apple-touch-icon.png", target.origin).href, source: "root apple-touch-icon.png" },
       { url: new URL("/favicon.ico", target.origin).href, source: "root favicon.ico" },
+      { url: new URL("/favicon.png", target.origin).href, source: "root favicon.png" },
+      ...providerCandidates(target.hostname.toLowerCase(), policy),
+      { url: new URL("/favicon.svg", target.origin).href, source: "root favicon.svg" },
+      { url: new URL("/apple-touch-icon.png", target.origin).href, source: "root apple-touch-icon.png" },
     );
-    const parentDomain = parentDomainOf(target.hostname);
-    if (parentDomain) {
-      const parent = new URL(`${target.protocol}//${parentDomain}/`);
-      candidates.push(...await this.discoverPageIcons(parent, parent, `parent domain ${parentDomain} · rel=icon`));
-      candidates.push(
-        { url: new URL("/favicon.svg", parent).href, source: `parent domain ${parentDomain} · root favicon.svg` },
-        { url: new URL("/favicon.png", parent).href, source: `parent domain ${parentDomain} · root favicon.png` },
-        { url: new URL("/apple-touch-icon.png", parent).href, source: `parent domain ${parentDomain} · root apple-touch-icon.png` },
-        { url: new URL("/favicon.ico", parent).href, source: `parent domain ${parentDomain} · root favicon.ico` },
-      );
+    if (allowFullPageDiscovery) {
+      const parentDomain = parentDomainOf(target.hostname);
+      if (parentDomain) {
+        const parent = new URL(`${target.protocol}//${parentDomain}/`);
+        candidates.push(...await this.discoverPageIcons(parent, parent, `parent domain ${parentDomain} · rel=icon`, deadline));
+        candidates.push(
+          { url: new URL("/favicon.ico", parent).href, source: `parent domain ${parentDomain} · root favicon.ico` },
+          { url: new URL("/favicon.png", parent).href, source: `parent domain ${parentDomain} · root favicon.png` },
+          { url: new URL("/favicon.svg", parent).href, source: `parent domain ${parentDomain} · root favicon.svg` },
+          { url: new URL("/apple-touch-icon.png", parent).href, source: `parent domain ${parentDomain} · root apple-touch-icon.png` },
+        );
+      }
     }
-    candidates.push(...providerCandidates(target.hostname.toLowerCase(), policy));
-    if (parentDomain) candidates.push(...providerCandidates(parentDomain, policy, `parent domain ${parentDomain} · `));
     return [...new Map(candidates.map((candidate) => [candidate.url, candidate])).values()];
   }
 
-  private async discoverPageIcons(target: URL, requestedTarget: URL, source: string): Promise<Candidate[]> {
-    const page = await this.forward(target.href, "text", "text/html");
+  private async discoverPageIcons(target: URL, requestedTarget: URL, source: string, deadline: number): Promise<Candidate[]> {
+    const page = await this.forwardBounded(target.href, "text", "text/html", deadline);
     if (!page || page.status < 200 || page.status >= 300 || !page.body || isAuthenticationRedirect(requestedTarget, page.url)) return [];
     const base = page.url ?? target.href;
     const candidates = [...page.body.matchAll(/<link\b[^>]*>/gi)].flatMap((match) => {
@@ -127,15 +147,15 @@ export class ForwardProxyIconResolver implements IconResolver {
     if (!manifest) return candidates;
     try {
       const manifestUrl = new URL(attributesFor(manifest[0]).href!, base);
-      return [...candidates, ...await this.discoverManifestIcons(manifestUrl, requestedTarget, source)];
+      return [...candidates, ...await this.discoverManifestIcons(manifestUrl, requestedTarget, source, deadline)];
     } catch {
       return candidates;
     }
   }
 
-  private async discoverManifestIcons(manifestUrl: URL, requestedTarget: URL, source: string): Promise<Candidate[]> {
+  private async discoverManifestIcons(manifestUrl: URL, requestedTarget: URL, source: string, deadline: number): Promise<Candidate[]> {
     if (!isSafePublicTarget(manifestUrl)) return [];
-    const response = await this.forward(manifestUrl.href, "text", "application/manifest+json");
+    const response = await this.forwardBounded(manifestUrl.href, "text", "application/manifest+json", deadline);
     if (!response || response.status < 200 || response.status >= 300 || !response.body || isAuthenticationRedirect(requestedTarget, response.url)) return [];
     try {
       const manifest = JSON.parse(response.body) as { icons?: Array<{ src?: string; purpose?: string }> };
@@ -154,9 +174,60 @@ export class ForwardProxyIconResolver implements IconResolver {
     }
   }
 
+  private async tryDownload(candidate: Candidate, deadline: number): Promise<DownloadOutcome> {
+    let response: ForwardResponse | null;
+    try {
+      response = await this.forwardBounded(candidate.url, "base64", "application/octet-stream", deadline);
+    } catch (error) {
+      if (error instanceof ResolutionError && error.category === "timeout") return { kind: "timeout" };
+      return { kind: "network" };
+    }
+    if (!response || response.status < 200 || response.status >= 300 || !response.body || isAuthenticationRedirect(new URL(candidate.url), response.url)) {
+      return { kind: "failed" };
+    }
+    if (!isWellFormedBase64(response.body)) return { kind: "invalid" };
+    const bytes = Buffer.from(response.body, "base64");
+    if (!bytes.length || bytes.length > MAX_ICON_BYTES || !isImagePayload(bytes, response.contentType)) return { kind: "failed" };
+    return {
+      kind: "resolved",
+      resolved: {
+        bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+        contentType: imageContentType(bytes, response.contentType),
+        source: candidate.source,
+      },
+    };
+  }
+
+  /**
+   * Runs one Forward-proxy request without exceeding the resolution deadline.
+   * The proxy's own timeout still bounds the request, but a strict race keeps
+   * the total per-task budget predictable when the proxy stalls.
+   */
+  private forwardBounded(url: string, responseEncoding: "text" | "base64", contentType: string, deadline: number) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return Promise.reject(new ResolutionError("timeout"));
+    const call = this.forward(url, responseEncoding, contentType, Math.min(5000, remaining));
+    if (!Number.isFinite(deadline)) return call;
+    return new Promise<ForwardResponse | null>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new ResolutionError("timeout")), remaining);
+      timer.unref?.();
+      Promise.resolve(call).then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
+  }
+
   private async download(candidate: Candidate): Promise<ResolvedIcon | null> {
     const response = await this.forward(candidate.url, "base64", "application/octet-stream", 5000);
     if (!response || response.status < 200 || response.status >= 300 || !response.body || isAuthenticationRedirect(new URL(candidate.url), response.url)) return null;
+    if (!isWellFormedBase64(response.body)) return null;
     const bytes = Buffer.from(response.body, "base64");
     if (!bytes.length || bytes.length > MAX_ICON_BYTES || !isImagePayload(bytes, response.contentType)) return null;
     return {
@@ -280,6 +351,12 @@ function isImagePayload(bytes: Buffer, contentType?: string) {
   const normalized = contentType?.split(";", 1)[0].toLowerCase();
   if (normalized?.startsWith("image/")) return true;
   return bytes.subarray(0, 4).toString("hex") === "89504e47" || bytes.subarray(0, 3).toString("hex") === "ffd8ff" || bytes.subarray(0, 4).toString("ascii") === "GIF8" || bytes.subarray(0, 4).toString("ascii") === "<svg";
+}
+
+function isWellFormedBase64(value: string) {
+  const withoutPadding = value.replace(/=+$/, "");
+  if (value.length - withoutPadding.length > 2 || withoutPadding.length % 4 === 1) return false;
+  return /^[A-Za-z0-9+/]+$/.test(withoutPadding);
 }
 
 function imageContentType(bytes: Buffer, contentType?: string) {
