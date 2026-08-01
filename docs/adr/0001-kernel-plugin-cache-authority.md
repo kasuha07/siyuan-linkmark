@@ -10,13 +10,13 @@ On first initialization, the cache authority imports well-formed legacy entries 
 
 Selecting a custom icon, restoring automatic resolution, deleting an entry, and clearing cache are workspace cache operations. The authority broadcasts the resulting state to connected frontend clients; clearing cache continues to retain pinned icons.
 
-Resolution sources and fallback, monogram configuration, automatic-fetch pause, full-page discovery, and cache lifetime are cache policy stored by the authority. Per-client display preferences are limited to enabled rendering, Link Icon coordination mode, and icon size.
+Resolution sources and fallback, monogram configuration, automatic-fetch pause, full-page discovery, and cache lifetime are cache policy stored by the authority. Per-client display preferences are limited to enabled rendering and icon size.
 
 The authority deduplicates and serializes active resolution work by link scope, not by bare domain. Clients requesting the same scope share one task; distinct route-specific scopes retain their own icons.
 
 An explicit deletion, restore-automatic action, or cache clear invalidates older affected resolution tasks. A task that finishes after invalidation must not commit an index entry or private icon payload; only a newly requested task may populate that scope again.
 
-If the cache authority is starting, reloading, or unavailable, frontend rendering fails open: usable cached icons remain visible, cache misses do not block editing or interfere with Link Icon, and automatic requests remain silent. Explicit user actions surface actionable errors.
+If the cache authority is starting, reloading, or unavailable, frontend rendering fails open: usable cached icons remain visible, cache misses do not block editing, and automatic requests remain silent. Explicit user actions surface actionable errors.
 
 The migration adds a development-only test runner and regression coverage for legacy import, scoped task deduplication, invalidated-task non-commit, pinned-icon retention, and frontend RPC fail-open behavior.
 

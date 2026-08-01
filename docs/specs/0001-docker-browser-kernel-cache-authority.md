@@ -30,13 +30,12 @@ API and serves committed icon bytes over an authenticated private icon route.
 9. As a user migrating from the existing plugin version, I want valid legacy entries and pinned icons preserved, so that upgrading does not unexpectedly discard my curated cache.
 10. As a user whose legacy automatic icon is missing or unreadable, I want normal cache validation to recover or remove it, so that stale metadata does not create broken rendering.
 11. As a user whose browser closes after requesting an icon, I want a kernel-started task to continue while the kernel remains running, so that the shared server can complete work independently of the page.
-12. As a user encountering an unavailable or reloading kernel plugin, I want editing and Link Icon behavior to remain unaffected, so that a transient plugin failure does not disrupt documents.
+12. As a user encountering an unavailable or reloading kernel plugin, I want editing and existing document content to remain unaffected, so that a transient plugin failure does not disrupt documents.
 13. As a user manually refreshing or selecting an icon, I want a useful error when the request fails, so that I can decide whether to retry or change the source.
-14. As a user relying on Link Icon, I want Smart Fill and Auto Favicon Priority behavior preserved, so that the two plugins continue to coexist.
-15. As a privacy-conscious user, I want favicon resolution to retain public-target validation and avoid forwarding workspace credentials, so that the cache authority does not become a route to private network resources.
-16. As a workspace administrator, I want cache policy to be shared, so that resolver, fallback, monogram, discovery, and cache-lifetime decisions remain consistent for every client.
-17. As a user with different device display preferences, I want rendering enablement, Link Icon coordination, and icon size to remain client-local, so that visual choices do not conflict across devices.
-18. As a maintainer, I want deterministic regression tests at the cache-authority boundary, so that multi-client guarantees do not depend on a live browser test environment.
+14. As a privacy-conscious user, I want favicon resolution to retain public-target validation and avoid forwarding workspace credentials, so that the cache authority does not become a route to private network resources.
+15. As a workspace administrator, I want cache policy to be shared, so that resolver, fallback, monogram, discovery, and cache-lifetime decisions remain consistent for every client.
+16. As a user with different device display preferences, I want rendering enablement and icon size to remain client-local, so that visual choices do not conflict across devices.
+17. As a maintainer, I want deterministic regression tests at the cache-authority boundary, so that multi-client guarantees do not depend on a live browser test environment.
 
 ## Implementation Decisions
 
@@ -47,7 +46,7 @@ API and serves committed icon bytes over an authenticated private icon route.
 - A Cache entry is authoritative only after icon bytes are validated and its index update commits. Replaced automatic payloads are removed only after the replacement commits.
 - Pinned icons never expire and are excluded from ordinary refresh and clear-cache cleanup. Explicit restore-automatic and delete operations remain workspace cache operations.
 - Delete, restore-automatic, and clear-cache actions invalidate affected In-flight tasks. An invalidated task must not commit either icon bytes or index state, even if its network request completed.
-- Cache policy is workspace-wide: resolver source and mode, fallback, monogram configuration, automatic-fetch pause, full-page discovery, and cache lifetime. Display preferences are per Frontend client: rendering enabled state, Link Icon coordination mode, and icon size.
+- Cache policy is workspace-wide: resolver source and mode, fallback, monogram configuration, automatic-fetch pause, full-page discovery, and cache lifetime. Display preferences are per Frontend client: rendering enabled state and icon size.
 - On first authority initialization, well-formed legacy cache entries are imported. Usable pinned icons are retained; automatic entries keep their legacy freshness time and are later refreshed or removed by normal validation if their payload is unavailable.
 - Icon bytes are stored in plugin-private storage and delivered through an authenticated Private icon route. Data URIs are permitted only as a controlled fallback if future Docker-browser validation proves CSS cannot use the private route.
 - The authority broadcasts committed state changes so each connected Frontend client reconciles its rendered rules. During authority startup, reload, or temporary unavailability, rendering fails open: existing usable icons remain visible, cache misses do not block editing, and automatic failures are silent.
@@ -68,7 +67,7 @@ API and serves committed icon bytes over an authenticated private icon route.
 - Durable task recovery, checkpointing, or automatic continuation across a kernel restart, hot reload, plugin disablement, or SiYuan shutdown.
 - An external worker, sidecar, proxy, or remote cache service.
 - Reliance on undocumented kernel source-only proxy facilities or undocumented public plugin routes.
-- A general static icon library, changes to Link Icon's own implementation, or unrelated resolver redesign.
+- A general static icon library or unrelated resolver redesign.
 - Real Docker/browser automated tests, manual two-browser acceptance, release tagging, publication, and changes outside this first-phase architecture.
 
 ## Further Notes

@@ -5,7 +5,6 @@ Issues and improvement suggestions are welcome. When reporting a problem, please
 - SiYuan version and operating system;
 - plugin version, network strategy, favicon provider, and fallback behavior;
 - the complete public URL whose icon cannot be resolved;
-- whether link-icon or another link-style plugin is enabled;
 - the complete `[auto-favicon] Unable to cache` console error with private
   information removed.
 
@@ -40,7 +39,6 @@ attach `package.zip`; do not manually create the same Release first.
 - 思源版本和操作系统；
 - 插件版本、网络策略、图标服务和失败后的兜底方式；
 - 无法取得图标的完整公开链接；
-- 是否启用了 link-icon 或其他链接样式插件；
 - 完整的 `[auto-favicon] Unable to cache` 控制台错误，注意移除隐私数据。
 
 提交代码前请运行：

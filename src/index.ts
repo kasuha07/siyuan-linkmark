@@ -26,7 +26,6 @@ type CacheEntry = {
   includeSubdomains?: boolean;
 };
 
-type LinkIconMode = "smart" | "auto";
 type FetchTrigger = "automatic" | "manual";
 type MonogramOverride = Omit<MonogramStyle, "colorMode"> & { letter: string };
 
@@ -34,7 +33,6 @@ type Settings = {
   enabled: boolean;
   pauseAutomaticFetch: boolean;
   allowFullPageDiscovery: boolean;
-  linkIconMode: LinkIconMode;
   provider: string;
   providerPreset: ProviderPreset;
   resolverMode: ResolverMode;
@@ -60,7 +58,6 @@ const defaultSettings: Settings = {
   enabled: true,
   pauseAutomaticFetch: false,
   allowFullPageDiscovery: false,
-  linkIconMode: "auto",
   provider: "https://example.com/favicon/{domain}",
   providerPreset: "auto",
   resolverMode: "mainland",
@@ -86,13 +83,10 @@ export default class AutoFaviconPlugin extends Plugin {
   }>();
   private failedDomains = new Map<string, number>();
   private iconRules = new Map<string, string>();
-  private forceDomains = new Set<string>();
   private observer?: MutationObserver;
-  private styleObserver?: MutationObserver;
   private scanTimer?: number;
   private topBarElement?: HTMLElement;
   private enabledInput?: HTMLInputElement;
-  private linkIconModeSelect?: HTMLSelectElement;
   private cacheCountElement?: HTMLElement;
   private failureReasons = new Map<string, string>();
   private automaticFetchGeneration = 0;
@@ -107,11 +101,10 @@ export default class AutoFaviconPlugin extends Plugin {
       : await this.loadData(LEGACY_SETTINGS_FILE);
     const saved = (loadedSettings && typeof loadedSettings === "object" && !Array.isArray(loadedSettings)
       ? loadedSettings
-      : {}) as Partial<Settings> & { preferDynamic?: boolean };
+      : {}) as Partial<Settings>;
     this.settings = {
       ...defaultSettings,
       ...saved,
-      linkIconMode: saved.linkIconMode ?? (saved.preferDynamic === false ? "smart" : "auto"),
       monogramOverrides: { ...defaultSettings.monogramOverrides, ...(saved.monogramOverrides ?? {}) },
     };
     await this.loadKernelState();
@@ -124,7 +117,6 @@ export default class AutoFaviconPlugin extends Plugin {
 
   onunload() {
     this.observer?.disconnect();
-    this.styleObserver?.disconnect();
     document.removeEventListener("input", this.inputListener, true);
     if (this.scanTimer) window.clearTimeout(this.scanTimer);
     this.topBarElement?.remove();
@@ -181,8 +173,8 @@ export default class AutoFaviconPlugin extends Plugin {
   }
 
   private async saveDisplaySettings() {
-    const { enabled, linkIconMode, iconSize } = this.settings;
-    await this.saveData(DISPLAY_SETTINGS_FILE, { enabled, linkIconMode, iconSize });
+    const { enabled, iconSize } = this.settings;
+    await this.saveData(DISPLAY_SETTINGS_FILE, { enabled, iconSize });
   }
 
   private async saveCachePolicy() {
@@ -232,15 +224,6 @@ export default class AutoFaviconPlugin extends Plugin {
     allowFullPageDiscovery.type = "checkbox";
     allowFullPageDiscovery.className = "b3-switch fn__flex-center";
     allowFullPageDiscovery.checked = this.settings.allowFullPageDiscovery;
-
-    const linkIconMode = document.createElement("select");
-    linkIconMode.className = "b3-select fn__size200";
-    addOptions(linkIconMode, [
-      ["smart", t("linkIconSmart")],
-      ["auto", t("linkIconAuto")],
-    ]);
-    linkIconMode.value = this.settings.linkIconMode;
-    this.linkIconModeSelect = linkIconMode;
 
     const provider = document.createElement("input");
     provider.className = "b3-text-field fn__block";
@@ -452,7 +435,6 @@ export default class AutoFaviconPlugin extends Plugin {
         this.settings.enabled = enabled.checked;
         this.settings.pauseAutomaticFetch = pauseAutomaticFetch.checked;
         this.settings.allowFullPageDiscovery = allowFullPageDiscovery.checked;
-        this.settings.linkIconMode = linkIconMode.value as LinkIconMode;
         this.settings.provider = provider.value.trim() || defaultSettings.provider;
         this.settings.providerPreset = providerPreset.value as ProviderPreset;
         this.settings.resolverMode = resolverMode.value as ResolverMode;
@@ -494,11 +476,6 @@ export default class AutoFaviconPlugin extends Plugin {
       title: t("strategyTitle"),
       description: t("strategyDescription"),
       createActionElement: () => resolverMode,
-    });
-    this.setting.addItem({
-      title: t("linkIconTitle"),
-      description: t("linkIconDescription"),
-      createActionElement: () => linkIconMode,
     });
     this.setting.addItem({
       title: t("providerTitle"),
@@ -581,7 +558,6 @@ export default class AutoFaviconPlugin extends Plugin {
     menu.addItem({
       type: "readonly",
       label: `${this.t("toolbarStatus")
-        .replace("{mode}", this.t(this.settings.linkIconMode === "smart" ? "linkIconSmart" : "linkIconAuto"))
         .replace("{count}", String(Object.keys(this.cache).length))}${
         this.settings.pauseAutomaticFetch ? ` · ${this.t("automaticFetchPausedStatus")}` : ""
       }${
@@ -592,22 +568,6 @@ export default class AutoFaviconPlugin extends Plugin {
       label: this.t("toolbarEnabled"),
       checked: this.settings.enabled,
       click: () => void this.setEnabled(!this.settings.enabled),
-    });
-    menu.addItem({
-      label: this.t("toolbarMode"),
-      type: "submenu",
-      submenu: [
-        {
-          label: this.t("linkIconSmart"),
-          checked: this.settings.linkIconMode === "smart",
-          click: () => void this.setLinkIconMode("smart"),
-        },
-        {
-          label: this.t("linkIconAuto"),
-          checked: this.settings.linkIconMode === "auto",
-          click: () => void this.setLinkIconMode("auto"),
-        },
-      ],
     });
     menu.addSeparator();
     menu.addItem({
@@ -658,16 +618,6 @@ export default class AutoFaviconPlugin extends Plugin {
     await this.rebuildRules();
     if (enabled && !this.settings.pauseAutomaticFetch) this.scheduleScan();
     showMessage(this.t(enabled ? "pluginEnabled" : "pluginDisabled"));
-  }
-
-  private async setLinkIconMode(mode: LinkIconMode) {
-    if (this.settings.linkIconMode === mode) return;
-    this.settings.linkIconMode = mode;
-    if (this.linkIconModeSelect) this.linkIconModeSelect.value = mode;
-    await this.saveDisplaySettings();
-    await this.rebuildRules();
-    this.scheduleScan();
-    showMessage(this.t("modeChanged").replace("{mode}", this.t(mode === "smart" ? "linkIconSmart" : "linkIconAuto")));
   }
 
   private confirmRefreshAll() {
@@ -785,7 +735,6 @@ export default class AutoFaviconPlugin extends Plugin {
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.delete(key);
     this.iconRules.delete(key);
-    this.forceDomains.delete(key);
     this.renderRules();
     this.updateCacheCount();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
@@ -1251,7 +1200,6 @@ export default class AutoFaviconPlugin extends Plugin {
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.clear();
     this.iconRules.clear();
-    this.forceDomains.clear();
     await this.rebuildRules();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
   }
@@ -1265,23 +1213,6 @@ export default class AutoFaviconPlugin extends Plugin {
       attributes: true,
       attributeFilter: ["data-href", "href", "data-type"],
     });
-    this.styleObserver = new MutationObserver((mutations) => {
-      const externalStyleChanged = mutations.some((mutation) => {
-        const target = mutation.target instanceof Element ? mutation.target : mutation.target.parentElement;
-        if (target?.closest(`#${RUNTIME_STYLE_ID}`)) return false;
-        if (target?.matches("style, link[rel='stylesheet']")) return true;
-        return [...mutation.addedNodes, ...mutation.removedNodes].some((node) =>
-          node instanceof Element && (node.matches("style, link[rel='stylesheet']") || Boolean(node.querySelector("style, link[rel='stylesheet']"))),
-        );
-      });
-      if (externalStyleChanged) this.scheduleScan();
-    });
-    this.styleObserver.observe(document.head, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["href"],
-    });
     document.addEventListener("input", this.inputListener, true);
   }
 
@@ -1294,18 +1225,6 @@ export default class AutoFaviconPlugin extends Plugin {
     if (!this.settings.enabled) return;
     const domains = this.collectDocumentDomains();
 
-    const runtimeStyle = document.getElementById(RUNTIME_STYLE_ID) as HTMLStyleElement | null;
-    const previousRules = runtimeStyle?.textContent ?? "";
-    if (runtimeStyle) runtimeStyle.textContent = "";
-    try {
-      domains.forEach(({ elements }, key) => {
-        if (this.externalIconState(elements) === "meaningful") this.forceDomains.delete(key);
-        else this.forceDomains.add(key);
-      });
-    } finally {
-      if (runtimeStyle) runtimeStyle.textContent = previousRules;
-    }
-
     let rulesChanged = false;
     domains.forEach(({ scope, targetUrl }, key) => {
       const cachedMatch = this.cachedIconForScope(scope);
@@ -1315,7 +1234,7 @@ export default class AutoFaviconPlugin extends Plugin {
           void this.expireCachedDomain(cacheKey, cached);
           return;
         }
-        const rule = this.createRule(scope, cached.url, cached.source);
+        const rule = this.createRule(scope, cached.url);
         if (this.iconRules.get(key) !== rule) {
           this.iconRules.set(key, rule);
           rulesChanged = true;
@@ -1328,17 +1247,6 @@ export default class AutoFaviconPlugin extends Plugin {
       void this.fetchAndCache(scope, targetUrl);
     });
     if (rulesChanged) this.renderRules();
-  }
-
-  private externalIconState(elements: HTMLElement[]): "meaningful" | "placeholder" | "none" {
-    let placeholder = false;
-    for (const element of elements) {
-      const background = getComputedStyle(element, "::before").backgroundImage;
-      if (!background || background === "none" || background === 'url("")') continue;
-      if (background.includes("plugins/link-icon/icon/net2.svg")) placeholder = true;
-      else return "meaningful";
-    }
-    return placeholder ? "placeholder" : "none";
   }
 
   private cachedIconForScope(scope: LinkScope) {
@@ -1418,7 +1326,7 @@ export default class AutoFaviconPlugin extends Plugin {
       this.updateCacheCount();
       this.failedDomains.delete(scope.key);
       this.failureReasons.delete(scope.key);
-      this.setRule(scope, entry.url, entry.source);
+      this.setRule(scope, entry.url);
       return fetchOutcomeFor(entry);
     } catch (error) {
       this.updateCacheCount();
@@ -1426,8 +1334,8 @@ export default class AutoFaviconPlugin extends Plugin {
       console.warn(`[auto-favicon] Unable to cache ${scope.key}`, error);
       this.failureReasons.set(scope.key, `${scope.key} · kernel resolve · ${this.errorText(error)}`);
       this.failedDomains.set(scope.key, Date.now());
-      // Do not create a pseudo-element when no verified image exists. This
-      // prevents an empty gap and lets link-icon keep its own valid icon.
+      // Do not create a pseudo-element when no verified image exists, which
+      // prevents an empty gap beside the link.
       return "failure";
     } finally {
       this.pendingDomains.delete(scope.key);
@@ -1481,7 +1389,7 @@ export default class AutoFaviconPlugin extends Plugin {
         const fresh = this.settings.pauseAutomaticFetch || this.isCacheEntryFresh(entry);
         if (current && fresh) {
           const scope = scopeFromCacheKey(key, entry.domain, entry.pathPrefix);
-          this.iconRules.set(key, this.createRule(scope, entry.url, entry.source));
+          this.iconRules.set(key, this.createRule(scope, entry.url));
         }
       }
     }
@@ -1489,13 +1397,13 @@ export default class AutoFaviconPlugin extends Plugin {
     this.renderRules();
   }
 
-  private setRule(scope: LinkScope, url: string, source?: string) {
+  private setRule(scope: LinkScope, url: string) {
     if (!this.settings.enabled) return;
-    this.iconRules.set(scope.key, this.createRule(scope, url, source));
+    this.iconRules.set(scope.key, this.createRule(scope, url));
     this.renderRules();
   }
 
-  private createRule(scope: LinkScope, iconUrl: string, source?: string) {
+  private createRule(scope: LinkScope, iconUrl: string) {
     const selectors: string[] = [];
     const elements = [
       [".protyle-wysiwyg span[data-type~='a']", "data-href"],
@@ -1512,12 +1420,6 @@ export default class AutoFaviconPlugin extends Plugin {
         }
       }
     }
-    // Smart mode keeps meaningful link-icon/theme icons, but replaces
-    // link-icon's generic net2.svg placeholder. Auto mode gives a retrieved
-    // favicon priority while still letting curated icons beat a monogram.
-    const smartFill = this.forceDomains.has(scope.key);
-    const autoPriority = this.settings.linkIconMode === "auto" && source !== "generated monogram";
-    const important = smartFill || autoPriority ? " !important" : "";
     const size = this.settings.iconSize;
     return `${selectors.join(",\n")} {
       content: "";
@@ -1526,7 +1428,7 @@ export default class AutoFaviconPlugin extends Plugin {
       height: ${size}em;
       margin-right: 0.22em;
       vertical-align: -0.12em;
-      background-image: url(${this.cssString(iconUrl)})${important};
+      background-image: url(${this.cssString(iconUrl)});
       background-position: center;
       background-size: contain;
       background-repeat: no-repeat;

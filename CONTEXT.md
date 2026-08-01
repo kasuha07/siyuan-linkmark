@@ -48,6 +48,10 @@ _Avoid_: frontend preference, device setting
 A frontend-client setting that affects only how that client renders Auto Favicon without changing the shared cache.
 _Avoid_: cache policy, workspace setting
 
+**Independent icon rendering**:
+The frontend behavior that renders Auto Favicon's selected icon according to its own cache and display rules, without detecting, preserving, or prioritizing another plugin's icon.
+_Avoid_: Link Icon compatibility, cooperative rendering
+
 **Specific-page discovery**:
 An optional workspace cache policy that permits retrieving an external link's path, without its query parameters or fragment, to discover a page-specific icon. It is disabled by default.
 _Avoid_: ordinary favicon retrieval, automatic page visit
@@ -61,7 +65,7 @@ A resolution task that began before a later workspace cache operation and is no 
 _Avoid_: delayed refresh, retry result
 
 **Fail-open rendering**:
-The frontend behavior that leaves editing and Link Icon unaffected when the cache authority cannot serve a request.
+The frontend behavior that leaves editing and existing document content unaffected when the cache authority cannot serve a request.
 _Avoid_: blocking fallback, error icon
 
 **Private icon route**:

@@ -1,8 +1,4 @@
 {
-  "linkIconTitle": "与「链接图标」配合方式",
-  "linkIconDescription": "智能补充会保留「链接图标」的精选和自定义图标，仅替换通用网页占位符；本插件优先会优先显示获取到的 favicon。",
-  "linkIconSmart": "智能补充",
-  "linkIconAuto": "本插件图标优先（推荐）",
   "monogramColorTitle": "字母图标配色",
   "monogramColorDescription": "可根据域名稳定生成不同颜色，或为所有自动字母图标指定一组渐变色。",
   "monogramColorDomain": "根据域名自动配色",
@@ -128,14 +124,12 @@
   "noRefreshableDomains": "当前只有固定的自定义图标，没有需要重新获取的域名",
   "cacheCleared": "自动图标缓存已清除，已固定的自定义图标保留",
   "toolbarTitle": "自动网站图标",
-  "toolbarStatus": "当前：{mode} · 缓存 {count} 个图标项",
+  "toolbarStatus": "缓存 {count} 个图标项",
   "automaticFetchPausedStatus": "自动获取已暂停",
   "fullPageDiscoveryEnabledStatus": "已允许页面探测",
   "toolbarEnabled": "启用网站图标",
-  "toolbarMode": "显示策略",
   "openSettings": "打开插件设置",
   "feedback": "问题反馈",
   "pluginEnabled": "自动网站图标已启用",
-  "pluginDisabled": "自动网站图标已停用",
-  "modeChanged": "显示策略已切换为：{mode}"
+  "pluginDisabled": "自动网站图标已停用"
 }

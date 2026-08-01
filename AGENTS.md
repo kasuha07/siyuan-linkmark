@@ -3,7 +3,7 @@
 ## Purpose
 
 Auto Favicon is a focused SiYuan plugin that automatically shows website favicons
-before external links. Keep the scope narrow and preserve coexistence with Link Icon.
+before external links. Keep the scope narrow and independent of third-party link-icon plugins.
 
 ## Commands
 
@@ -30,7 +30,7 @@ complete marketplace payload in `dist/`.
 
 - Do not write `style` or `data-*` attributes to editable SiYuan document nodes.
   Use runtime CSS injected into `document.head`.
-- Preserve Smart Fill and Auto Favicon Priority behavior with Link Icon.
+- Do not add third-party link-icon detection, priority behavior, or compatibility settings.
 - Keep user-pinned icons safe from ordinary refresh and cache cleanup.
 - Do not add general static icon libraries. A small reviewed mapping for
   privacy-safe office-platform route types is allowed when its provenance and

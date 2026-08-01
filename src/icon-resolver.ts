@@ -238,7 +238,7 @@ async function discoverPageIcons(target: URL, requestedTarget: URL): Promise<Can
       const url = new URL(link.getAttribute("href")!, baseUrl).href;
       candidates.push({
         url,
-        score: scoreLinkIcon(link, index),
+        score: scorePageIconLink(link, index),
         source: rel.includes("apple-touch-icon") ? "apple-touch-icon" : "page rel=icon",
       });
     } catch {
@@ -281,7 +281,7 @@ async function discoverManifestIcons(manifestUrl: string): Promise<Candidate[]> 
   }
 }
 
-function scoreLinkIcon(link: HTMLLinkElement, index: number) {
+function scorePageIconLink(link: HTMLLinkElement, index: number) {
   const relBonus = link.rel.toLowerCase().includes("apple-touch-icon") ? 60 : 100;
   return relBonus + scoreSize(link.sizes?.value ?? link.getAttribute("sizes") ?? "") +
     scoreType(link.type) + index / 100;

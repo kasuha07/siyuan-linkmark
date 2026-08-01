@@ -14,8 +14,7 @@ Auto Favicon automatically retrieves, displays, and locally caches website icons
 - Cache verified icons in the SiYuan workspace and reuse them without external requests.
 - Customize fallback monogram colors, letters, and shapes globally or per domain.
 - Upload a custom icon, use an image URL, or choose from discovered candidates for a domain, with optional reuse across its subdomains.
-- Work alongside **Link Icon** while preserving its curated and custom icons.
-- Use the top-bar menu to change the display strategy, refresh the current document, manage cache, or open settings.
+- Use the top-bar menu to refresh the current document, manage cache, or open settings.
 - Pause background retrieval, or explicitly allow specific-page discovery globally or once from the candidate picker.
 
 ## Features and what they are for
@@ -31,7 +30,6 @@ Auto Favicon automatically retrieves, displays, and locally caches website icons
 | Third-party favicon service | Query FaviconKit, favicon.im, or another selected service by domain when the website has no usable icon. Document paths, titles, and tokens are never sent. |
 | Local colorful monogram fallback | Generate a stable domain-letter icon locally after every real-icon source fails, so the link is not left without a visual marker. |
 | Monogram appearance | Adjust fallback colors, text, and shape globally or for individual domains without changing real favicons. |
-| Link Icon cooperation | Smart Fill preserves Link Icon's curated graphics; Auto Favicon Priority displays retrieved or pinned Auto Favicon icons first. |
 | Icon size | Change the icon size relative to surrounding text without modifying the cached image. |
 | Cache lifetime | Choose when automatic icons should be checked again; `0` disables time-based expiration. Pinned icons do not expire. |
 | Refresh current document / all cache | Explicitly retrieve the current document or all non-pinned entries again, including while automatic retrieval is paused. A failed refresh keeps the previous usable icon. |
@@ -55,8 +53,6 @@ The plugin first looks for local pinned entries and cache records. It performs n
 11. A locally generated colorful domain monogram.
 
 When **Allow specific-page discovery** is enabled or **Load page-specific candidates** is clicked, the page's own `rel=icon` and manifest icons are inserted before item 6. This authorization does not override pinned icons or an existing usable cache.
-
-This is Auto Favicon's internal selection order. When Link Icon is also active, the display strategy below is applied afterward: Smart Fill yields to Link Icon's curated or custom icon, while Auto Favicon Priority favors the non-monogram icon selected by Auto Favicon.
 
 ## Cache behavior
 
@@ -87,19 +83,6 @@ A website may publish several icons whose sharpness, padding, and borders vary b
 
 A manually selected icon is pinned locally and is not replaced by normal refreshes, cache expiration, or **Clear all cache**. Office-platform icons can be pinned to the current route type, the whole domain, or a parent domain and its subdomains. Select **Restore automatic retrieval** when you want the plugin to choose again.
 
-## Working with Link Icon
-
-[Link Icon](https://github.com/chenshinshi/link-icon) is the marketplace name of the project whose repository name is `link-icon`. The recommended **Smart Fill** mode uses this priority:
-
-1. Link Icon curated or user-defined icons.
-2. A real favicon retrieved by Auto Favicon.
-3. A local colorful monogram.
-4. Link Icon's generic web placeholder.
-
-Auto Favicon does not redistribute Link Icon's static icon library or copy its block-reference implementation. SiYuan document and block-reference icons remain handled by Link Icon.
-
-Pinned custom icons follow the same display strategy: Smart Fill still yields to a meaningful Link Icon graphic, while Auto Favicon Priority displays the pinned icon first.
-
 ## Network and privacy
 
 - **Standard Network:** Current and valid parent domains plus the selected favicon service; no Google or DuckDuckGo requests.
@@ -112,13 +95,13 @@ Localhost, `.local`, loopback, link-local, and private IP addresses are not sent
 
 ## Install and use
 
-Search for **Auto Favicon** in the SiYuan Marketplace and install it, or extract `package.zip` into `workspace/data/plugins/auto-favicon/`. Enable the plugin, open its settings to choose a network and display strategy, then use the Auto Favicon button in the top toolbar for common actions.
+Search for **Auto Favicon** in the SiYuan Marketplace and install it, or extract `package.zip` into `workspace/data/plugins/auto-favicon/`. Enable the plugin, choose a network strategy in its settings, then use the Auto Favicon button in the top toolbar for common actions.
 
 ## Feedback
 
 Users who cannot conveniently access GitHub can reply to the [Auto Favicon community post](https://ld246.com/article/1785052610863). GitHub users can also report problems through [GitHub Issues](https://github.com/Acetab/auto-favicon/issues).
 
-When reporting a problem, please include the Auto Favicon and SiYuan versions, operating system, affected public URL, network strategy, favicon provider and fallback setting, whether Link Icon is enabled, and any relevant `[auto-favicon] Unable to cache` console error. Remove private URLs, note content, tokens, and local paths before posting.
+When reporting a problem, please include the Auto Favicon and SiYuan versions, operating system, affected public URL, network strategy, favicon provider and fallback setting, and any relevant `[auto-favicon] Unable to cache` console error. Remove private URLs, note content, tokens, and local paths before posting.
 
 ## Credits and license
 
@@ -126,15 +109,13 @@ The idea of displaying icons before links and the original need for this plugin 
 
 ## Recent updates
 
+### 0.6.0
+
+- Remove Link Icon-specific settings and rendering behavior; Auto Favicon now renders its selected icons independently with ordinary CSS precedence.
+
 ### 0.5.7
 
 - Keep public NoCode deployments on shared hosting domains in separate route-scoped caches and discover each app's declared favicon.
 - Probe common root icon files such as `/favicon.svg`, `/favicon.png`, and `/apple-touch-icon.png` before falling back to `/favicon.ico` or third-party services.
-
-### 0.5.6
-
-- Stop visiting document-specific paths by default, with an explicit setting and one-time action for page-specific discovery.
-- Cache and display stable route types separately for Tencent Docs, Feishu/Lark, and Google Docs.
-- Add pause automatic retrieval, parent-domain fallback, and type-scoped pinned icons.
 
 See [GitHub Releases](https://github.com/Acetab/auto-favicon/releases) for the complete version history.

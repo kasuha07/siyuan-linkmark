@@ -1,8 +1,4 @@
 {
-  "linkIconTitle": "Working with Link Icon",
-  "linkIconDescription": "Smart Fill keeps curated and custom Link Icon graphics and replaces only its generic web placeholder. Auto Favicon Priority prefers a retrieved favicon.",
-  "linkIconSmart": "Smart Fill",
-  "linkIconAuto": "Auto Favicon Priority (recommended)",
   "monogramColorTitle": "Letter icon colors",
   "monogramColorDescription": "Use stable colors derived from each domain, or choose one custom gradient for generated letter icons.",
   "monogramColorDomain": "Automatic colors by domain",
@@ -128,14 +124,12 @@
   "noRefreshableDomains": "Only pinned custom icons remain; there are no domains to refresh",
   "cacheCleared": "Automatic icon cache cleared; pinned custom icons were kept",
   "toolbarTitle": "Auto Favicon",
-  "toolbarStatus": "Current: {mode} · {count} cached icon entries",
+  "toolbarStatus": "{count} cached icon entries",
   "automaticFetchPausedStatus": "automatic retrieval paused",
   "fullPageDiscoveryEnabledStatus": "page discovery allowed",
   "toolbarEnabled": "Enable website icons",
-  "toolbarMode": "Display strategy",
   "openSettings": "Open plugin settings",
   "feedback": "Community feedback",
   "pluginEnabled": "Auto Favicon enabled",
-  "pluginDisabled": "Auto Favicon disabled",
-  "modeChanged": "Display strategy changed to: {mode}"
+  "pluginDisabled": "Auto Favicon disabled"
 }
