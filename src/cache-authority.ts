@@ -387,7 +387,7 @@ export class KernelCacheAuthority {
       this.resolvedCommitBatch.push({ commit: { scope, resolved, generation, taskId, acceptedAt }, resolve, reject });
       if (this.resolvedCommitBatchScheduled) return;
       this.resolvedCommitBatchScheduled = true;
-      queueMicrotask(() => this.flushResolvedCommitBatch());
+      void Promise.resolve().then(() => this.flushResolvedCommitBatch());
     });
   }
 

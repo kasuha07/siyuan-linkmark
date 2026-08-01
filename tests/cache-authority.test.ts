@@ -198,6 +198,22 @@ describe("KernelCacheAuthority", () => {
     expect(resolve).toHaveBeenCalledTimes(1);
   });
 
+  it("commits a resolved icon when queueMicrotask is unavailable", async () => {
+    const watched = subscribers();
+    vi.stubGlobal("queueMicrotask", undefined);
+    try {
+      const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => resolved() }, () => 100, {
+        onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      });
+      await authority.initialize();
+
+      await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+      await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("acknowledges a cache miss as queued before resolution or persistence completes", async () => {
     let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;
     const authority = new KernelCacheAuthority(new MemoryStorage(), {
