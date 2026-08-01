@@ -120,6 +120,10 @@ When reporting a problem, please include the Linkmark and SiYuan versions, opera
 
 ## Recent updates
 
+### Linkmark 0.1.1
+
+- Batch concurrent favicon-cache index commits into one durable JSON write and one client-state update.
+
 ### Linkmark 0.1.0
 
 - Establish the independent Linkmark identity, repository, package namespace, and release line.

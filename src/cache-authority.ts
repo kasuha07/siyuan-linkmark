@@ -63,6 +63,12 @@ type InFlightTask = {
   promise: Promise<CacheEntry | null>;
 };
 
+type ResolvedCommit = {
+  scope: LinkScope;
+  resolved: ResolvedIcon;
+  generation: number;
+};
+
 export class KernelCacheAuthority {
   private cache: Record<string, CacheEntry> = {};
   private readonly generations = new Map<string, number>();
@@ -72,6 +78,12 @@ export class KernelCacheAuthority {
   private readonly resolutionQueue: Array<() => void> = [];
   private cacheMutationTail: Promise<void> = Promise.resolve();
   private persistTail: Promise<void> = Promise.resolve();
+  private readonly resolvedCommitBatch: Array<{
+    commit: ResolvedCommit;
+    resolve: (entry: CacheEntry | null) => void;
+    reject: (error: unknown) => void;
+  }> = [];
+  private resolvedCommitBatchScheduled = false;
   private initializing?: Promise<void>;
   private policy: CachePolicy;
   private iconSequence = 0;
@@ -279,47 +291,101 @@ export class KernelCacheAuthority {
     resolved: ResolvedIcon,
     generation: number,
   ) {
-    return this.enqueueCacheMutation(async () => {
-      if (!this.isCurrentGeneration(scope.key, generation)) return null;
-      const previous = this.cache[scope.key];
-      if (previous?.pinned) return copyEntry(previous);
-      const iconId = this.nextIconId(scope.key);
-      await this.storage.put(this.iconPath(iconId), bytesToBase64(resolved.bytes));
-      if (!this.isCurrentGeneration(scope.key, generation)) {
-        await this.storage.remove(this.iconPath(iconId));
-        return null;
-      }
-      const nextEntry: CacheEntry = {
-        url: this.privateIconUrl(iconId),
-        iconId,
-        fetchedAt: this.now(),
-        source: resolved.source,
-        targetUrl: scope.targetUrl,
-        domain: scope.domain,
-        routeKey: scope.routeKey,
-        pathPrefix: scope.pathPrefix,
-        contentType: resolved.contentType,
-        resolverVersion: this.options.resolverVersion,
-      };
-      const nextCache = { ...this.cache, [scope.key]: nextEntry };
-      try {
-        await this.persist(nextCache);
-      } catch (error) {
-        await this.storage.remove(this.iconPath(iconId));
-        throw error;
-      }
-      if (!this.isCurrentGeneration(scope.key, generation)) {
-        await this.persist(this.cache);
-        await this.storage.remove(this.iconPath(iconId));
-        return null;
-      }
-      // Publishing starts synchronously with a copy of the durable snapshot;
-      // another scope cannot leak an uncommitted entry into this notification.
-      this.cache = nextCache;
-      await this.notify(nextCache);
-      await this.removePayload(previous, iconId);
-      return copyEntry(nextEntry);
+    return new Promise<CacheEntry | null>((resolve, reject) => {
+      this.resolvedCommitBatch.push({ commit: { scope, resolved, generation }, resolve, reject });
+      if (this.resolvedCommitBatchScheduled) return;
+      this.resolvedCommitBatchScheduled = true;
+      queueMicrotask(() => this.flushResolvedCommitBatch());
     });
+  }
+
+  private flushResolvedCommitBatch() {
+    this.resolvedCommitBatchScheduled = false;
+    const batch = this.resolvedCommitBatch.splice(0);
+    void this.enqueueCacheMutation(() => this.persistResolvedCommitBatch(batch))
+      .then((entries) => batch.forEach(({ resolve }, index) => resolve(entries[index])))
+      .catch((error) => batch.forEach(({ reject }) => reject(error)));
+  }
+
+  private async persistResolvedCommitBatch(batch: Array<{ commit: ResolvedCommit }>) {
+    const entries: Array<CacheEntry | null> = Array(batch.length).fill(null);
+    const prepared: Array<{
+      index: number;
+      generation: number;
+      key: string;
+      previous: CacheEntry | undefined;
+      entry: CacheEntry;
+    }> = [];
+    try {
+      for (const [index, { commit }] of batch.entries()) {
+        const { scope, resolved, generation } = commit;
+        if (!this.isCurrentGeneration(scope.key, generation)) continue;
+        const previous = this.cache[scope.key];
+        if (previous?.pinned) {
+          entries[index] = copyEntry(previous);
+          continue;
+        }
+        const iconId = this.nextIconId(scope.key);
+        await this.storage.put(this.iconPath(iconId), bytesToBase64(resolved.bytes));
+        if (!this.isCurrentGeneration(scope.key, generation)) {
+          await this.storage.remove(this.iconPath(iconId));
+          continue;
+        }
+        prepared.push({
+          index,
+          generation,
+          key: scope.key,
+          previous,
+          entry: {
+            url: this.privateIconUrl(iconId), iconId, fetchedAt: this.now(), source: resolved.source,
+            targetUrl: scope.targetUrl, domain: scope.domain, routeKey: scope.routeKey,
+            pathPrefix: scope.pathPrefix, contentType: resolved.contentType, resolverVersion: this.options.resolverVersion,
+          },
+        });
+      }
+    } catch (error) {
+      await Promise.all(prepared.map(({ entry }) => this.storage.remove(this.iconPath(entry.iconId!))));
+      throw error;
+    }
+
+    const current = prepared.filter(({ key, generation }) => this.isCurrentGeneration(key, generation));
+    for (const pending of prepared) {
+      if (!current.includes(pending)) await this.storage.remove(this.iconPath(pending.entry.iconId!));
+    }
+    if (current.length === 0) return entries;
+
+    const nextCache = { ...this.cache };
+    for (const pending of current) nextCache[pending.key] = pending.entry;
+    try {
+      await this.persist(nextCache);
+    } catch (error) {
+      await Promise.all(current.map(({ entry }) => this.storage.remove(this.iconPath(entry.iconId!))));
+      throw error;
+    }
+
+    const committed = current.filter(({ key, generation }) => this.isCurrentGeneration(key, generation));
+    if (committed.length !== current.length) {
+      const finalCache = { ...this.cache };
+      for (const pending of committed) finalCache[pending.key] = pending.entry;
+      await this.persist(finalCache);
+      for (const pending of current) {
+        if (!committed.includes(pending)) await this.storage.remove(this.iconPath(pending.entry.iconId!));
+      }
+      this.cache = finalCache;
+    } else {
+      this.cache = nextCache;
+    }
+
+    if (committed.length > 0) {
+      // A batch publishes one isolated durable snapshot, so connected clients
+      // rebuild once even when several scopes resolve together.
+      await this.notify(this.cache);
+      for (const pending of committed) {
+        entries[pending.index] = copyEntry(pending.entry);
+        await this.removePayload(pending.previous, pending.entry.iconId);
+      }
+    }
+    return entries;
   }
 
   private async removePayload(entry: CacheEntry | undefined, replacementIconId?: string) {

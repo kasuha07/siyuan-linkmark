@@ -58,15 +58,24 @@ class BlockingCacheIndexStorage extends MemoryStorage {
   }
 }
 
-class FailingSecondCacheIndexWriteStorage extends MemoryStorage {
-  private cacheIndexWrites = 0;
+class CountingCacheIndexStorage extends MemoryStorage {
+  cacheIndexWrites = 0;
 
   override async put(path: string, content: string) {
     if (path === "favicon-cache-v2.json") {
       this.cacheIndexWrites += 1;
-      if (this.cacheIndexWrites === 2) throw new Error("second cache-index write failed");
     }
     await super.put(path, content);
+  }
+}
+
+class FailingCacheIndexStorage extends CountingCacheIndexStorage {
+  override async put(path: string, content: string) {
+    if (path === "favicon-cache-v2.json") {
+      this.cacheIndexWrites += 1;
+      throw new Error("cache-index write failed");
+    }
+    this.files.set(path, content);
   }
 }
 
@@ -360,8 +369,45 @@ describe("KernelCacheAuthority", () => {
     });
   });
 
-  it("does not broadcast a resolved scope until its cache entry persists", async () => {
-    const storage = new FailingSecondCacheIndexWriteStorage();
+  it("persists concurrent resolved scopes in one cache-index batch and broadcasts once", async () => {
+    const storage = new CountingCacheIndexStorage();
+    const received: Record<string, CacheEntry>[] = [];
+    const releaseDownloads: Array<() => void> = [];
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async (requested) => {
+        await new Promise<void>((resolve) => { releaseDownloads.push(resolve); });
+        return {
+          bytes: new Uint8Array([requested.key.length]).buffer,
+          contentType: "image/png",
+          source: requested.key,
+        };
+      },
+    }, () => 100, {
+      onStateChange: (cache) => { received.push(cache); },
+    });
+    await authority.initialize();
+
+    const first = authority.getOrQueue(scope("first.example.com"));
+    const second = authority.getOrQueue(scope("second.example.com"));
+    await vi.waitFor(() => expect(releaseDownloads).toHaveLength(2));
+    releaseDownloads.forEach((release) => release());
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+
+    expect(storage.cacheIndexWrites).toBe(1);
+    expect(received).toEqual([
+      {
+        "first.example.com": expect.objectContaining({ source: "first.example.com" }),
+        "second.example.com": expect.objectContaining({ source: "second.example.com" }),
+      },
+    ]);
+    expect(authority.snapshot()).toEqual({
+      "first.example.com": expect.objectContaining({ source: "first.example.com" }),
+      "second.example.com": expect.objectContaining({ source: "second.example.com" }),
+    });
+  });
+
+  it("does not publish any resolved scope when its cache-index batch fails", async () => {
+    const storage = new FailingCacheIndexStorage();
     const received: Record<string, CacheEntry>[] = [];
     const authority = new KernelCacheAuthority(storage, {
       resolve: async (requested) => ({
@@ -376,16 +422,16 @@ describe("KernelCacheAuthority", () => {
 
     const first = authority.getOrQueue(scope("first.example.com"));
     const second = authority.getOrQueue(scope("second.example.com"));
-    const [firstResult, secondResult] = await Promise.allSettled([first, second]);
+    const results = await Promise.allSettled([first, second]);
 
-    expect(firstResult).toMatchObject({ status: "fulfilled" });
-    expect(secondResult).toMatchObject({ status: "rejected", reason: expect.any(Error) });
-    expect(received).toEqual([
-      { "first.example.com": expect.objectContaining({ source: "first.example.com" }) },
+    expect(results).toEqual([
+      { status: "rejected", reason: expect.any(Error) },
+      { status: "rejected", reason: expect.any(Error) },
     ]);
-    expect(authority.snapshot()).toEqual({
-      "first.example.com": expect.objectContaining({ source: "first.example.com" }),
-    });
+    expect(storage.cacheIndexWrites).toBe(1);
+    expect(received).toEqual([]);
+    expect(authority.snapshot()).toEqual({});
+    expect([...storage.files.keys()].filter((path) => path.startsWith("icons/"))).toEqual([]);
   });
 
   it("does not return an entry removed while its cache-index write is in flight", async () => {

@@ -72,6 +72,10 @@ _Avoid_: favicon file, cache row
 An isolated view of the authoritative cache that an RPC caller or state-change subscriber may read without changing the cache authority.
 _Avoid_: live cache object, mutable cache reference
 
+**Cache persistence batch**:
+One durable cache-index write that commits all compatible cache-entry changes collected during a short scheduling window. Each affected operation returns and publishes state only after that write succeeds.
+_Avoid_: deferred best-effort save, per-entry index write
+
 **Legacy cache**:
 The old `auto-favicon` `favicon-cache.json` index and public icon files that Linkmark deliberately neither imports nor deletes.
 _Avoid_: Linkmark cache, migration source
