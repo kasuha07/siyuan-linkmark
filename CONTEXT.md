@@ -48,6 +48,10 @@ _Avoid_: frontend preference, device setting
 A frontend-client setting that affects only how that client renders Auto Favicon without changing the shared cache.
 _Avoid_: cache policy, workspace setting
 
+**Specific-page discovery**:
+An optional workspace cache policy that permits retrieving an external link's path, without its query parameters or fragment, to discover a page-specific icon. It is disabled by default.
+_Avoid_: ordinary favicon retrieval, automatic page visit
+
 **Link scope**:
 The cache identity for a link: a domain or a domain-plus-route key when the site needs route-specific icons.
 _Avoid_: bare domain, page URL
