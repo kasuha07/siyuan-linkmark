@@ -137,5 +137,11 @@
   "feedback": "Community feedback",
   "pluginEnabled": "Auto Favicon enabled",
   "pluginDisabled": "Auto Favicon disabled",
-  "modeChanged": "Display strategy changed to: {mode}"
+  "modeChanged": "Display strategy changed to: {mode}",
+  "debugDiagnoseCurrent": "Debug: diagnose current document",
+  "debugReportTitle": "Auto Favicon debug report",
+  "debugReportHint": "This debug-only action uses the normal resolution and cache-write path. Review and redact URLs or error details before sharing.",
+  "debugCopyReport": "Copy report",
+  "debugReportCopied": "Debug report copied",
+  "debugCopyFailed": "Could not copy the debug report"
 }

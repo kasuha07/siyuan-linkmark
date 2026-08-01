@@ -114,6 +114,12 @@ Localhost, `.local`, loopback, link-local, and private IP addresses are not sent
 
 Search for **Auto Favicon** in the SiYuan Marketplace and install it, or extract `package.zip` into `workspace/data/plugins/auto-favicon/`. Enable the plugin, open its settings to choose a network and display strategy, then use the Auto Favicon button in the top toolbar for common actions.
 
+## Developer diagnostics
+
+Run `npm run build:debug` to create a separately installable `dist-debug/` package. It adds **Debug: diagnose current document** to the top toolbar. The resulting report first checks Kernel initialization, then identifies whether resolution, private-payload storage, cache-index persistence, cleanup, or the cache-change broadcast failed, and includes the kernel's unwrapped error.
+
+The diagnostic action runs the same resolution and cache-write path as a manual refresh, so it can update non-pinned cache entries. It is intentionally absent from `npm run build` and must not be published to the Marketplace. Review the report for URLs and error details before sharing it.
+
 ## Feedback
 
 Users who cannot conveniently access GitHub can reply to the [Auto Favicon community post](https://ld246.com/article/1785052610863). GitHub users can also report problems through [GitHub Issues](https://github.com/Acetab/auto-favicon/issues).

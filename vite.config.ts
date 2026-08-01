@@ -2,7 +2,10 @@ import { resolve } from "node:path";
 import { defineConfig } from "vite";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
+  define: {
+    __AUTO_FAVICON_DEBUG__: JSON.stringify(mode === "debug"),
+  },
   plugins: [
     viteStaticCopy({
       targets: [
@@ -18,7 +21,7 @@ export default defineConfig({
     }),
   ],
   build: {
-    outDir: "dist",
+    outDir: mode === "debug" ? "dist-debug" : "dist",
     emptyOutDir: true,
     lib: {
       entry: resolve(__dirname, "src/index.ts"),
@@ -28,9 +31,10 @@ export default defineConfig({
     rollupOptions: {
       external: ["siyuan"],
       output: {
+        inlineDynamicImports: true,
         entryFileNames: "index.js",
         assetFileNames: (asset) => asset.name === "style.css" ? "index.css" : "[name][extname]",
       },
     },
   },
-});
+}));

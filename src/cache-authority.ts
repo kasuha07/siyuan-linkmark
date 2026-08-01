@@ -35,6 +35,15 @@ export type ResolvedIcon = {
   source: string;
 };
 
+export type CacheDiagnostic = {
+  outcome: "success" | "no-icon" | "invalidated" | "skipped-pinned" | "failed";
+  stage: "initializing" | "resolving" | "writing payload" | "writing cache index" | "cleaning previous payload" | "broadcasting cache change";
+  source?: string;
+  contentType?: string;
+  byteLength?: number;
+  error?: string;
+};
+
 export interface CacheStorage {
   get(path: string): Promise<string | undefined>;
   put(path: string, content: string): Promise<void>;
@@ -89,7 +98,14 @@ export class KernelCacheAuthority {
           if (!entry.pinned && entry.source !== "generated monogram" && this.options.resolverVersion !== undefined) {
             entry.resolverVersion = this.options.resolverVersion;
           }
-          const legacyIcon = await this.options.loadLegacyIcon?.(entry.url);
+          let legacyIcon: Awaited<ReturnType<NonNullable<CacheAuthorityOptions["loadLegacyIcon"]>>>;
+          try {
+            legacyIcon = await this.options.loadLegacyIcon?.(entry.url);
+          } catch {
+            // Legacy payload migration is best effort. A stale or unsupported
+            // public file must not prevent the cache authority from starting.
+            legacyIcon = undefined;
+          }
           if (legacyIcon) {
             const iconId = this.iconIdFor(key);
             await this.storage.put(this.iconPath(iconId), bytesToBase64(legacyIcon.bytes));
@@ -132,6 +148,36 @@ export class KernelCacheAuthority {
       if (this.inFlight.get(scope.key) === task) this.inFlight.delete(scope.key);
     }).catch(() => undefined);
     return task;
+  }
+
+  /**
+   * Runs the ordinary resolution and commit path while preserving the stage
+   * that failed. This is intentionally exposed only by the debug kernel build.
+   */
+  async diagnose(scope: LinkScope): Promise<CacheDiagnostic> {
+    let stage: CacheDiagnostic["stage"] = "initializing";
+    try {
+      await this.initialize();
+      if (this.cache[scope.key]?.pinned) return { outcome: "skipped-pinned", stage };
+      const generation = this.generationFor(scope.key);
+      return await this.enqueueResolution(async () => {
+        if (generation !== this.generationFor(scope.key)) return { outcome: "invalidated", stage };
+        stage = "resolving";
+        const resolved = await this.resolver.resolve(scope);
+        if (!resolved) return { outcome: "no-icon", stage };
+        const entry = await this.commitResolved(scope, resolved, generation, (nextStage) => { stage = nextStage; });
+        if (!entry) return { outcome: "invalidated", stage };
+        return {
+          outcome: "success",
+          stage: "broadcasting cache change",
+          source: resolved.source,
+          contentType: resolved.contentType,
+          byteLength: resolved.bytes.byteLength,
+        };
+      });
+    } catch (error) {
+      return { outcome: "failed", stage, error: errorText(error) };
+    }
   }
 
   async putPinned(scope: LinkScope, entry: CacheEntry, contentType: string, bytes: ArrayBuffer, replaceKey?: string) {
@@ -218,11 +264,17 @@ export class KernelCacheAuthority {
     return bytes ? { bytes, contentType: entry.contentType ?? "application/octet-stream" } : undefined;
   }
 
-  private async commitResolved(scope: LinkScope, resolved: ResolvedIcon, generation: number) {
+  private async commitResolved(
+    scope: LinkScope,
+    resolved: ResolvedIcon,
+    generation: number,
+    onStage?: (stage: Exclude<CacheDiagnostic["stage"], "initializing" | "resolving">) => void,
+  ) {
     if (generation !== this.generationFor(scope.key)) return null;
     const previous = this.cache[scope.key];
     if (previous?.pinned) return structuredClone(previous);
     const iconId = this.nextIconId(scope.key);
+    onStage?.("writing payload");
     await this.storage.put(this.iconPath(iconId), bytesToBase64(resolved.bytes));
     if (generation !== this.generationFor(scope.key)) {
       await this.storage.remove(this.iconPath(iconId));
@@ -240,8 +292,11 @@ export class KernelCacheAuthority {
       contentType: resolved.contentType,
       resolverVersion: this.options.resolverVersion,
     };
+    onStage?.("writing cache index");
     await this.persist();
+    onStage?.("cleaning previous payload");
     if (previous?.iconId && previous.iconId !== iconId) await this.storage.remove(this.iconPath(previous.iconId));
+    onStage?.("broadcasting cache change");
     await this.notify();
     return structuredClone(this.cache[scope.key]);
   }
@@ -311,6 +366,15 @@ function parseCache(value: string | undefined): Record<string, CacheEntry> {
     ))) as Record<string, CacheEntry>;
   } catch {
     return {};
+  }
+}
+
+function errorText(error: unknown) {
+  if (error instanceof Error) return error.stack ?? `${error.name}: ${error.message}`;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
   }
 }
 

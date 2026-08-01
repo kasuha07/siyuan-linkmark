@@ -120,6 +120,36 @@ describe("KernelCacheAuthority", () => {
     expect(resolve).not.toHaveBeenCalled();
   });
 
+  it("reports the exact cache stage when a diagnostic refresh cannot write its payload", async () => {
+    const storage = new MemoryStorage();
+    storage.failNextPut = true;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer, contentType: "image/png", source: "test resolver" }),
+    }, () => 100);
+
+    await expect(authority.diagnose(scope())).resolves.toMatchObject({
+      outcome: "failed",
+      stage: "writing payload",
+      error: expect.stringContaining("simulated storage failure"),
+    });
+    expect(authority.snapshot()).toEqual({});
+  });
+
+  it("records a successful diagnostic refresh after the normal cache commit", async () => {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => ({ bytes: new Uint8Array([1]).buffer, contentType: "image/png", source: "test resolver" }),
+    }, () => 100);
+
+    await expect(authority.diagnose(scope())).resolves.toMatchObject({
+      outcome: "success",
+      stage: "broadcasting cache change",
+      source: "test resolver",
+      contentType: "image/png",
+      byteLength: 1,
+    });
+    expect(authority.snapshot()["example.com"]).toMatchObject({ source: "test resolver" });
+  });
+
   it("does not let an invalidated download recreate a deleted cache entry", async () => {
     const storage = new MemoryStorage();
     let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;
@@ -206,6 +236,21 @@ describe("KernelCacheAuthority", () => {
     expect(authority.snapshot()).toEqual({
       "pinned.example.com": expect.objectContaining({ pinned: true, url: "/public/auto-favicon/pinned.png" }),
     });
+  });
+
+  it("keeps the authority available when a legacy payload cannot be read", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("favicon-cache.json", JSON.stringify({
+      "legacy.example.com": entry({ domain: "legacy.example.com", url: "/public/auto-favicon/legacy.png" }),
+    }));
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100, {
+      loadLegacyIcon: async () => { throw new Error("legacy file API unavailable"); },
+    });
+
+    await authority.initialize();
+
+    expect(authority.snapshot()["legacy.example.com"]).toMatchObject({ url: "/public/auto-favicon/legacy.png" });
+    expect(storage.files.get("favicon-cache-v2.json")).toContain("legacy.example.com");
   });
 
   it("moves readable legacy icon bytes behind the private icon route", async () => {

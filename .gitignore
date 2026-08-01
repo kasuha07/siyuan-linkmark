@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-debug/
 dev/
 package.zip
 auto-favicon.zip

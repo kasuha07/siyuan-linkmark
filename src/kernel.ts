@@ -1,6 +1,7 @@
 import type * as kernel from "siyuan/kernel";
 import {
   KernelCacheAuthority,
+  type CacheDiagnostic,
   type CacheEntry,
   type CachePolicy,
   type CacheStorage,
@@ -56,6 +57,8 @@ class AutoFaviconKernel {
   private policy: CachePolicyState = { ...defaultPolicy };
   private authority?: KernelCacheAuthority;
   private resolver?: ForwardProxyIconResolver;
+  private kernelReady = false;
+  private initializationError?: string;
 
   constructor() {
     siyuan.plugin.lifecycle.onload = this.onload.bind(this);
@@ -64,52 +67,72 @@ class AutoFaviconKernel {
   }
 
   private async onload() {
-    this.policy = await this.loadPolicy();
-    this.resolver = new ForwardProxyIconResolver(this.forward.bind(this), () => this.policy);
-    this.authority = new KernelCacheAuthority(new KernelStorage(), this.resolver, () => Date.now(), {
-      cachePolicy: this.policy,
-      resolverVersion: 6,
-      privateIconUrl: (iconId) => `/plugin/private/${siyuan.plugin.name}/icon/${encodeURIComponent(iconId)}`,
-      onStateChange: async (cache) => siyuan.rpc.broadcast("cache.changed", { cache }),
-      loadLegacyIcon: this.loadLegacyIcon.bind(this),
-      removeLegacyIcon: this.removeLegacyIcon.bind(this),
-    });
-    await this.authority.initialize();
-    await siyuan.rpc.bind("cache.snapshot", async () => this.requireAuthority().snapshot(), "Returns the authoritative favicon cache.");
-    await siyuan.rpc.bind("cache.get-or-queue", async (scope: LinkScope, force = false, automatic = false) => this.requireAuthority().getOrQueue(normalizeScope(scope), force, automatic), "Returns a cached icon or queues server-side resolution.");
-    await siyuan.rpc.bind("cache.remove", async (key: string) => this.requireAuthority().remove(key), "Removes one cache entry workspace-wide.");
-    await siyuan.rpc.bind("cache.clear", async () => this.requireAuthority().clear(), "Clears non-pinned cache entries workspace-wide.");
-    await siyuan.rpc.bind("cache.clear-generated", async () => this.requireAuthority().clearGenerated(), "Clears generated monograms after policy changes.");
-    await siyuan.rpc.bind("cache.policy.get", async () => this.policy, "Returns workspace cache policy.");
-    await siyuan.rpc.bind("cache.policy.set", async (policy: Partial<CachePolicyState>) => this.setPolicy(policy), "Updates workspace cache policy.");
-    await siyuan.rpc.bind("cache.pin", async (scope: LinkScope, entry: CacheEntry, contentType: string, base64: string, replaceKey?: string) => {
-      const bytes = Buffer.from(base64, "base64");
-      return this.requireAuthority().putPinned(normalizeScope(scope), entry, contentType, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), replaceKey);
-    }, "Pins a user-selected icon workspace-wide.");
-    await siyuan.rpc.bind("cache.candidates", async (scope: LinkScope, discoverPage = false) => {
-      const candidates = await this.requireResolver().candidates(normalizeScope(scope), discoverPage || this.policy.allowFullPageDiscovery);
-      return candidates.map((candidate) => ({ ...candidate, base64: Buffer.from(candidate.bytes).toString("base64") }));
-    }, "Returns server-downloaded icon candidates for a scope.");
-    await siyuan.rpc.bind("cache.pin-url", async (scope: LinkScope, iconUrl: string, includeSubdomains = false, replaceKey?: string) => {
-      const normalized = normalizeScope(scope);
-      const resolved = await this.requireResolver().resolveUrl(iconUrl);
-      if (!resolved) throw new Error("Custom icon URL did not return a usable image");
-      return this.requireAuthority().putPinned(normalized, {
-        url: "",
-        fetchedAt: Date.now(),
-        source: "custom URL",
-        targetUrl: normalized.targetUrl,
-        domain: normalized.domain,
-        routeKey: normalized.routeKey,
-        pathPrefix: normalized.pathPrefix,
-        pinned: true,
-        includeSubdomains,
-      }, resolved.contentType, resolved.bytes, replaceKey);
-    }, "Downloads and pins a custom icon URL workspace-wide.");
+    if (__AUTO_FAVICON_DEBUG__) {
+      await siyuan.rpc.bind("cache.debug.status", async () => ({ ready: this.kernelReady, error: this.initializationError }), "Debug-only: returns Kernel initialization state.");
+    }
+    try {
+      this.policy = await this.loadPolicy();
+      this.resolver = new ForwardProxyIconResolver(this.forward.bind(this), () => this.policy);
+      this.authority = new KernelCacheAuthority(new KernelStorage(), this.resolver, () => Date.now(), {
+        cachePolicy: this.policy,
+        resolverVersion: 6,
+        privateIconUrl: (iconId) => `/plugin/private/${siyuan.plugin.name}/icon/${encodeURIComponent(iconId)}`,
+        onStateChange: async (cache) => siyuan.rpc.broadcast("cache.changed", { cache }),
+        loadLegacyIcon: this.loadLegacyIcon.bind(this),
+        removeLegacyIcon: this.removeLegacyIcon.bind(this),
+      });
+      await this.authority.initialize();
+      await siyuan.rpc.bind("cache.snapshot", async () => this.requireAuthority().snapshot(), "Returns the authoritative favicon cache.");
+      await siyuan.rpc.bind("cache.get-or-queue", async (scope: LinkScope, force = false, automatic = false) => this.requireAuthority().getOrQueue(normalizeScope(scope), force, automatic), "Returns a cached icon or queues server-side resolution.");
+      await siyuan.rpc.bind("cache.remove", async (key: string) => this.requireAuthority().remove(key), "Removes one cache entry workspace-wide.");
+      await siyuan.rpc.bind("cache.clear", async () => this.requireAuthority().clear(), "Clears non-pinned cache entries workspace-wide.");
+      await siyuan.rpc.bind("cache.clear-generated", async () => this.requireAuthority().clearGenerated(), "Clears generated monograms after policy changes.");
+      await siyuan.rpc.bind("cache.policy.get", async () => this.policy, "Returns workspace cache policy.");
+      await siyuan.rpc.bind("cache.policy.set", async (policy: Partial<CachePolicyState>) => this.setPolicy(policy), "Updates workspace cache policy.");
+      await siyuan.rpc.bind("cache.pin", async (scope: LinkScope, entry: CacheEntry, contentType: string, base64: string, replaceKey?: string) => {
+        const bytes = Buffer.from(base64, "base64");
+        return this.requireAuthority().putPinned(normalizeScope(scope), entry, contentType, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), replaceKey);
+      }, "Pins a user-selected icon workspace-wide.");
+      await siyuan.rpc.bind("cache.candidates", async (scope: LinkScope, discoverPage = false) => {
+        const candidates = await this.requireResolver().candidates(normalizeScope(scope), discoverPage || this.policy.allowFullPageDiscovery);
+        return candidates.map((candidate) => ({ ...candidate, base64: Buffer.from(candidate.bytes).toString("base64") }));
+      }, "Returns server-downloaded icon candidates for a scope.");
+      await siyuan.rpc.bind("cache.pin-url", async (scope: LinkScope, iconUrl: string, includeSubdomains = false, replaceKey?: string) => {
+        const normalized = normalizeScope(scope);
+        const resolved = await this.requireResolver().resolveUrl(iconUrl);
+        if (!resolved) throw new Error("Custom icon URL did not return a usable image");
+        return this.requireAuthority().putPinned(normalized, {
+          url: "",
+          fetchedAt: Date.now(),
+          source: "custom URL",
+          targetUrl: normalized.targetUrl,
+          domain: normalized.domain,
+          routeKey: normalized.routeKey,
+          pathPrefix: normalized.pathPrefix,
+          pinned: true,
+          includeSubdomains,
+        }, resolved.contentType, resolved.bytes, replaceKey);
+      }, "Downloads and pins a custom icon URL workspace-wide.");
+      if (__AUTO_FAVICON_DEBUG__) {
+        await siyuan.rpc.bind("cache.debug.resolve", async (scope: LinkScope) => {
+          try {
+            return await this.requireAuthority().diagnose(normalizeScope(scope));
+          } catch (error) {
+            return failedDiagnostic("initializing", error);
+          }
+        }, "Debug-only: resolves and commits one favicon while returning its failure stage.");
+      }
+      this.kernelReady = true;
+    } catch (error) {
+      this.initializationError = errorText(error);
+      await siyuan.logger.error("Auto Favicon Kernel initialization failed", this.initializationError).catch(() => undefined);
+    }
   }
 
   private async onunload() {
-    for (const method of ["cache.snapshot", "cache.get-or-queue", "cache.remove", "cache.clear", "cache.clear-generated", "cache.policy.get", "cache.policy.set", "cache.pin", "cache.candidates", "cache.pin-url"]) {
+    const methods = ["cache.snapshot", "cache.get-or-queue", "cache.remove", "cache.clear", "cache.clear-generated", "cache.policy.get", "cache.policy.set", "cache.pin", "cache.candidates", "cache.pin-url"];
+    if (__AUTO_FAVICON_DEBUG__) methods.push("cache.debug.status", "cache.debug.resolve");
+    for (const method of methods) {
       await siyuan.rpc.unbind(method);
     }
   }
@@ -217,6 +240,19 @@ function sanitizePolicy(policy: Partial<CachePolicyState>) {
 
 function notFound(): kernel.IHttpResponse {
   return { statusCode: 404, body: { string: { format: "Not found" } } };
+}
+
+function failedDiagnostic(stage: CacheDiagnostic["stage"], error: unknown): CacheDiagnostic {
+  return { outcome: "failed", stage, error: errorText(error) };
+}
+
+function errorText(error: unknown) {
+  if (error instanceof Error) return error.stack ?? `${error.name}: ${error.message}`;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
 new AutoFaviconKernel();
