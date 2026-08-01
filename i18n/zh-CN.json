@@ -1,8 +1,8 @@
 {
   "linkIconTitle": "与「链接图标」配合方式",
   "linkIconDescription": "智能补充会保留「链接图标」的精选和自定义图标，仅替换通用网页占位符；本插件优先会优先显示获取到的 favicon。",
-  "linkIconSmart": "智能补充（推荐）",
-  "linkIconAuto": "本插件图标优先",
+  "linkIconSmart": "智能补充",
+  "linkIconAuto": "本插件图标优先（推荐）",
   "monogramColorTitle": "字母图标配色",
   "monogramColorDescription": "可根据域名稳定生成不同颜色，或为所有自动字母图标指定一组渐变色。",
   "monogramColorDomain": "根据域名自动配色",

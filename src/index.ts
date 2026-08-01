@@ -60,7 +60,7 @@ const defaultSettings: Settings = {
   enabled: true,
   pauseAutomaticFetch: false,
   allowFullPageDiscovery: false,
-  linkIconMode: "smart",
+  linkIconMode: "auto",
   provider: "https://example.com/favicon/{domain}",
   providerPreset: "auto",
   resolverMode: "mainland",
@@ -111,7 +111,7 @@ export default class AutoFaviconPlugin extends Plugin {
     this.settings = {
       ...defaultSettings,
       ...saved,
-      linkIconMode: saved.linkIconMode ?? (saved.preferDynamic ? "auto" : "smart"),
+      linkIconMode: saved.linkIconMode ?? (saved.preferDynamic === false ? "smart" : "auto"),
       monogramOverrides: { ...defaultSettings.monogramOverrides, ...(saved.monogramOverrides ?? {}) },
     };
     await this.loadKernelState();

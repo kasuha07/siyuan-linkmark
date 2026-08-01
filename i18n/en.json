@@ -1,8 +1,8 @@
 {
   "linkIconTitle": "Working with Link Icon",
   "linkIconDescription": "Smart Fill keeps curated and custom Link Icon graphics and replaces only its generic web placeholder. Auto Favicon Priority prefers a retrieved favicon.",
-  "linkIconSmart": "Smart Fill (recommended)",
-  "linkIconAuto": "Auto Favicon Priority",
+  "linkIconSmart": "Smart Fill",
+  "linkIconAuto": "Auto Favicon Priority (recommended)",
   "monogramColorTitle": "Letter icon colors",
   "monogramColorDescription": "Use stable colors derived from each domain, or choose one custom gradient for generated letter icons.",
   "monogramColorDomain": "Automatic colors by domain",
