@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 import { defineConfig } from "vite";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [
     viteStaticCopy({
       targets: [
@@ -19,7 +19,8 @@ export default defineConfig({
   ],
   build: {
     outDir: "dist",
-    emptyOutDir: true,
+    // Both development watchers emit to dist/. Only the release build may clean it.
+    emptyOutDir: mode !== "development",
     lib: {
       entry: resolve(__dirname, "src/index.ts"),
       formats: ["cjs"],
@@ -34,4 +35,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

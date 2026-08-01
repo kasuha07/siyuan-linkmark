@@ -10,7 +10,7 @@
   "homepage": "https://github.com/Acetab/auto-favicon",
   "scripts": {
     "assets": "node scripts/render-assets.mjs",
-    "dev": "vite build --watch --mode development",
+    "dev": "node scripts/dev.mjs",
     "build": "vite build && vite build --config vite.kernel.config.ts",
     "check": "tsc --noEmit",
     "check:package": "node scripts/assert-package.mjs",
