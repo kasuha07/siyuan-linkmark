@@ -124,7 +124,7 @@
   "deleteOne": "Delete",
   "noCurrentDomains": "The current document has no web links with icons to retrieve",
   "refreshStarted": "Refreshing icons for {count} domains",
-  "refreshFinished": "Refresh finished: {success} succeeded, {failed} failed, {skipped} pinned icons skipped",
+  "refreshFinished": "Refresh finished: {success} remote icons, {fallback} local monograms, {failed} failed, {skipped} pinned icons skipped",
   "noRefreshableDomains": "Only pinned custom icons remain; there are no domains to refresh",
   "cacheCleared": "Automatic icon cache cleared; pinned custom icons were kept",
   "toolbarTitle": "Auto Favicon",

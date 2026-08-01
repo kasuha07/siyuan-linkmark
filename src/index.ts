@@ -10,6 +10,7 @@ import {
   type ProviderPreset,
   type ResolverMode,
 } from "./icon-resolver";
+import { fetchOutcomeFor, type FetchOutcome } from "./refresh-outcome";
 import { scopeForUrl, scopeFromCacheKey, scopeMatchTarget, type LinkScope } from "./url-scope";
 
 type CacheEntry = {
@@ -79,7 +80,7 @@ export default class AutoFaviconPlugin extends Plugin {
   private cache: Record<string, CacheEntry> = {};
   private pendingDomains = new Set<string>();
   private pendingFetches = new Map<string, {
-    promise: Promise<boolean>;
+    promise: Promise<FetchOutcome>;
     trigger: FetchTrigger;
     automaticGeneration: number;
   }>();
@@ -747,24 +748,32 @@ export default class AutoFaviconPlugin extends Plugin {
     const items = [...targets];
     let completed = 0;
     let success = 0;
+    let fallback = 0;
     let skipped = 0;
+    let failed = 0;
     const failures: string[] = [];
     await Promise.all(items.map(async ([key, { scope, targetUrl }]) => {
       if (this.cachedIconForScope(scope)?.entry.pinned) skipped += 1;
-      else if (await this.fetchAndCache(scope, targetUrl, true, "manual")) success += 1;
       else {
-        const reason = this.failureReasons.get(key);
-        if (reason && failures.length < 3) failures.push(reason);
+        const outcome = await this.fetchAndCache(scope, targetUrl, true, "manual");
+        if (outcome === "success") success += 1;
+        else if (outcome === "fallback") fallback += 1;
+        else {
+          failed += 1;
+          const reason = this.failureReasons.get(key);
+          if (reason && failures.length < 3) failures.push(reason);
+        }
       }
       completed += 1;
       onProgress?.(completed, items.length);
     }));
-    return { success, failed: items.length - success - skipped, skipped, failures };
+    return { success, fallback, failed, skipped, failures };
   }
 
-  private showRefreshResult(result: { success: number; failed: number; skipped: number; failures?: string[] }) {
+  private showRefreshResult(result: { success: number; fallback: number; failed: number; skipped: number; failures?: string[] }) {
     const summary = this.t("refreshFinished")
       .replace("{success}", String(result.success))
+      .replace("{fallback}", String(result.fallback))
       .replace("{failed}", String(result.failed))
       .replace("{skipped}", String(result.skipped));
     const details = result.failures?.length ? `\n${result.failures.join("\n")}` : "";
@@ -1355,8 +1364,8 @@ export default class AutoFaviconPlugin extends Plugin {
     targetUrl: string,
     preserveExisting = false,
     trigger: FetchTrigger = "automatic",
-  ): Promise<boolean> {
-    if (trigger === "automatic" && this.settings.pauseAutomaticFetch) return Promise.resolve(false);
+  ): Promise<FetchOutcome> {
+    if (trigger === "automatic" && this.settings.pauseAutomaticFetch) return Promise.resolve("failure");
     const pending = this.pendingFetches.get(scope.key);
     if (pending) {
       const supersedesInvalidatedAutomatic = pending.trigger === "automatic"
@@ -1403,23 +1412,23 @@ export default class AutoFaviconPlugin extends Plugin {
         ...scope,
         targetUrl: this.sanitizeTargetUrl(targetUrl, scope.domain),
       }, preserveExisting, trigger === "automatic");
-      if (invalidated()) return false;
+      if (invalidated()) return "failure";
       if (!entry) throw new Error("no usable icon source returned an image");
       this.cache[scope.key] = entry;
       this.updateCacheCount();
       this.failedDomains.delete(scope.key);
       this.failureReasons.delete(scope.key);
       this.setRule(scope, entry.url, entry.source);
-      return true;
+      return fetchOutcomeFor(entry);
     } catch (error) {
       this.updateCacheCount();
-      if (invalidated()) return false;
+      if (invalidated()) return "failure";
       console.warn(`[auto-favicon] Unable to cache ${scope.key}`, error);
       this.failureReasons.set(scope.key, `${scope.key} · kernel resolve · ${this.errorText(error)}`);
       this.failedDomains.set(scope.key, Date.now());
       // Do not create a pseudo-element when no verified image exists. This
       // prevents an empty gap and lets link-icon keep its own valid icon.
-      return false;
+      return "failure";
     } finally {
       this.pendingDomains.delete(scope.key);
     }

@@ -7,6 +7,7 @@ import {
   type LinkScope,
 } from "../src/cache-authority";
 import { privateIconIdFromPath } from "../src/private-route";
+import { fetchOutcomeFor } from "../src/refresh-outcome";
 import { ForwardProxyIconResolver, type ForwardProxy, type KernelResolverPolicy } from "../src/kernel-resolver";
 
 class MemoryStorage implements CacheStorage {
@@ -52,6 +53,12 @@ const resolverPolicy: KernelResolverPolicy = {
 };
 
 describe("KernelCacheAuthority", () => {
+  it("does not report a generated monogram as a remote refresh success", () => {
+    expect(fetchOutcomeFor(entry({ source: "FaviconKit" }))).toBe("success");
+    expect(fetchOutcomeFor(entry({ source: "generated monogram" }))).toBe("fallback");
+    expect(fetchOutcomeFor(null)).toBe("failure");
+  });
+
   it("matches only its complete private icon route", () => {
     expect(privateIconIdFromPath("/plugin/private/auto-favicon/icon/example-1", "auto-favicon")).toBe("example-1");
     expect(privateIconIdFromPath("/icon/example-1", "auto-favicon")).toBeUndefined();

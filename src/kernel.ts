@@ -59,6 +59,7 @@ class AutoFaviconKernel {
 
   constructor() {
     siyuan.plugin.lifecycle.onload = this.onload.bind(this);
+    siyuan.plugin.lifecycle.onrunning = this.onrunning.bind(this);
     siyuan.plugin.lifecycle.onunload = this.onunload.bind(this);
     siyuan.server.private.http.handler = this.handlePrivateRequest.bind(this);
   }
@@ -110,6 +111,10 @@ class AutoFaviconKernel {
     } catch (error) {
       await siyuan.logger.error("Auto Favicon Kernel initialization failed", errorText(error)).catch(() => undefined);
     }
+  }
+
+  private onrunning() {
+    // SiYuan v3.7.3 invokes every lifecycle hook, including this optional one.
   }
 
   private async onunload() {
