@@ -79,3 +79,7 @@ _Avoid_: public static icon URL, direct storage path
 **In-flight task**:
 A kernel-resident favicon resolution task that may continue after a frontend closes but is cancelled when the kernel plugin stops or reloads.
 _Avoid_: durable job, resumable task
+
+**Resolution concurrency**:
+The workspace-wide limit on simultaneous favicon resolution tasks for different link scopes.
+_Avoid_: per-client concurrency, unbounded parallelism

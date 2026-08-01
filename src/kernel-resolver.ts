@@ -1,4 +1,4 @@
-import type { IconResolver, LinkScope, ResolvedIcon } from "./cache-authority";
+import type { IconResolver, LinkScope, ResolvedIcon, ResolutionTrigger } from "./cache-authority";
 
 export type KernelResolverPolicy = {
   provider: string;
@@ -19,11 +19,12 @@ export type ForwardProxy = (url: string, responseEncoding: "text" | "base64", co
 
 type Candidate = { url: string; source: string };
 const MAX_ICON_BYTES = 2 * 1024 * 1024;
+const MAX_AUTOMATIC_CANDIDATE_ATTEMPTS = 16;
 
 export class ForwardProxyIconResolver implements IconResolver {
   constructor(private readonly forward: ForwardProxy, private readonly policy: () => KernelResolverPolicy) {}
 
-  async resolve(scope: LinkScope): Promise<ResolvedIcon | null> {
+  async resolve(scope: LinkScope, trigger: ResolutionTrigger = "automatic"): Promise<ResolvedIcon | null> {
     let target: URL;
     try {
       target = new URL(scope.targetUrl);
@@ -31,7 +32,9 @@ export class ForwardProxyIconResolver implements IconResolver {
       return null;
     }
     if (!isSafePublicTarget(target)) return null;
-    for (const candidate of await this.candidateUrls(target, scope, this.policy().allowFullPageDiscovery || Boolean(scope.discoverPage))) {
+    const candidates = await this.candidateUrls(target, scope, this.policy().allowFullPageDiscovery || Boolean(scope.discoverPage));
+    const attempts = trigger === "automatic" ? candidates.slice(0, MAX_AUTOMATIC_CANDIDATE_ATTEMPTS) : candidates;
+    for (const candidate of attempts) {
       const resolved = await this.download(candidate);
       if (resolved) return resolved;
     }

@@ -35,6 +35,8 @@ export type ResolvedIcon = {
   source: string;
 };
 
+export type ResolutionTrigger = "automatic" | "manual";
+
 export interface CacheStorage {
   get(path: string): Promise<string | undefined>;
   put(path: string, content: string): Promise<void>;
@@ -42,7 +44,7 @@ export interface CacheStorage {
 }
 
 export interface IconResolver {
-  resolve(scope: LinkScope): Promise<ResolvedIcon | null>;
+  resolve(scope: LinkScope, trigger?: ResolutionTrigger): Promise<ResolvedIcon | null>;
 }
 
 export type CacheAuthorityOptions = {
@@ -57,12 +59,21 @@ export type CacheAuthorityOptions = {
 const CACHE_INDEX_FILE = "favicon-cache-v2.json";
 const LEGACY_CACHE_FILE = "favicon-cache.json";
 const ICON_DIRECTORY = "icons";
+const MAX_RESOLUTION_CONCURRENCY = 4;
+
+type InFlightTask = {
+  generation: number;
+  promise: Promise<CacheEntry | null>;
+};
 
 export class KernelCacheAuthority {
   private cache: Record<string, CacheEntry> = {};
   private readonly generations = new Map<string, number>();
-  private readonly inFlight = new Map<string, Promise<CacheEntry | null>>();
-  private resolutionTail: Promise<void> = Promise.resolve();
+  private readonly invalidationGenerations = new Map<string, number>();
+  private readonly inFlight = new Map<string, InFlightTask>();
+  private activeResolutions = 0;
+  private readonly resolutionQueue: Array<() => void> = [];
+  private cacheMutationTail: Promise<void> = Promise.resolve();
   private persistTail: Promise<void> = Promise.resolve();
   private initializing?: Promise<void>;
   private policy: CachePolicy;
@@ -121,96 +132,160 @@ export class KernelCacheAuthority {
 
   async getOrQueue(scope: LinkScope, force = false, automatic = false): Promise<CacheEntry | null> {
     await this.initialize();
-    const existing = this.cache[scope.key];
+    const existing = this.invalidationGenerations.has(scope.key) ? undefined : this.cache[scope.key];
     if (automatic && this.policy.pauseAutomaticFetch) return existing ? copyEntry(existing) : null;
     if (existing && !force && this.isFresh(existing)) return copyEntry(existing);
-    const pending = this.inFlight.get(scope.key);
-    if (pending) return pending;
-
     const generation = this.generationFor(scope.key);
-    const task = this.enqueueResolution(async () => {
-      if (generation !== this.generationFor(scope.key)) return null;
-      const resolved = await this.resolver.resolve(scope);
-      if (!resolved || generation !== this.generationFor(scope.key)) return null;
+    const pending = this.inFlight.get(scope.key);
+    if (pending?.generation === generation) return pending.promise;
+
+    const resolve = async () => {
+      const trigger: ResolutionTrigger = automatic ? "automatic" : "manual";
+      const resolved = await this.enqueueResolution(async () => {
+        if (!this.isCurrentGeneration(scope.key, generation)) return null;
+        return this.resolver.resolve(scope, trigger);
+      });
+      if (!resolved || !this.isCurrentGeneration(scope.key, generation)) return null;
       return this.commitResolved(scope, resolved, generation);
-    });
-    this.inFlight.set(scope.key, task);
+    };
+    // An invalidated task cannot supply a replacement result. Keep the newer
+    // task distinct, but wait for the obsolete one so a Link scope cannot use
+    // two resolution slots at once while its old network request winds down.
+    const task = pending ? pending.promise.catch(() => undefined).then(resolve) : resolve();
+    this.inFlight.set(scope.key, { generation, promise: task });
     void task.finally(() => {
-      if (this.inFlight.get(scope.key) === task) this.inFlight.delete(scope.key);
+      if (this.inFlight.get(scope.key)?.promise === task) this.inFlight.delete(scope.key);
     }).catch(() => undefined);
     return task;
   }
 
   async putPinned(scope: LinkScope, entry: CacheEntry, contentType: string, bytes: ArrayBuffer, replaceKey?: string) {
     await this.initialize();
-    this.invalidate(scope.key);
-    if (replaceKey && replaceKey !== scope.key) this.invalidate(replaceKey);
-    const iconId = this.nextIconId(scope.key);
-    await this.storage.put(this.iconPath(iconId), bytesToBase64(bytes));
-    const previous = this.cache[scope.key];
-    const replaced = replaceKey && replaceKey !== scope.key ? this.cache[replaceKey] : undefined;
-    const nextEntry: CacheEntry = {
-      ...entry,
-      url: this.privateIconUrl(iconId), iconId, domain: scope.domain, routeKey: scope.routeKey,
-      pathPrefix: scope.pathPrefix, targetUrl: scope.targetUrl, fetchedAt: this.now(), pinned: true,
-      source: entry.source ?? "custom upload", resolverVersion: entry.resolverVersion, contentType,
+    const generation = this.invalidate(scope.key);
+    const replacedGeneration = replaceKey && replaceKey !== scope.key ? this.invalidate(replaceKey) : undefined;
+    const completeInvalidations = () => {
+      this.completeInvalidation(scope.key, generation);
+      if (replaceKey && replacedGeneration !== undefined) this.completeInvalidation(replaceKey, replacedGeneration);
     };
-    const previousCache = this.cache;
-    this.cache = { ...this.cache, [scope.key]: nextEntry };
-    if (replaceKey && replaceKey !== scope.key) delete this.cache[replaceKey];
-    try {
-      await this.persist();
-    } catch (error) {
-      this.cache = previousCache;
-      await this.storage.remove(this.iconPath(iconId));
-      throw error;
-    }
-    await this.removePayload(previous, iconId);
-    await this.removePayload(replaced, iconId);
-    await this.notify();
-    return copyEntry(this.cache[scope.key]);
+    return this.enqueueCacheMutation(async () => {
+      const iconId = this.nextIconId(scope.key);
+      try {
+        await this.storage.put(this.iconPath(iconId), bytesToBase64(bytes));
+      } catch (error) {
+        completeInvalidations();
+        throw error;
+      }
+      if (!this.isCurrentPinnedOperation(scope.key, generation, replaceKey, replacedGeneration)) {
+        completeInvalidations();
+        await this.storage.remove(this.iconPath(iconId));
+        throw new Error("Pinned icon operation was superseded by a newer cache change");
+      }
+      const previous = this.cache[scope.key];
+      const replaced = replaceKey && replaceKey !== scope.key ? this.cache[replaceKey] : undefined;
+      const nextEntry: CacheEntry = {
+        ...entry,
+        url: this.privateIconUrl(iconId), iconId, domain: scope.domain, routeKey: scope.routeKey,
+        pathPrefix: scope.pathPrefix, targetUrl: scope.targetUrl, fetchedAt: this.now(), pinned: true,
+        source: entry.source ?? "custom upload", resolverVersion: entry.resolverVersion, contentType,
+      };
+      const nextCache = { ...this.cache, [scope.key]: nextEntry };
+      if (replaceKey && replaceKey !== scope.key) delete nextCache[replaceKey];
+      try {
+        await this.persist(nextCache);
+      } catch (error) {
+        completeInvalidations();
+        await this.storage.remove(this.iconPath(iconId));
+        throw error;
+      }
+      if (!this.isCurrentPinnedOperation(scope.key, generation, replaceKey, replacedGeneration)) {
+        await this.persist(this.cache);
+        completeInvalidations();
+        await this.storage.remove(this.iconPath(iconId));
+        throw new Error("Pinned icon operation was superseded by a newer cache change");
+      }
+      this.cache = nextCache;
+      completeInvalidations();
+      await this.notify(nextCache);
+      await this.removePayload(previous, iconId);
+      await this.removePayload(replaced, iconId);
+      return copyEntry(nextEntry);
+    });
   }
 
   async remove(key: string) {
     await this.initialize();
-    this.invalidate(key);
-    const previous = this.cache[key];
-    delete this.cache[key];
-    if (previous?.iconId) await this.storage.remove(this.iconPath(previous.iconId));
-    else if (previous) await this.options.removeLegacyIcon?.(previous.url);
-    await this.persist();
-    await this.notify();
+    const generation = this.invalidate(key);
+    return this.enqueueCacheMutation(async () => {
+      const previous = this.cache[key];
+      if (!previous) {
+        this.completeInvalidation(key, generation);
+        return;
+      }
+      const nextCache = { ...this.cache };
+      delete nextCache[key];
+      try {
+        await this.persist(nextCache);
+      } catch (error) {
+        this.completeInvalidation(key, generation);
+        throw error;
+      }
+      this.cache = nextCache;
+      this.completeInvalidation(key, generation);
+      await this.notify(nextCache);
+      await this.removePayload(previous);
+    });
   }
 
   async clear() {
     await this.initialize();
+    const invalidations = new Map<string, number>();
     for (const key of this.inFlight.keys()) {
-      if (!this.cache[key]?.pinned) this.invalidate(key);
+      if (!this.cache[key]?.pinned) invalidations.set(key, this.invalidate(key));
     }
-    const removable = Object.entries(this.cache).filter(([, entry]) => !entry.pinned);
-    for (const [key, entry] of removable) {
-      this.invalidate(key);
-      delete this.cache[key];
-      if (entry.iconId) await this.storage.remove(this.iconPath(entry.iconId));
-      else await this.options.removeLegacyIcon?.(entry.url);
+    for (const [key, entry] of Object.entries(this.cache)) {
+      if (!entry.pinned) invalidations.set(key, this.invalidate(key));
     }
-    await this.persist();
-    await this.notify();
+    return this.enqueueCacheMutation(async () => {
+      const removable = Object.entries(this.cache).filter(([, entry]) => !entry.pinned);
+      const nextCache = Object.fromEntries(Object.entries(this.cache).filter(([, entry]) => entry.pinned));
+      try {
+        await this.persist(nextCache);
+      } catch (error) {
+        for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
+        throw error;
+      }
+      this.cache = nextCache;
+      for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
+      await this.notify(nextCache);
+      for (const [, entry] of removable) await this.removePayload(entry);
+    });
   }
 
   async clearGenerated() {
     await this.initialize();
-    const generated = Object.entries(this.cache).filter(([, entry]) => entry.source === "generated monogram");
-    for (const [key, entry] of generated) {
-      this.invalidate(key);
-      delete this.cache[key];
-      if (entry.iconId) await this.storage.remove(this.iconPath(entry.iconId));
-      else await this.options.removeLegacyIcon?.(entry.url);
-    }
-    if (generated.length > 0) {
-      await this.persist();
-      await this.notify();
-    }
+    const invalidations = new Map(
+      Object.entries(this.cache)
+        .filter(([, entry]) => entry.source === "generated monogram")
+        .map(([key]) => [key, this.invalidate(key)]),
+    );
+    return this.enqueueCacheMutation(async () => {
+      const generated = Object.entries(this.cache).filter(([, entry]) => entry.source === "generated monogram");
+      if (generated.length === 0) {
+        for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
+        return;
+      }
+      const nextCache = Object.fromEntries(Object.entries(this.cache).filter(([, entry]) => entry.source !== "generated monogram"));
+      try {
+        await this.persist(nextCache);
+      } catch (error) {
+        for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
+        throw error;
+      }
+      this.cache = nextCache;
+      for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
+      await this.notify(nextCache);
+      for (const [, entry] of generated) await this.removePayload(entry);
+    });
   }
 
   async iconBytes(iconId: string) {
@@ -230,31 +305,47 @@ export class KernelCacheAuthority {
     resolved: ResolvedIcon,
     generation: number,
   ) {
-    if (generation !== this.generationFor(scope.key)) return null;
-    const previous = this.cache[scope.key];
-    if (previous?.pinned) return copyEntry(previous);
-    const iconId = this.nextIconId(scope.key);
-    await this.storage.put(this.iconPath(iconId), bytesToBase64(resolved.bytes));
-    if (generation !== this.generationFor(scope.key)) {
-      await this.storage.remove(this.iconPath(iconId));
-      return null;
-    }
-    this.cache[scope.key] = {
-      url: this.privateIconUrl(iconId),
-      iconId,
-      fetchedAt: this.now(),
-      source: resolved.source,
-      targetUrl: scope.targetUrl,
-      domain: scope.domain,
-      routeKey: scope.routeKey,
-      pathPrefix: scope.pathPrefix,
-      contentType: resolved.contentType,
-      resolverVersion: this.options.resolverVersion,
-    };
-    await this.persist();
-    if (previous?.iconId && previous.iconId !== iconId) await this.storage.remove(this.iconPath(previous.iconId));
-    await this.notify();
-    return copyEntry(this.cache[scope.key]);
+    return this.enqueueCacheMutation(async () => {
+      if (!this.isCurrentGeneration(scope.key, generation)) return null;
+      const previous = this.cache[scope.key];
+      if (previous?.pinned) return copyEntry(previous);
+      const iconId = this.nextIconId(scope.key);
+      await this.storage.put(this.iconPath(iconId), bytesToBase64(resolved.bytes));
+      if (!this.isCurrentGeneration(scope.key, generation)) {
+        await this.storage.remove(this.iconPath(iconId));
+        return null;
+      }
+      const nextEntry: CacheEntry = {
+        url: this.privateIconUrl(iconId),
+        iconId,
+        fetchedAt: this.now(),
+        source: resolved.source,
+        targetUrl: scope.targetUrl,
+        domain: scope.domain,
+        routeKey: scope.routeKey,
+        pathPrefix: scope.pathPrefix,
+        contentType: resolved.contentType,
+        resolverVersion: this.options.resolverVersion,
+      };
+      const nextCache = { ...this.cache, [scope.key]: nextEntry };
+      try {
+        await this.persist(nextCache);
+      } catch (error) {
+        await this.storage.remove(this.iconPath(iconId));
+        throw error;
+      }
+      if (!this.isCurrentGeneration(scope.key, generation)) {
+        await this.persist(this.cache);
+        await this.storage.remove(this.iconPath(iconId));
+        return null;
+      }
+      // Publishing starts synchronously with a copy of the durable snapshot;
+      // another scope cannot leak an uncommitted entry into this notification.
+      this.cache = nextCache;
+      await this.notify(nextCache);
+      await this.removePayload(previous, iconId);
+      return copyEntry(nextEntry);
+    });
   }
 
   private async removePayload(entry: CacheEntry | undefined, replacementIconId?: string) {
@@ -264,20 +355,37 @@ export class KernelCacheAuthority {
   }
 
   private enqueueResolution<T>(operation: () => Promise<T>) {
-    const task = this.resolutionTail.then(operation);
-    this.resolutionTail = task.then(() => undefined, () => undefined);
+    return new Promise<T>((resolve, reject) => {
+      const start = () => {
+        this.activeResolutions += 1;
+        void Promise.resolve()
+          .then(operation)
+          .then(resolve, reject)
+          .finally(() => {
+            this.activeResolutions -= 1;
+            this.resolutionQueue.shift()?.();
+          });
+      };
+      if (this.activeResolutions < MAX_RESOLUTION_CONCURRENCY) start();
+      else this.resolutionQueue.push(start);
+    });
+  }
+
+  private enqueueCacheMutation<T>(operation: () => Promise<T>) {
+    const task = this.cacheMutationTail.then(operation);
+    this.cacheMutationTail = task.then(() => undefined, () => undefined);
     return task;
   }
 
-  private persist() {
-    const snapshot = JSON.stringify(this.cache);
+  private persist(cache = this.cache) {
+    const snapshot = JSON.stringify(cache);
     const write = this.persistTail.catch(() => undefined).then(() => this.storage.put(CACHE_INDEX_FILE, snapshot));
     this.persistTail = write;
     return write;
   }
 
-  private async notify() {
-    await this.options.onStateChange?.(this.snapshot());
+  private async notify(cache = this.cache) {
+    await this.options.onStateChange?.(copyCache(cache));
   }
 
   private isFresh(entry: CacheEntry) {
@@ -287,11 +395,27 @@ export class KernelCacheAuthority {
   }
 
   private invalidate(key: string) {
-    this.generations.set(key, this.generationFor(key) + 1);
+    const generation = this.generationFor(key) + 1;
+    this.generations.set(key, generation);
+    this.invalidationGenerations.set(key, generation);
+    return generation;
+  }
+
+  private completeInvalidation(key: string, generation: number) {
+    if (this.invalidationGenerations.get(key) === generation) this.invalidationGenerations.delete(key);
   }
 
   private generationFor(key: string) {
     return this.generations.get(key) ?? 0;
+  }
+
+  private isCurrentGeneration(key: string, generation: number) {
+    return generation === this.generationFor(key);
+  }
+
+  private isCurrentPinnedOperation(key: string, generation: number, replaceKey?: string, replacedGeneration?: number) {
+    return this.isCurrentGeneration(key, generation)
+      && (!replaceKey || replaceKey === key || replacedGeneration === undefined || this.isCurrentGeneration(replaceKey, replacedGeneration));
   }
 
   private iconIdFor(key: string) {

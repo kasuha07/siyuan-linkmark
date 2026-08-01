@@ -10,6 +10,12 @@ import {
   type ProviderPreset,
   type ResolverMode,
 } from "./icon-resolver";
+import {
+  addedLinkDiscoveryRegionFor,
+  flushFrontendRenderWork,
+  FrontendRenderWorkQueue,
+  localDiscoveryRegionFor,
+} from "./frontend-render-work";
 import { fetchOutcomeFor, type FetchOutcome } from "./refresh-outcome";
 import { scopeForUrl, scopeFromCacheKey, scopeMatchTarget, type LinkScope } from "./url-scope";
 
@@ -53,6 +59,22 @@ const RUNTIME_STYLE_ID = "auto-favicon-runtime-style";
 const FEEDBACK_URL = "https://ld246.com/article/1785052610863";
 const RESOLVER_VERSION = 6;
 const FAILURE_COOLDOWN = 10 * 60 * 1000;
+const RULE_RENDER_BATCH_DELAY = 16;
+const LINK_SELECTOR = [
+  ".protyle-wysiwyg span[data-type~='a'][data-href]",
+  ".protyle-wysiwyg span[data-type~='url'][data-href]",
+  ".protyle-wysiwyg a[href]",
+  ".b3-typography a[href]",
+].join(",");
+const EDITOR_SELECTOR = ".protyle-wysiwyg";
+const EDITOR_BLOCK_SELECTOR = "[data-node-id]";
+const STATIC_CONTAINER_SELECTOR = ".b3-typography";
+const LOCAL_DISCOVERY_SELECTORS = {
+  link: LINK_SELECTOR,
+  editor: EDITOR_SELECTOR,
+  block: EDITOR_BLOCK_SELECTOR,
+  staticContainer: STATIC_CONTAINER_SELECTOR,
+};
 
 const defaultSettings: Settings = {
   enabled: true,
@@ -85,13 +107,15 @@ export default class AutoFaviconPlugin extends Plugin {
   private iconRules = new Map<string, string>();
   private observer?: MutationObserver;
   private scanTimer?: number;
+  private renderWorkTimer?: number;
+  private readonly renderWork = new FrontendRenderWorkQueue<Element>((outer, inner) => outer.contains(inner));
   private topBarElement?: HTMLElement;
   private enabledInput?: HTMLInputElement;
   private cacheCountElement?: HTMLElement;
   private failureReasons = new Map<string, string>();
   private automaticFetchGeneration = 0;
   private cacheGeneration = 0;
-  private readonly inputListener = () => this.scheduleScan();
+  private readonly inputListener = (event: Event) => this.scheduleInputScan(event.target);
 
   async onload() {
     this.addToolbar();
@@ -110,7 +134,8 @@ export default class AutoFaviconPlugin extends Plugin {
     await this.loadKernelState();
     await this.subscribeToKernelChanges();
     this.addSetting();
-    await this.rebuildRules();
+    this.rebuildRules();
+    this.renderRules();
     this.startObserver();
     this.scheduleScan();
   }
@@ -118,7 +143,8 @@ export default class AutoFaviconPlugin extends Plugin {
   onunload() {
     this.observer?.disconnect();
     document.removeEventListener("input", this.inputListener, true);
-    if (this.scanTimer) window.clearTimeout(this.scanTimer);
+    if (this.scanTimer !== undefined) window.clearTimeout(this.scanTimer);
+    if (this.renderWorkTimer !== undefined) window.clearTimeout(this.renderWorkTimer);
     this.topBarElement?.remove();
     document.getElementById(RUNTIME_STYLE_ID)?.remove();
   }
@@ -150,11 +176,12 @@ export default class AutoFaviconPlugin extends Plugin {
   private async subscribeToKernelChanges() {
     const bind = this.kernel?.rpc.bind;
     if (!bind) return;
-    await bind("cache.changed", async (params) => {
+    await bind("cache.changed", (params) => {
       const cache = params?.cache ?? params?.params?.cache;
       if (!cache || typeof cache !== "object") return;
       this.cache = cache as Record<string, CacheEntry>;
-      await this.rebuildRules();
+      this.requestRuleRebuild();
+      this.scheduleScan();
     });
     await bind("cache.policy.changed", async (params) => {
       this.applyCachePolicy(params?.policy ?? params?.params?.policy);
@@ -453,7 +480,7 @@ export default class AutoFaviconPlugin extends Plugin {
           await this.invalidateGeneratedMonograms();
         }
         if (!wasPaused && this.settings.pauseAutomaticFetch) this.automaticFetchGeneration += 1;
-        await this.rebuildRules();
+        this.requestRuleRebuild();
         if (this.settings.enabled && !this.settings.pauseAutomaticFetch) this.scheduleScan();
       },
     });
@@ -615,7 +642,7 @@ export default class AutoFaviconPlugin extends Plugin {
     this.settings.enabled = enabled;
     if (this.enabledInput) this.enabledInput.checked = enabled;
     await this.saveDisplaySettings();
-    await this.rebuildRules();
+    this.requestRuleRebuild();
     if (enabled && !this.settings.pauseAutomaticFetch) this.scheduleScan();
     showMessage(this.t(enabled ? "pluginEnabled" : "pluginDisabled"));
   }
@@ -645,23 +672,47 @@ export default class AutoFaviconPlugin extends Plugin {
   }
 
   private collectDocumentDomains(root?: Element | null) {
-    const selector = [
-      ".protyle-wysiwyg span[data-type~='a'][data-href]",
-      ".protyle-wysiwyg span[data-type~='url'][data-href]",
-      ".protyle-wysiwyg a[href]",
-      ".b3-typography a[href]",
-    ].join(",");
     const domains = new Map<string, { scope: LinkScope; targetUrl: string; elements: HTMLElement[] }>();
-    document.querySelectorAll<HTMLElement>(selector).forEach((element) => {
-      if (root && element !== root && !root.contains(element)) return;
+    const elements = [
+      ...(root?.matches(LINK_SELECTOR) ? [root as HTMLElement] : []),
+      ...(root ?? document).querySelectorAll<HTMLElement>(LINK_SELECTOR),
+    ];
+    for (const element of elements) {
       const href = element.dataset.href ?? element.getAttribute("href") ?? "";
       const scope = scopeForUrl(href);
-      if (!scope) return;
+      if (!scope) continue;
       const existing = domains.get(scope.key);
       if (existing) existing.elements.push(element);
       else domains.set(scope.key, { scope, targetUrl: href, elements: [element] });
-    });
+    }
     return domains;
+  }
+
+  private scheduleScanForNode(target: EventTarget | null) {
+    const root = this.localScanRootFor(target);
+    if (root) this.scheduleScan(root);
+  }
+
+  private scheduleAddedNodeScan(node: Node) {
+    const root = addedLinkDiscoveryRegionFor(this.elementForNode(node), LOCAL_DISCOVERY_SELECTORS);
+    if (root) this.scheduleScan(root);
+  }
+
+  private scheduleInputScan(target: EventTarget | null) {
+    const targetElement = this.elementForNode(target);
+    const selectedElement = this.elementForNode(document.getSelection()?.anchorNode ?? null);
+    const source = selectedElement && targetElement?.contains(selectedElement) ? selectedElement : targetElement;
+    const root = this.localScanRootFor(source);
+    if (root) this.scheduleScan(root);
+  }
+
+  private localScanRootFor(node: EventTarget | null) {
+    return localDiscoveryRegionFor(this.elementForNode(node), LOCAL_DISCOVERY_SELECTORS);
+  }
+
+  private elementForNode(node: EventTarget | null) {
+    if (node instanceof Element) return node;
+    return node instanceof Node ? node.parentElement : null;
   }
 
   private async refreshCurrentDocument() {
@@ -734,8 +785,7 @@ export default class AutoFaviconPlugin extends Plugin {
     await this.callKernel("cache.remove", key);
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.delete(key);
-    this.iconRules.delete(key);
-    this.renderRules();
+    this.requestRuleRebuild();
     this.updateCacheCount();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
   }
@@ -916,7 +966,7 @@ export default class AutoFaviconPlugin extends Plugin {
       if (selectedScope.key !== scope.key) delete this.cache[selectedScope.key];
       this.failedDomains.delete(scope.key);
       this.failedDomains.delete(selectedScope.key);
-      await this.rebuildRules();
+      this.requestRuleRebuild();
       if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
       this.updateCacheCount();
       showMessage(this.t("customIconSaved").replace("{domain}", scope.domain));
@@ -948,7 +998,7 @@ export default class AutoFaviconPlugin extends Plugin {
     await this.callKernel("cache.remove", key);
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.delete(key);
-    await this.rebuildRules();
+    this.requestRuleRebuild();
     this.updateCacheCount();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
     showMessage(this.t("automaticRestored").replace("{domain}", entry.domain ?? key.split("::")[0]));
@@ -1067,7 +1117,7 @@ export default class AutoFaviconPlugin extends Plugin {
         if (!root.isConnected) return;
         this.cache[targetScope.key] = selected;
         if (targetScope.key !== selectedScope.key) delete this.cache[selectedScope.key];
-        await this.rebuildRules();
+        this.requestRuleRebuild();
         dialog.destroy();
         afterChange();
       } catch {
@@ -1189,8 +1239,7 @@ export default class AutoFaviconPlugin extends Plugin {
     await this.callKernel("cache.clear-generated");
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.clear();
-    this.iconRules.clear();
-    this.renderRules();
+    this.requestRuleRebuild();
     this.updateCacheCount();
   }
 
@@ -1199,13 +1248,19 @@ export default class AutoFaviconPlugin extends Plugin {
     await this.callKernel("cache.clear");
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
     this.failedDomains.clear();
-    this.iconRules.clear();
-    await this.rebuildRules();
+    this.requestRuleRebuild();
     if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
   }
 
   private startObserver() {
-    this.observer = new MutationObserver(() => this.scheduleScan());
+    this.observer = new MutationObserver((records) => {
+      for (const record of records) {
+        this.scheduleScanForNode(record.target);
+        if (record.type === "childList") {
+          for (const node of record.addedNodes) this.scheduleAddedNodeScan(node);
+        }
+      }
+    });
     this.observer.observe(document.body, {
       childList: true,
       subtree: true,
@@ -1216,14 +1271,50 @@ export default class AutoFaviconPlugin extends Plugin {
     document.addEventListener("input", this.inputListener, true);
   }
 
-  private scheduleScan() {
-    if (this.scanTimer) window.clearTimeout(this.scanTimer);
-    this.scanTimer = window.setTimeout(() => this.scanLinks(), 250);
+  private scheduleScan(root?: Element | null) {
+    if (root) this.renderWork.requestLocalDiscovery(root);
+    else this.renderWork.requestFullDiscovery();
+    if (this.scanTimer !== undefined) window.clearTimeout(this.scanTimer);
+    this.scanTimer = window.setTimeout(() => {
+      this.scanTimer = undefined;
+      this.renderWork.flushDiscovery();
+      this.scheduleRenderWork();
+    }, 250);
   }
 
-  private scanLinks() {
-    if (!this.settings.enabled) return;
-    const domains = this.collectDocumentDomains();
+  private requestRuleRebuild() {
+    this.renderWork.requestRuleRebuild();
+    this.scheduleRenderWork();
+  }
+
+  private requestRulePublication() {
+    this.renderWork.requestRulePublication();
+    this.scheduleRenderWork();
+  }
+
+  private scheduleRenderWork() {
+    if (this.renderWorkTimer !== undefined) return;
+    // Let concurrent cache updates settle before replacing the complete stylesheet.
+    this.renderWorkTimer = window.setTimeout(() => this.flushRenderWork(), RULE_RENDER_BATCH_DELAY);
+  }
+
+  private flushRenderWork() {
+    this.renderWorkTimer = undefined;
+    flushFrontendRenderWork(this.renderWork, {
+      rebuildRules: () => this.rebuildRules(),
+      discover: (discovery) => {
+        if (discovery.kind === "full") return this.scanLinks();
+        let rulesChanged = false;
+        for (const root of discovery.regions) rulesChanged = this.scanLinks(root) || rulesChanged;
+        return rulesChanged;
+      },
+      publishRules: () => this.renderRules(),
+    });
+  }
+
+  private scanLinks(root?: Element | null) {
+    if (!this.settings.enabled) return false;
+    const domains = this.collectDocumentDomains(root);
 
     let rulesChanged = false;
     domains.forEach(({ scope, targetUrl }, key) => {
@@ -1246,7 +1337,7 @@ export default class AutoFaviconPlugin extends Plugin {
       if (failedAt && Date.now() - failedAt < FAILURE_COOLDOWN) return;
       void this.fetchAndCache(scope, targetUrl);
     });
-    if (rulesChanged) this.renderRules();
+    return rulesChanged;
   }
 
   private cachedIconForScope(scope: LinkScope) {
@@ -1326,7 +1417,7 @@ export default class AutoFaviconPlugin extends Plugin {
       this.updateCacheCount();
       this.failedDomains.delete(scope.key);
       this.failureReasons.delete(scope.key);
-      this.setRule(scope, entry.url);
+      if (this.setRule(scope, entry.url)) this.requestRulePublication();
       return fetchOutcomeFor(entry);
     } catch (error) {
       this.updateCacheCount();
@@ -1365,8 +1456,7 @@ export default class AutoFaviconPlugin extends Plugin {
       if (this.cache[key] !== expected) return;
       await this.callKernel("cache.remove", key);
       this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
-      this.iconRules.delete(key);
-      this.renderRules();
+      this.requestRuleRebuild();
       this.updateCacheCount();
     } finally {
       this.pendingDomains.delete(key);
@@ -1374,7 +1464,7 @@ export default class AutoFaviconPlugin extends Plugin {
     }
   }
 
-  private async rebuildRules() {
+  private rebuildRules() {
     this.iconRules.clear();
     if (this.settings.enabled) {
       const entries = Object.entries(this.cache).sort(([a], [b]) => Number(a.includes("::")) - Number(b.includes("::")));
@@ -1394,13 +1484,14 @@ export default class AutoFaviconPlugin extends Plugin {
       }
     }
     this.updateCacheCount();
-    this.renderRules();
   }
 
   private setRule(scope: LinkScope, url: string) {
-    if (!this.settings.enabled) return;
-    this.iconRules.set(scope.key, this.createRule(scope, url));
-    this.renderRules();
+    if (!this.settings.enabled) return false;
+    const rule = this.createRule(scope, url);
+    if (this.iconRules.get(scope.key) === rule) return false;
+    this.iconRules.set(scope.key, rule);
+    return true;
   }
 
   private createRule(scope: LinkScope, iconUrl: string) {
