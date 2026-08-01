@@ -9,6 +9,7 @@ import {
 import { privateIconIdFromPath } from "../src/private-route";
 import { fetchOutcomeFor, outcomeForCacheRequest } from "../src/refresh-outcome";
 import { ForwardProxyIconResolver, type ForwardProxy, type KernelResolverPolicy } from "../src/kernel-resolver";
+import type { ResolutionTraceRecord, ResolutionTraceSink } from "../src/resolution-trace";
 
 class MemoryStorage implements CacheStorage {
   readonly files = new Map<string, string>();
@@ -107,6 +108,29 @@ const resolved = (source = "test resolver"): { bytes: ArrayBuffer; contentType: 
 });
 
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+class RecordingTrace {
+  readonly records: ResolutionTraceRecord[] = [];
+  readonly sink: ResolutionTraceSink = (record) => { this.records.push(record); };
+  events() {
+    return this.records.map((record) => record.event);
+  }
+}
+
+const ALLOWED_RECORD_KEYS = new Set([
+  "schema", "event", "task", "scope", "trigger", "elapsedMs",
+  "ordinal", "source", "outcome", "status", "contentType", "bytes", "remainingBudgetMs", "category",
+]);
+
+function expectSanitizedRecords(records: ResolutionTraceRecord[]) {
+  for (const record of records) {
+    for (const key of Object.keys(record)) {
+      expect(ALLOWED_RECORD_KEYS.has(key)).toBe(true);
+    }
+    expect(record.scope).toMatchObject({ key: expect.any(String), domain: expect.any(String) });
+    expect(record.schema).toBe(1);
+  }
+}
 
 type Subscriber<T> = {
   events: T[];
@@ -727,6 +751,296 @@ describe("KernelCacheAuthority", () => {
     await vi.waitFor(() => expect(failures).toHaveLength(1));
     expect(failures[0]).toEqual({ key: "example.com", category: "exhausted" });
     expect(authority.snapshot()).toEqual({});
+  });
+
+  it("traces a cache miss from acceptance through resolve, persist, and commit", async () => {
+    let now = 100;
+    let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;
+    const trace = new RecordingTrace();
+    const watched = subscribers();
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => await new Promise((resolve) => { resolveDownload = resolve; }),
+    }, () => now, {
+      traceSink: trace.sink,
+      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+    });
+    await authority.initialize();
+
+    const result = await authority.getOrQueue(scope());
+
+    expect(result).toEqual({ status: "queued" });
+    expect(trace.events()).toEqual(["accepted", "started"]);
+    expect(trace.records[0]).toMatchObject({
+      schema: 1, event: "accepted", trigger: "manual",
+      scope: { key: "example.com", domain: "example.com" }, elapsedMs: 0,
+    });
+    await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
+
+    now = 160;
+    resolveDownload?.(resolved());
+    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+
+    expect(trace.events()).toEqual(["accepted", "started", "resolved", "persisted", "committed"]);
+    expect(new Set(trace.records.map((record) => record.task)).size).toBe(1);
+    expect(trace.records[2]).toMatchObject({
+      event: "resolved", elapsedMs: 60, source: "test resolver", contentType: "image/png", bytes: 3,
+    });
+    expect(trace.records[3]).toMatchObject({ event: "persisted", elapsedMs: 60 });
+    expect(trace.records[4]).toMatchObject({ event: "committed", elapsedMs: 60 });
+    expectSanitizedRecords(trace.records);
+  });
+
+  it("traces a coalesced request against the owning task", async () => {
+    let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;
+    let calls = 0;
+    const trace = new RecordingTrace();
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => {
+        calls += 1;
+        return await new Promise((resolve) => { resolveDownload = resolve; });
+      },
+    }, () => 100, { traceSink: trace.sink });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(calls).toBe(1));
+
+    const coalesced = trace.records.find((record) => record.event === "coalesced")!;
+    expect(coalesced).toMatchObject({ task: trace.records[0].task, trigger: "manual" });
+    expectSanitizedRecords(trace.records);
+
+    resolveDownload?.(resolved());
+    await settle();
+    expect(calls).toBe(1);
+    expect(trace.events()).toEqual(["accepted", "started", "coalesced", "resolved", "persisted", "committed"]);
+  });
+
+  it("traces a fifth distinct scope waiting for a Resolution concurrency slot", async () => {
+    const releases = new Map<string, () => void>();
+    const trace = new RecordingTrace();
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async (requested) => {
+        await new Promise<void>((resolve) => releases.set(requested.key, resolve));
+        return resolved(requested.key);
+      },
+    }, () => 100, { traceSink: trace.sink });
+    await authority.initialize();
+
+    await Promise.all([
+      authority.getOrQueue(scope("one.example.com")),
+      authority.getOrQueue(scope("two.example.com")),
+      authority.getOrQueue(scope("three.example.com")),
+      authority.getOrQueue(scope("four.example.com")),
+    ]);
+    await vi.waitFor(() => expect(releases.size).toBe(4));
+    await expect(authority.getOrQueue(scope("five.example.com"))).resolves.toEqual({ status: "queued" });
+
+    const fifth = trace.records.filter((record) => record.scope.key === "five.example.com");
+    expect(fifth.map((record) => record.event)).toEqual(["accepted", "waiting-slot"]);
+    expect(trace.records.filter((record) => record.event === "started")).toHaveLength(4);
+
+    releases.get("one.example.com")?.();
+    await vi.waitFor(() => expect(trace.records.some((record) => (
+      record.event === "started" && record.scope.key === "five.example.com"
+    ))).toBe(true));
+    for (const release of releases.values()) release();
+    await settle();
+
+    expect(trace.records.filter((record) => record.event === "accepted")).toHaveLength(5);
+    expect(trace.records.filter((record) => record.event === "started")).toHaveLength(5);
+    expect(trace.records.filter((record) => record.event === "waiting-slot")).toHaveLength(1);
+    expect(trace.records.filter((record) => record.event === "committed")).toHaveLength(5);
+    const validSequences = [
+      ["accepted", "started", "resolved", "persisted", "committed"],
+      ["accepted", "waiting-slot", "started", "resolved", "persisted", "committed"],
+    ];
+    const byTask = new Map<string, string[]>();
+    for (const record of trace.records) {
+      byTask.set(record.task, [...(byTask.get(record.task) ?? []), record.event]);
+    }
+    for (const sequence of byTask.values()) {
+      expect(validSequences).toContainEqual(sequence);
+    }
+    expectSanitizedRecords(trace.records);
+  });
+
+  it("traces sanitized candidate outcomes for usable and rejected responses", async () => {
+    const trace = new RecordingTrace();
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding !== "base64") return null;
+      if (url.endsWith("/favicon.ico")) {
+        return { body: "not-an-icon", contentType: "text/html", status: 404, url };
+      }
+      return { body: Buffer.from([1, 2, 3, 4]).toString("base64"), contentType: "image/png", status: 200, url };
+    });
+    const authority = new KernelCacheAuthority(new MemoryStorage(), new ForwardProxyIconResolver(forward, () => resolverPolicy), () => 100, {
+      traceSink: trace.sink,
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(trace.records.some((record) => record.event === "committed")).toBe(true));
+
+    const candidates = trace.records.filter((record) => record.event === "candidate-finished");
+    expect(candidates).toHaveLength(2);
+    expect(candidates[0]).toMatchObject({
+      ordinal: 1, source: "root favicon.ico", outcome: "failed", status: 404, contentType: "text/html",
+    });
+    expect(candidates[1]).toMatchObject({
+      ordinal: 2, source: "root favicon.png", outcome: "resolved", status: 200, contentType: "image/png", bytes: 4,
+    });
+    expectSanitizedRecords(trace.records);
+    expect(JSON.stringify(trace.records)).not.toMatch(/https?:\/\//);
+  });
+
+  it("traces malformed candidate data as invalid without leaking response details", async () => {
+    const trace = new RecordingTrace();
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding !== "base64") return null;
+      return { body: "!!not-base64!!", contentType: "image/png", status: 200, url };
+    });
+    const authority = new KernelCacheAuthority(new MemoryStorage(), new ForwardProxyIconResolver(forward, () => resolverPolicy), () => 100, {
+      traceSink: trace.sink,
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(trace.records.some((record) => record.event === "failed")).toBe(true));
+
+    const candidates = trace.records.filter((record) => record.event === "candidate-finished");
+    expect(candidates).toHaveLength(4);
+    for (const candidate of candidates) expect(candidate.outcome).toBe("invalid");
+    expect(trace.records.find((record) => record.event === "failed")).toMatchObject({ category: "invalid" });
+    expectSanitizedRecords(trace.records);
+    expect(JSON.stringify(trace.records)).not.toContain("not-base64");
+  });
+
+  it("traces resolver transport rejection as network without leaking error text", async () => {
+    const trace = new RecordingTrace();
+    const forward = vi.fn<ForwardProxy>(async () => { throw new Error("proxy refused"); });
+    const authority = new KernelCacheAuthority(new MemoryStorage(), new ForwardProxyIconResolver(forward, () => resolverPolicy), () => 100, {
+      traceSink: trace.sink,
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(trace.records.some((record) => record.event === "failed")).toBe(true));
+
+    const candidates = trace.records.filter((record) => record.event === "candidate-finished");
+    expect(candidates).toHaveLength(4);
+    for (const candidate of candidates) expect(candidate.outcome).toBe("network");
+    expect(trace.records.find((record) => record.event === "failed")).toMatchObject({ category: "network" });
+    expectSanitizedRecords(trace.records);
+    expect(JSON.stringify(trace.records)).not.toContain("proxy refused");
+  });
+
+  it("traces deadline expiry as a timeout candidate and terminal failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const trace = new RecordingTrace();
+      const forward = vi.fn<ForwardProxy>(async () => await new Promise(() => {}));
+      const authority = new KernelCacheAuthority(new MemoryStorage(), new ForwardProxyIconResolver(forward, () => resolverPolicy), () => Date.now(), {
+        traceSink: trace.sink,
+      });
+      await authority.initialize();
+
+      const pending = authority.getOrQueue(scope());
+      await expect(pending).resolves.toEqual({ status: "queued" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(() => expect(trace.records.some((record) => record.event === "failed")).toBe(true));
+
+      expect(trace.records.filter((record) => record.event === "candidate-finished")).toHaveLength(1);
+      expect(trace.records.find((record) => record.event === "candidate-finished")).toMatchObject({
+        ordinal: 1, outcome: "timeout", remainingBudgetMs: 0,
+      });
+      expect(trace.records.find((record) => record.event === "failed")).toMatchObject({ category: "timeout" });
+      expectSanitizedRecords(trace.records);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("traces exactly one terminal failed record with the sanitized category", async () => {
+    const trace = new RecordingTrace();
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => { throw new ResolutionError("network"); },
+    }, () => 100, { traceSink: trace.sink });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await settle();
+
+    const failed = trace.records.filter((record) => record.event === "failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ category: "network", task: trace.records[0].task });
+    expect(trace.events()).toEqual(["accepted", "started", "failed"]);
+    expectSanitizedRecords(trace.records);
+  });
+
+  it("traces an invalidated task without a later commit or failure record", async () => {
+    let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;
+    const trace = new RecordingTrace();
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => await new Promise((resolve) => { resolveDownload = resolve; }),
+    }, () => 100, { traceSink: trace.sink });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
+    await authority.remove(scope().key);
+    resolveDownload?.(resolved());
+    await settle();
+
+    const invalidated = trace.records.filter((record) => record.event === "invalidated");
+    expect(invalidated).toHaveLength(1);
+    expect(invalidated[0]).toMatchObject({ task: trace.records[0].task });
+    expect(trace.events()).toEqual(["accepted", "started", "invalidated"]);
+    expect(trace.events()).not.toContain("failed");
+    expect(trace.events()).not.toContain("persisted");
+    expect(trace.events()).not.toContain("committed");
+    expectSanitizedRecords(trace.records);
+  });
+
+  it("traces persistence only after storage succeeds and commit only with the state publication", async () => {
+    const storage = new BlockingCacheIndexStorage();
+    const trace = new RecordingTrace();
+    const watched = subscribers();
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => resolved() }, () => 100, {
+      traceSink: trace.sink,
+      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+    });
+    await authority.initialize();
+    const indexWriteStarted = storage.blockNextCacheIndexWrite();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await indexWriteStarted;
+    await settle();
+    expect(trace.events()).toEqual(["accepted", "started", "resolved"]);
+
+    storage.releaseCacheIndexWrite();
+    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    await settle();
+    expect(trace.events()).toEqual(["accepted", "started", "resolved", "persisted", "committed"]);
+    expectSanitizedRecords(trace.records);
+  });
+
+  it("emits no trace records and no behavior change when tracing is disabled", async () => {
+    const watched = subscribers();
+    const failures: Array<{ key: string; category: string }> = [];
+    const resolve = vi.fn(async () => resolved());
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => 100, {
+      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onResolutionFailure: (failedScope, category) => { failures.push({ key: failedScope.key, category }); },
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(authority.snapshot()).toEqual({ "example.com": expect.objectContaining({ source: "test resolver" }) });
+    expect(failures).toEqual([]);
   });
 });
 

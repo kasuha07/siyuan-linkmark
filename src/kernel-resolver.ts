@@ -1,4 +1,5 @@
 import { ResolutionError, type IconResolver, type LinkScope, type ResolvedIcon, type ResolutionTrigger } from "./cache-authority";
+import type { CandidateAttemptInfo } from "./resolution-trace";
 
 export type KernelResolverPolicy = {
   provider: string;
@@ -32,7 +33,11 @@ type DownloadOutcome =
 export class ForwardProxyIconResolver implements IconResolver {
   constructor(private readonly forward: ForwardProxy, private readonly policy: () => KernelResolverPolicy) {}
 
-  async resolve(scope: LinkScope, trigger: ResolutionTrigger = "automatic"): Promise<ResolvedIcon | null> {
+  async resolve(
+    scope: LinkScope,
+    trigger: ResolutionTrigger = "automatic",
+    onCandidate?: (info: CandidateAttemptInfo) => void,
+  ): Promise<ResolvedIcon | null> {
     let target: URL;
     try {
       target = new URL(scope.targetUrl);
@@ -45,8 +50,8 @@ export class ForwardProxyIconResolver implements IconResolver {
     const attempts = candidates.slice(0, MAX_RESOLUTION_CANDIDATE_ATTEMPTS);
     let networkFailure = false;
     let invalidData = false;
-    for (const candidate of attempts) {
-      const outcome = await this.tryDownload(candidate, deadline);
+    for (const [index, candidate] of attempts.entries()) {
+      const outcome = await this.tryDownload(candidate, deadline, index + 1, onCandidate);
       if (outcome.kind === "resolved") return outcome.resolved;
       if (outcome.kind === "network") networkFailure = true;
       if (outcome.kind === "invalid") invalidData = true;
@@ -66,7 +71,7 @@ export class ForwardProxyIconResolver implements IconResolver {
     if (!isSafePublicTarget(target)) return [];
     const results: ResolvedIcon[] = [];
     for (const candidate of await this.candidateUrls(target, scope, allowFullPageDiscovery, Infinity)) {
-      const outcome = await this.tryDownload(candidate, Infinity);
+      const outcome = await this.tryDownload(candidate, Infinity, 0);
       if (outcome.kind === "resolved") results.push(outcome.resolved);
       if (results.length >= 8) break;
     }
@@ -174,28 +179,74 @@ export class ForwardProxyIconResolver implements IconResolver {
     }
   }
 
-  private async tryDownload(candidate: Candidate, deadline: number): Promise<DownloadOutcome> {
+  private async tryDownload(
+    candidate: Candidate,
+    deadline: number,
+    ordinal: number,
+    onCandidate?: (info: CandidateAttemptInfo) => void,
+  ): Promise<DownloadOutcome> {
     let response: ForwardResponse | null;
     try {
       response = await this.forwardBounded(candidate.url, "base64", "application/octet-stream", deadline);
     } catch (error) {
-      if (error instanceof ResolutionError && error.category === "timeout") return { kind: "timeout" };
-      return { kind: "network" };
+      const outcome: DownloadOutcome =
+        error instanceof ResolutionError && error.category === "timeout"
+          ? { kind: "timeout" }
+          : { kind: "network" };
+      this.reportCandidate(onCandidate, candidate, ordinal, outcome, deadline);
+      return outcome;
     }
+    let outcome: DownloadOutcome;
+    let bytes: number | undefined;
     if (!response || response.status < 200 || response.status >= 300 || !response.body || isAuthenticationRedirect(new URL(candidate.url), response.url)) {
-      return { kind: "failed" };
+      outcome = { kind: "failed" };
+    } else if (!isWellFormedBase64(response.body)) {
+      outcome = { kind: "invalid" };
+    } else {
+      const decoded = Buffer.from(response.body, "base64");
+      if (!decoded.length || decoded.length > MAX_ICON_BYTES || !isImagePayload(decoded, response.contentType)) {
+        outcome = { kind: "failed" };
+      } else {
+        bytes = decoded.length;
+        outcome = {
+          kind: "resolved",
+          resolved: {
+            bytes: decoded.buffer.slice(decoded.byteOffset, decoded.byteOffset + decoded.byteLength),
+            contentType: imageContentType(decoded, response.contentType),
+            source: candidate.source,
+          },
+        };
+      }
     }
-    if (!isWellFormedBase64(response.body)) return { kind: "invalid" };
-    const bytes = Buffer.from(response.body, "base64");
-    if (!bytes.length || bytes.length > MAX_ICON_BYTES || !isImagePayload(bytes, response.contentType)) return { kind: "failed" };
-    return {
-      kind: "resolved",
-      resolved: {
-        bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
-        contentType: imageContentType(bytes, response.contentType),
-        source: candidate.source,
-      },
-    };
+    this.reportCandidate(onCandidate, candidate, ordinal, outcome, deadline, response, bytes);
+    return outcome;
+  }
+
+  /**
+   * Reports one sanitized candidate attempt to the Resolution trace sink.
+   * Only the reviewed source label, attempt ordinal, HTTP status, normalized
+   * content type, validated byte count, and sanitized outcome leave the
+   * resolver; the candidate URL and response payload never do.
+   */
+  private reportCandidate(
+    onCandidate: ((info: CandidateAttemptInfo) => void) | undefined,
+    candidate: Candidate,
+    ordinal: number,
+    outcome: DownloadOutcome,
+    deadline: number,
+    response?: ForwardResponse | null,
+    bytes?: number,
+  ) {
+    if (!onCandidate) return;
+    onCandidate({
+      ordinal,
+      source: candidate.source,
+      outcome: outcome.kind,
+      status: response?.status,
+      contentType: response?.contentType ? response.contentType.split(";", 1)[0].toLowerCase() : undefined,
+      bytes,
+      remainingBudgetMs: Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : undefined,
+    });
   }
 
   /**

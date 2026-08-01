@@ -37,6 +37,7 @@ const sourcePlugin = JSON.parse(await readFile(resolve("plugin.json"), "utf8"));
 const plugin = JSON.parse(await readFile(resolve(dist, "plugin.json"), "utf8"));
 const expectedFrontends = ["desktop", "mobile", "browser-desktop", "browser-mobile"];
 const frontendBundle = await readFile(resolve(dist, "index.js"), "utf8");
+const kernelBundle = await readFile(resolve(dist, "kernel.js"), "utf8");
 
 function assertEqual(actual, expected, label) {
   if (actual !== expected) {
@@ -76,4 +77,7 @@ if (JSON.stringify(plugin.frontends) !== JSON.stringify(expectedFrontends)) {
 }
 if (/link-icon|linkIconMode|preferDynamic/i.test(frontendBundle)) {
   throw new Error("Marketplace payload must not include retired Link Icon compatibility behavior");
+}
+if (/cache\.trace\.set|traceTitle/i.test(frontendBundle) || /cache\.trace\.set|resolution-trace/i.test(kernelBundle)) {
+  throw new Error("Marketplace payload must not include the development-only resolution trace surface");
 }

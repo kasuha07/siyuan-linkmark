@@ -132,5 +132,7 @@
   "openSettings": "打开插件设置",
   "feedback": "GitHub Issues 问题反馈",
   "pluginEnabled": "链接印记已启用",
-  "pluginDisabled": "链接印记已停用"
+  "pluginDisabled": "链接印记已停用",
+  "traceTitle": "解析追踪（仅开发版）",
+  "traceDescription": "开发诊断功能：为每个任务向思源内核日志写入一条脱敏的 JSON 生命周期记录。默认关闭、不会持久化，内核重载后自动重置。"
 }

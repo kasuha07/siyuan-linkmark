@@ -117,6 +117,7 @@ export default class LinkmarkPlugin extends Plugin {
   private manualRefreshKeys = new Map<string, number>();
   private automaticFetchGeneration = 0;
   private cacheGeneration = 0;
+  private traceEnabled = false;
   private readonly inputListener = (event: Event) => this.scheduleInputScan(event.target);
 
   async onload() {
@@ -581,6 +582,30 @@ export default class LinkmarkPlugin extends Plugin {
       description: t("cacheDescription"),
       createActionElement: () => cacheActions,
     });
+    if (import.meta.env.MODE === "development") {
+      // The development-only Resolution trace switch applies immediately and
+      // never participates in the settings confirmation flow. It is process
+      // local, off by default, and reset whenever the kernel reloads.
+      const resolutionTrace = document.createElement("input");
+      resolutionTrace.type = "checkbox";
+      resolutionTrace.className = "b3-switch fn__flex-center";
+      resolutionTrace.checked = this.traceEnabled;
+      resolutionTrace.addEventListener("change", () => {
+        this.traceEnabled = resolutionTrace.checked;
+        void this.callKernel<{ enabled: boolean }>("cache.trace.set", this.traceEnabled).then((state) => {
+          this.traceEnabled = state?.enabled ?? false;
+          resolutionTrace.checked = this.traceEnabled;
+        }).catch(() => {
+          this.traceEnabled = false;
+          resolutionTrace.checked = false;
+        });
+      });
+      this.setting.addItem({
+        title: t("traceTitle"),
+        description: t("traceDescription"),
+        createActionElement: () => resolutionTrace,
+      });
+    }
   }
 
   private addToolbar() {

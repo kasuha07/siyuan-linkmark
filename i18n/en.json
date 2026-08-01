@@ -132,5 +132,7 @@
   "openSettings": "Open plugin settings",
   "feedback": "GitHub Issues",
   "pluginEnabled": "Linkmark enabled",
-  "pluginDisabled": "Linkmark disabled"
+  "pluginDisabled": "Linkmark disabled",
+  "traceTitle": "Resolution trace (development only)",
+  "traceDescription": "Development diagnostic that writes one sanitized JSON lifecycle record per task to the SiYuan kernel log. Off by default, never persisted, and reset whenever the kernel reloads."
 }
