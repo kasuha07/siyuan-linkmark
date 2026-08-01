@@ -13,9 +13,16 @@ Before submitting code, run:
 
 ```powershell
 npm ci
+make dev
 npm run check
 npm run build
 ```
+
+`make dev` starts or reuses the local SiYuan development container and then
+starts the Vite watchers. The container exposes SiYuan only at
+`http://127.0.0.1:6806`, persists its workspace in `dev/siyuan-workspace/`, and
+mounts `dist/` as the Auto Favicon plugin directory. Use `make dev-stop` to stop
+the container without removing its workspace data.
 
 Do not commit `node_modules`, local caches, SiYuan workspace data, or API keys.
 
@@ -40,9 +47,15 @@ attach `package.zip`; do not manually create the same Release first.
 
 ```powershell
 npm ci
+make dev
 npm run check
 npm run build
 ```
+
+`make dev` 会启动或复用本地 SiYuan 开发容器，然后启动 Vite 监听构建。容器只在
+`http://127.0.0.1:6806` 提供服务，工作区保存在 `dev/siyuan-workspace/`，并将
+`dist/` 挂载为 Auto Favicon 插件目录。使用 `make dev-stop` 可停止容器而不删除
+工作区数据。
 
 请不要提交 `node_modules`、本地缓存、思源工作空间数据或任何 API 密钥。
 
