@@ -143,6 +143,7 @@ class LinkmarkKernel {
   private async forward(url: string, responseEncoding: "text" | "base64", contentType: string, timeout = 8000) {
     const response = await siyuan.client.fetch("/api/network/forwardProxy", {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         url,
         method: "GET",

@@ -48,6 +48,10 @@ _Avoid_: migration, cleanup of old plugin data
 The single kernel-plugin owner of favicon resolution, downloads, cache-index mutations, cleanup, and private icon payloads for a workspace.
 _Avoid_: frontend cache, client cache
 
+**Forward-proxy retrieval**:
+A cache authority request that obtains a validated public icon candidate through SiYuan's server-side network proxy.
+_Avoid_: frontend cross-origin request, direct client download
+
 **Kernel plugin**:
 A SiYuan v3.7-or-later `kernel.js` component that runs with the SiYuan kernel rather than an individual application window.
 _Avoid_: background tab, browser worker
