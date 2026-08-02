@@ -97,8 +97,16 @@ The cache entry that applies to a link scope after pinned, subdomain-shared, and
 _Avoid_: cache hit, lookup result
 
 **Cache snapshot**:
-An isolated view of the authoritative cache that an RPC caller or state-change subscriber may read without changing the cache authority.
+An isolated view of the authoritative cache that an RPC caller or state-change subscriber may read without changing the cache authority; a Frontend client reads it at startup and when a Cache revision gap is detected.
 _Avoid_: live cache object, mutable cache reference
+
+**Cache change event**:
+A cache-authority broadcast that reports which Cache entries changed and which Link scopes were removed since the previous event, tagged with a Cache revision.
+_Avoid_: full cache broadcast, cache snapshot push
+
+**Cache revision**:
+The strictly increasing per-process number attached to each Cache change event; a gap between the last revision a Frontend client saw and the next event's revision means its local cache is out of date.
+_Avoid_: version number, cache generation
 
 **Cache persistence batch**:
 One durable cache-index write that commits all compatible cache-entry changes collected during a short scheduling window. Each committed resolution publishes state only after that write succeeds; its earlier Queue acknowledgement does not represent a commit.
@@ -129,7 +137,7 @@ The frontend behavior that renders Linkmark's selected icon according to its own
 _Avoid_: Link Icon compatibility, cooperative rendering
 
 **Icon rule**:
-The frontend-generated runtime stylesheet fragment that maps a link scope to the icon URL chosen for it, sized by the display preference.
+The frontend-generated runtime stylesheet fragment that maps a Present scope to the icon URL chosen for it, sized by the display preference.
 _Avoid_: style rule, selector string
 
 **Specific-page discovery**:
@@ -139,6 +147,10 @@ _Avoid_: ordinary favicon retrieval, automatic page visit
 **Link scope**:
 The cache identity for a link: a domain or a domain-plus-route key when the site needs route-specific icons.
 _Avoid_: bare domain, page URL
+
+**Present scope**:
+A Link scope whose link elements currently exist in a mounted editor or static container in a Frontend client's document; Icon rules are generated for Present scopes, so the stylesheet stays bounded by document content rather than cache size.
+_Avoid_: active scope key, visible scope
 
 **Parent-domain probing**:
 The resolution fallback that retrieves the registrable parent domain's candidates after the exact-domain candidates fail.
@@ -161,7 +173,7 @@ A kernel-resident favicon resolution task that may continue after a frontend clo
 _Avoid_: durable job, resumable task
 
 **Resolution outcome notification**:
-A cache-authority broadcast marking an In-flight task as committed or exhausted. A committed task sends the authoritative cache snapshot; an exhausted task sends only its Link scope and a sanitized failure category. Automatic failures remain silent, while a manual refresh may present one actionable message.
+A cache-authority broadcast marking an In-flight task as committed or exhausted. A committed task's entry arrives through a Cache change event; an exhausted task sends only its Link scope and a sanitized failure category.
 _Avoid_: RPC error, remote response payload, retry loop
 
 **Resolution concurrency**:
