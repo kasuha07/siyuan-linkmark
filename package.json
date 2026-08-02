@@ -1,6 +1,6 @@
 {
   "name": "siyuan-linkmark",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Automatically discovers, displays, and locally caches website icons for SiYuan links.",
   "private": false,
   "type": "module",
