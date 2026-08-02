@@ -8,6 +8,7 @@ import {
   type LinkScope,
 } from "../src/cache-authority";
 import { privateIconIdFromPath } from "../src/private-route";
+import { INVALID_SHARE_DOMAIN } from "../src/parent-domain";
 import { fetchOutcomeFor, outcomeForCacheRequest } from "../src/refresh-outcome";
 import { ForwardProxyIconResolver, type ForwardProxy, type KernelResolverPolicy } from "../src/kernel-resolver";
 import type { ResolutionTraceRecord, ResolutionTraceSink } from "../src/resolution-trace";
@@ -78,6 +79,20 @@ class FailingCacheIndexStorage extends CountingCacheIndexStorage {
       throw new Error("cache-index write failed");
     }
     this.files.set(path, content);
+  }
+}
+
+class RecordingOrderStorage extends MemoryStorage {
+  readonly operations: string[] = [];
+
+  override async put(path: string, content: string) {
+    this.operations.push(`write ${path}`);
+    await super.put(path, content);
+  }
+
+  override async remove(path: string) {
+    this.operations.push(`remove ${path}`);
+    await super.remove(path);
   }
 }
 
@@ -1321,6 +1336,162 @@ describe("KernelCacheAuthority", () => {
   });
 });
 
+describe("shared-pin eligibility and legacy migration", () => {
+  const hostScope = (domain: string): LinkScope => ({ key: domain, domain, targetUrl: `https://${domain}/` });
+  const hostEntry = (domain: string, overrides: Partial<CacheEntry> = {}): CacheEntry => ({
+    url: "", fetchedAt: 1, source: "legacy pin", domain, pinned: true,
+    ...overrides,
+  });
+
+  function preload(storage: MemoryStorage, pins: Array<[string, CacheEntry]>) {
+    const entries = Object.fromEntries(pins);
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(entries));
+    for (const [, cacheEntry] of pins) {
+      if (cacheEntry.iconId) {
+        storage.files.set(`icons/${cacheEntry.iconId}.base64`, Buffer.from([9]).toString("base64"));
+      }
+    }
+  }
+
+  it("rejects invalid shared pin requests with the stable invalid-share-domain error", async () => {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    for (const domain of ["github.io", "foo.github.io", "qq.com", "www.example.com", "a..example.com"]) {
+      await expect(
+        authority.putPinned(hostScope(domain), hostEntry(domain, { includeSubdomains: true }), "image/png", new Uint8Array([1]).buffer),
+      ).rejects.toThrow(INVALID_SHARE_DOMAIN);
+    }
+    expect(snapshotCache(authority)).toEqual({});
+  });
+
+  it("accepts a valid shared pin at an eligible eTLD+1 and keeps it available", async () => {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    const pinned = await authority.putPinned(
+      hostScope("example.com"),
+      hostEntry("example.com", { includeSubdomains: true }),
+      "image/png",
+      new Uint8Array([1]).buffer,
+    );
+    expect(pinned).toMatchObject({ domain: "example.com", pinned: true, includeSubdomains: true });
+
+    const result = await authority.getOrQueue(hostScope("example.com"));
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: pinned.iconId, includeSubdomains: true }) });
+    expect(Object.keys(snapshotCache(authority))).toEqual(["example.com"]);
+  });
+
+  it("still accepts exact pins at tenant eTLD+1s and inside reviewed exclusions", async () => {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    await expect(authority.putPinned(hostScope("foo.github.io"), hostEntry("foo.github.io"), "image/png", new Uint8Array([1]).buffer))
+      .resolves.toMatchObject({ domain: "foo.github.io", pinned: true });
+    await expect(authority.putPinned(hostScope("docs.qq.com"), hostEntry("docs.qq.com"), "image/png", new Uint8Array([2]).buffer))
+      .resolves.toMatchObject({ domain: "docs.qq.com", pinned: true });
+  });
+
+  it("retains valid shared pins and exact tenant pins during initialization", async () => {
+    const storage = new MemoryStorage();
+    preload(storage, [
+      ["example.com", hostEntry("example.com", { iconId: "legacy-1", includeSubdomains: true })],
+      ["foo.github.io", hostEntry("foo.github.io", { iconId: "legacy-2" })],
+      ["docs.qq.com", hostEntry("docs.qq.com", { iconId: "legacy-3" })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(Object.keys(snapshotCache(authority))).toEqual(["example.com", "foo.github.io", "docs.qq.com"]);
+    for (const iconId of ["legacy-1", "legacy-2", "legacy-3"]) {
+      expect(storage.files.has(`icons/${iconId}.base64`)).toBe(true);
+    }
+  });
+
+  it("removes legacy public-suffix, Private-suffix, and reviewed-exclusion shared pins with their payloads", async () => {
+    const storage = new MemoryStorage();
+    preload(storage, [
+      ["example.com", hostEntry("example.com", { iconId: "keep-1", includeSubdomains: true })],
+      ["github.io", hostEntry("github.io", { iconId: "drop-1", includeSubdomains: true })],
+      ["foo.github.io", hostEntry("foo.github.io", { iconId: "drop-2", includeSubdomains: true })],
+      ["sub.foo.github.io", hostEntry("sub.foo.github.io", { iconId: "drop-3", includeSubdomains: true })],
+      ["b.example.com", hostEntry("b.example.com", { iconId: "drop-4", includeSubdomains: true })],
+      ["qq.com", hostEntry("qq.com", { iconId: "drop-5", includeSubdomains: true })],
+      ["x.feishu.cn", hostEntry("x.feishu.cn", { iconId: "drop-6", includeSubdomains: true })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(Object.keys(snapshotCache(authority))).toEqual(["example.com"]);
+    expect(storage.files.has("icons/keep-1.base64")).toBe(true);
+    for (const iconId of ["drop-1", "drop-2", "drop-3", "drop-4", "drop-5", "drop-6"]) {
+      expect(storage.files.has(`icons/${iconId}.base64`)).toBe(false);
+    }
+    expect(JSON.parse(storage.files.get("favicon-cache-v2.json")!)).toEqual({
+      "example.com": snapshotCache(authority)["example.com"],
+    });
+  });
+
+  it("removes every pin whose target is a public suffix, shared or exact", async () => {
+    const storage = new MemoryStorage();
+    preload(storage, [
+      ["example.com", hostEntry("example.com", { iconId: "keep-1" })],
+      ["github.io", hostEntry("github.io", { iconId: "drop-1" })],
+      ["localhost", hostEntry("localhost", { iconId: "drop-2" })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(Object.keys(snapshotCache(authority))).toEqual(["example.com"]);
+    expect(storage.files.has("icons/drop-1.base64")).toBe(false);
+    expect(storage.files.has("icons/drop-2.base64")).toBe(false);
+  });
+
+  it("keeps exact pins at non-registrable hosts such as IP literals", async () => {
+    const storage = new MemoryStorage();
+    preload(storage, [
+      ["127.0.0.1", hostEntry("127.0.0.1", { iconId: "keep-1" })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(Object.keys(snapshotCache(authority))).toEqual(["127.0.0.1"]);
+    expect(storage.files.has("icons/keep-1.base64")).toBe(true);
+  });
+
+  it("writes the pruned index before deleting any payload", async () => {
+    const storage = new RecordingOrderStorage();
+    preload(storage, [
+      ["example.com", hostEntry("example.com", { iconId: "keep-1", includeSubdomains: true })],
+      ["github.io", hostEntry("github.io", { iconId: "drop-1", includeSubdomains: true })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(storage.operations).toEqual([
+      "write favicon-cache-v2.json",
+      "remove icons/drop-1.base64",
+    ]);
+    expect(storage.files.has("icons/keep-1.base64")).toBe(true);
+  });
+
+  it("fails initialization without removing records or payloads when the index write fails", async () => {
+    const storage = new FailingCacheIndexStorage();
+    preload(storage, [
+      ["example.com", hostEntry("example.com", { iconId: "keep-1", includeSubdomains: true })],
+      ["github.io", hostEntry("github.io", { iconId: "drop-1", includeSubdomains: true })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+
+    await expect(authority.initialize()).rejects.toThrow("cache-index write failed");
+    expect(storage.cacheIndexWrites).toBe(1);
+    const persisted = JSON.parse(storage.files.get("favicon-cache-v2.json")!) as Record<string, CacheEntry>;
+    expect(Object.keys(persisted)).toEqual(["example.com", "github.io"]);
+    expect(storage.files.has("icons/keep-1.base64")).toBe(true);
+    expect(storage.files.has("icons/drop-1.base64")).toBe(true);
+  });
+});
+
 describe("ForwardProxyIconResolver", () => {
   it("skips HTML and manifest retrieval on the default fast path", async () => {
     const forward = vi.fn<ForwardProxy>(async () => null);
@@ -1490,6 +1661,83 @@ describe("ForwardProxyIconResolver", () => {
       "https://example.com/favicon.svg",
       "https://example.com/apple-touch-icon.png",
     ]);
+  });
+
+  it("probes only the one registrable parent after exact-host candidates", async () => {
+    const downloads: string[] = [];
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding === "base64") downloads.push(url);
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+    const deepScope: LinkScope = { key: "a.b.example.com", domain: "a.b.example.com", targetUrl: "https://a.b.example.com/" };
+
+    await expect(resolver.candidates(deepScope, true)).resolves.toEqual([]);
+    expect(downloads).toEqual([
+      "https://a.b.example.com/favicon.ico",
+      "https://a.b.example.com/favicon.png",
+      "https://a.b.example.com/favicon.svg",
+      "https://a.b.example.com/apple-touch-icon.png",
+      "https://example.com/favicon.ico",
+      "https://example.com/favicon.png",
+      "https://example.com/favicon.svg",
+      "https://example.com/apple-touch-icon.png",
+    ]);
+  });
+
+  it("probes the country-code registrable parent instead of an intermediate label", async () => {
+    const downloads: string[] = [];
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding === "base64") downloads.push(url);
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+    const coUkScope: LinkScope = { key: "docs.example.co.uk", domain: "docs.example.co.uk", targetUrl: "https://docs.example.co.uk/" };
+
+    await expect(resolver.candidates(coUkScope, true)).resolves.toEqual([]);
+    expect(downloads).toEqual([
+      "https://docs.example.co.uk/favicon.ico",
+      "https://docs.example.co.uk/favicon.png",
+      "https://docs.example.co.uk/favicon.svg",
+      "https://docs.example.co.uk/apple-touch-icon.png",
+      "https://example.co.uk/favicon.ico",
+      "https://example.co.uk/favicon.png",
+      "https://example.co.uk/favicon.svg",
+      "https://example.co.uk/apple-touch-icon.png",
+    ]);
+  });
+
+  it("never generates a public-suffix or provider-suffix candidate for hosted tenants", async () => {
+    const downloads: string[] = [];
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding === "base64") downloads.push(url);
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+    const tenant: LinkScope = { key: "foo.github.io", domain: "foo.github.io", targetUrl: "https://foo.github.io/" };
+
+    await expect(resolver.candidates(tenant, true)).resolves.toEqual([]);
+    expect(downloads).toEqual([
+      "https://foo.github.io/favicon.ico",
+      "https://foo.github.io/favicon.png",
+      "https://foo.github.io/favicon.svg",
+      "https://foo.github.io/apple-touch-icon.png",
+    ]);
+
+    downloads.length = 0;
+    const deepTenant: LinkScope = { key: "a.foo.github.io", domain: "a.foo.github.io", targetUrl: "https://a.foo.github.io/" };
+    await expect(resolver.candidates(deepTenant, true)).resolves.toEqual([]);
+    expect(downloads).toEqual([
+      "https://a.foo.github.io/favicon.ico",
+      "https://a.foo.github.io/favicon.png",
+      "https://a.foo.github.io/favicon.svg",
+      "https://a.foo.github.io/apple-touch-icon.png",
+      "https://foo.github.io/favicon.ico",
+      "https://foo.github.io/favicon.png",
+      "https://foo.github.io/favicon.svg",
+      "https://foo.github.io/apple-touch-icon.png",
+    ]);
+    expect(downloads).not.toContain("https://github.io/favicon.ico");
   });
 
   it("stops resolution when the ten-second budget expires", async () => {

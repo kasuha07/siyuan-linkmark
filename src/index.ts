@@ -35,7 +35,7 @@ import {
   type CacheEntry,
   type CacheSnapshot,
 } from "./frontend-cache-state";
-import { shareDomainFor } from "./parent-domain";
+import { pickerScopeChoices } from "./parent-domain";
 import {
   base64ToBlob,
   blobToBase64,
@@ -1045,7 +1045,8 @@ export default class LinkmarkPlugin extends Plugin {
     const root = dialog.element.querySelector<HTMLElement>(".siyuan-linkmark-picker");
     if (!root) return;
 
-    const sharedDomain = shareDomainFor(domain);
+    const scopeChoices = pickerScopeChoices(selectedScope);
+    const subdomainsChoice = scopeChoices.find((choice) => choice.kind === "subdomains");
 
     const controls = document.createElement("div");
     controls.className = "siyuan-linkmark-picker-controls";
@@ -1073,12 +1074,14 @@ export default class LinkmarkPlugin extends Plugin {
 
     const scopeSelect = document.createElement("select");
     scopeSelect.className = "b3-select";
-    if (selectedScope.routeKey) {
-      scopeSelect.add(new Option(this.t("pinCurrentType").replace("{type}", this.scopeTypeLabel(selectedScope)), "type"));
-    }
-    scopeSelect.add(new Option(this.t("pinCurrentDomain").replace("{domain}", domain), "domain"));
-    if (sharedDomain && sharedDomain !== domain) {
-      scopeSelect.add(new Option(this.t("applyToSubdomains").replace("{domain}", sharedDomain), "subdomains"));
+    for (const choice of scopeChoices) {
+      if (choice.kind === "type") {
+        scopeSelect.add(new Option(this.t("pinCurrentType").replace("{type}", this.scopeTypeLabel(selectedScope)), "type"));
+      } else if (choice.kind === "domain") {
+        scopeSelect.add(new Option(this.t("pinCurrentDomain").replace("{domain}", domain), "domain"));
+      } else {
+        scopeSelect.add(new Option(this.t("applyToSubdomains").replace("{domain}", choice.shareDomain), "subdomains"));
+      }
     }
     const shareRow = document.createElement("label");
     shareRow.className = "siyuan-linkmark-picker-scope";
@@ -1107,11 +1110,9 @@ export default class LinkmarkPlugin extends Plugin {
     let saving = false;
     const targetScopeForSelection = () => {
       const selection = scopeSelect.value;
-      return selection === "type"
-        ? selectedScope
-        : selection === "subdomains" && sharedDomain
-          ? { key: sharedDomain, domain: sharedDomain }
-          : { key: domain, domain };
+      if (selection === "type") return selectedScope;
+      if (selection === "subdomains" && subdomainsChoice) return { key: subdomainsChoice.shareDomain, domain: subdomainsChoice.shareDomain };
+      return { key: domain, domain };
     };
     const saveAndClose = async (blob: Blob, source: string) => {
       if (saving) return;

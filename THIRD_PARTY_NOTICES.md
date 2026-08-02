@@ -22,6 +22,19 @@ Feishu/Lark route types use locally generated neutral document-type badges when
 the linked page is not anonymously accessible. They are not copies of Feishu or
 Lark product artwork.
 
+## tldts and Public Suffix List data
+
+The plugin bundles the [tldts](https://www.npmjs.com/package/tldts) domain
+parser, licensed under the MIT license with the following copyright notice:
+
+> Copyright (c) 2017 Thomas Parisot, 2018 Rémi Berson
+
+The plugin also embeds tldts' bundled [Public Suffix List](https://publicsuffix.org/)
+data (ICANN and Private sections), licensed under the Mozilla Public License 2.0,
+maintained by the Mozilla Foundation and its contributors. The list is
+refreshed only through normal dependency updates and releases; Linkmark never
+downloads or queries a suffix list at runtime.
+
 ## Documentation preview artwork
 
 `preview.png` depicts recognizable favicon-style marks for GitHub, MDN Web

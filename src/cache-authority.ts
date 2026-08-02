@@ -1,3 +1,4 @@
+import { InvalidShareDomainError, isEligibleShareTarget, shareEligibilityOf } from "./parent-domain";
 import type { CachePolicyFields } from "./resolver-contract";
 import type { CandidateAttemptInfo, ResolutionTraceRecord, ResolutionTraceSink } from "./resolution-trace";
 
@@ -169,8 +170,29 @@ export class KernelCacheAuthority {
     if (this.initializing) return this.initializing;
     this.initializing = (async () => {
       const stored = await this.storage.get(CACHE_INDEX_FILE);
-      if (stored) {
-        this.cache = parseCache(stored);
+      if (!stored) return;
+      const loaded = parseCache(stored);
+      const removed: CacheEntry[] = [];
+      const pruned = Object.fromEntries(
+        Object.entries(loaded).filter(([key, entry]) => {
+          if (isInvalidLegacyPin(key, entry)) {
+            removed.push(entry);
+            return false;
+          }
+          return true;
+        }),
+      );
+      if (removed.length === 0) {
+        this.cache = loaded;
+        return;
+      }
+      // The pruned index must be durable before any payload leaves the
+      // workspace; a failed index write fails initialization and preserves
+      // every old record and payload.
+      await this.persist(pruned);
+      this.cache = pruned;
+      for (const entry of removed) {
+        if (entry.iconId) await this.storage.remove(this.iconPath(entry.iconId));
       }
     })();
     return this.initializing;
@@ -263,6 +285,9 @@ export class KernelCacheAuthority {
   }
 
   async putPinned(scope: LinkScope, entry: CacheEntry, contentType: string, bytes: ArrayBuffer, replaceKey?: string) {
+    if (entry.includeSubdomains && !isEligibleShareTarget(scope.domain)) {
+      throw new InvalidShareDomainError();
+    }
     await this.initialize();
     const generation = this.invalidate(scope.key);
     const replacedGeneration = replaceKey && replaceKey !== scope.key ? this.invalidate(replaceKey) : undefined;
@@ -732,6 +757,24 @@ function copyCache(cache: Record<string, CacheEntry>): Record<string, CacheEntry
 
 function copyEntry(entry: CacheEntry): CacheEntry {
   return { ...entry };
+}
+
+/**
+ * Classifies a persisted Pinned icon under the shared Share eligibility
+ * policy. The migration exception removes every pin whose target is a
+ * public suffix and every shared pin that fails Share eligibility,
+ * including PSL Private-suffix-family tenants and reviewed exclusions.
+ * Exact pins at non-public-suffix hosts, including tenant eTLD+1s such as
+ * `foo.github.io`, are retained.
+ */
+function isInvalidLegacyPin(key: string, entry: CacheEntry) {
+  if (!entry.pinned) return false;
+  const target = entry.domain ?? key.split("::", 1)[0];
+  if (!entry.includeSubdomains) {
+    const policy = shareEligibilityOf(target);
+    return policy.eligible ? false : policy.reason === "public-suffix" || policy.reason === "special-use";
+  }
+  return !isEligibleShareTarget(target);
 }
 
 /**

@@ -85,8 +85,32 @@ A user-selected cache entry that survives ordinary refresh and cache cleanup unt
 _Avoid_: permanent icon, protected file
 
 **Share-pin domain**:
-The registrable domain, after dropping the `www.` label, that an includeSubdomains pin applies to across the parent chain.
+The eTLD+1 derived from the ICANN and Private sections of the Public Suffix List, after dropping the `www.` label; it bounds an includeSubdomains pin and is never itself a public suffix.
 _Avoid_: parent domain, effective domain
+
+**Public Suffix List (PSL) snapshot**:
+The release-bundled ICANN and Private Public Suffix List data that Linkmark uses locally to derive eTLD+1 boundaries; it is refreshed through normal dependency updates and releases, never downloaded at runtime.
+_Avoid_: live suffix list, runtime suffix update
+
+**Invalid shared pin**:
+A legacy includeSubdomains pin whose share scope is a public suffix or otherwise no longer a valid eTLD+1; it is deleted with its private icon payload during migration rather than retained as a compatible cache record.
+_Avoid_: legacy shared pin, downgraded shared pin
+
+**Shared-pin exclusion**:
+A reviewed, provenance-documented multi-tenant platform boundary that forbids an includeSubdomains pin even when the hostname has a valid PSL-derived eTLD+1.
+_Avoid_: optional platform rule, user bypass
+
+**Recognized multi-tenant boundary**:
+The eTLD+1 boundary containing a Linkmark-recognized platform host: `docs.qq.com`, `docs.google.com`, `*.feishu.cn`, `*.larksuite.com`, or `nocode.host`; it is initially excluded from shared pins and each entry must carry provenance and regression coverage.
+_Avoid_: general platform blacklist, inferred hosting platform
+
+**Registrable parent**:
+The one eTLD+1 returned by PSL for a hostname when it differs from that hostname; it is the only parent Linkmark may probe or target with a shared pin.
+_Avoid_: immediate parent, parent chain
+
+**Share eligibility**:
+The condition under which Linkmark may create an includeSubdomains pin: the target is a non-public-suffix eTLD+1, is outside every PSL Private-suffix family, and is outside every Shared-pin exclusion; ineligible historical pins are removed during cache-authority initialization.
+_Avoid_: best-effort pin safety, frontend-only validation
 
 **Cache entry**:
 The authoritative record associating a link scope with its resolved or pinned private icon and resolution metadata.

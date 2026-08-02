@@ -51,7 +51,7 @@ Linkmark is maintained independently from its upstream project. Its core user-vi
 | Cache lifetime | Choose when automatic icons should be checked again; `0` disables time-based expiration. Pinned icons do not expire. |
 | Refresh current document / all cache | Explicitly retrieve the current document or all non-pinned entries again, including while automatic retrieval is paused. A failed refresh keeps the previous usable icon. |
 | Cache management | View route types and sources grouped by domain, then refresh, delete, or replace individual entries. This is useful for blurry, padded, bordered, or otherwise unsuitable icons. |
-| Pinned-icon scope | Current Type affects only matching routes such as `/doc/` or `/sheet/`; Current Domain covers types without their own pinned icon; Parent Domain and Subdomains lets tenant subdomains share one icon. |
+| Pinned-icon scope | Current Type affects only matching routes such as `/doc/` or `/sheet/`; Current Domain covers types without their own pinned icon; Parent Domain and Subdomains lets subdomains share one icon inside the real registrable domain, and is never offered for public-suffix or multi-tenant hosted sites such as `github.io`. |
 
 ## Icon selection priority
 
@@ -98,7 +98,7 @@ A website may publish several icons whose sharpness, padding, and borders vary b
 - Upload a local image.
 - Enter a directly accessible image URL.
 
-A manually selected icon is pinned locally and is not replaced by normal refreshes, cache expiration, or **Clear all cache**. Office-platform icons can be pinned to the current route type, the whole domain, or a parent domain and its subdomains. Select **Restore automatic retrieval** when you want the plugin to choose again.
+A manually selected icon is pinned locally and is not replaced by normal refreshes, cache expiration, or **Clear all cache**. Office-platform icons can be pinned to the current route type or the whole domain. A broader Parent Domain scope is available only inside an eligible registrable domain; it is not offered for public-suffix tenants such as `github.io` or for multi-tenant platform boundaries such as `qq.com`, `google.com`, `feishu.cn`, `larksuite.com`, or `nocode.host`. Select **Restore automatic retrieval** when you want the plugin to choose again.
 
 ## Network and privacy
 

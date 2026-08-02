@@ -21,12 +21,16 @@ describe("shareDomainFor", () => {
     expect(shareDomainFor("example.com")).toBe("example.com");
   });
 
-  it("walks up to the parent domain", () => {
+  it("derives the single PSL eTLD+1", () => {
     expect(shareDomainFor("www.example.com")).toBe("example.com");
-    expect(shareDomainFor("a.b.example.com")).toBe("b.example.com");
+    expect(shareDomainFor("a.b.example.com")).toBe("example.com");
   });
 
-  it("rejects addresses and malformed labels", () => {
+  it("keeps tenant eTLD+1s under PSL Private suffixes", () => {
+    expect(shareDomainFor("foo.github.io")).toBe("foo.github.io");
+  });
+
+  it("rejects addresses, special-use, and malformed labels", () => {
     expect(shareDomainFor("127.0.0.1")).toBeNull();
     expect(shareDomainFor("example.com:8080")).toBeNull();
     expect(shareDomainFor("localhost")).toBeNull();
@@ -51,10 +55,31 @@ describe("cachedIconForScope", () => {
     expect(match).toEqual({ cacheKey: routeScope.domain, entry: cache[routeScope.domain] });
   });
 
-  it("applies a subdomain-shared pin along the whole parent chain", () => {
+  it("applies a subdomain-shared pin within its eligible eTLD+1", () => {
     const cache = { "example.com": entry({ pinned: true, includeSubdomains: true }) };
     const scope = { key: "a.b.example.com", domain: "a.b.example.com" };
     expect(cachedIconForScope(cache, scope)?.cacheKey).toBe("example.com");
+  });
+
+  it("does not climb a parent chain to an intermediate shared pin", () => {
+    const cache = { "b.example.com": entry({ domain: "b.example.com", pinned: true, includeSubdomains: true }) };
+    const scope = { key: "a.b.example.com", domain: "a.b.example.com" };
+    expect(cachedIconForScope(cache, scope)).toBeNull();
+  });
+
+  it("does not consult a shared pin across a PSL Private-suffix boundary", () => {
+    const cache = { "foo.github.io": entry({ domain: "foo.github.io", pinned: true, includeSubdomains: true }) };
+    expect(cachedIconForScope(cache, { key: "a.foo.github.io", domain: "a.foo.github.io" })).toBeNull();
+  });
+
+  it("serves an exact pinned entry for a private-suffix tenant scope", () => {
+    const cache = { "foo.github.io": entry({ domain: "foo.github.io", pinned: true }) };
+    expect(cachedIconForScope(cache, { key: "foo.github.io", domain: "foo.github.io" })?.cacheKey).toBe("foo.github.io");
+  });
+
+  it("does not re-enable a legacy shared pin at a public suffix", () => {
+    const cache = { "github.io": entry({ domain: "github.io", pinned: true, includeSubdomains: true }) };
+    expect(cachedIconForScope(cache, { key: "a.foo.github.io", domain: "a.foo.github.io" })).toBeNull();
   });
 
   it("does not apply a pin that does not share subdomains", () => {
