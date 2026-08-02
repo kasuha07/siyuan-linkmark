@@ -6,6 +6,7 @@ import {
   type LinkScope,
 } from "./cache-authority";
 import { ForwardProxyIconResolver } from "./kernel-resolver";
+import { pinCustomUrl } from "./pin-url";
 import { privateIconIdFromPath } from "./private-route";
 import { DEFAULT_CACHE_POLICY, RESOLVER_VERSION, type CachePolicyFields } from "./resolver-contract";
 import type { ResolutionTraceSink } from "./resolution-trace";
@@ -89,20 +90,12 @@ class LinkmarkKernel {
         return candidates.map((candidate) => ({ ...candidate, base64: Buffer.from(candidate.bytes).toString("base64") }));
       }, "Returns server-downloaded icon candidates for a scope.");
       await siyuan.rpc.bind("cache.pin-url", async (scope: LinkScope, iconUrl: string, includeSubdomains = false, replaceKey?: string) => {
-        const normalized = normalizeScope(scope);
-        const resolved = await this.requireResolver().resolveUrl(iconUrl);
-        if (!resolved) throw new Error("Custom icon URL did not return a usable image");
-        return this.requireAuthority().putPinned(normalized, {
-          url: "",
-          fetchedAt: Date.now(),
-          source: "custom URL",
-          targetUrl: normalized.targetUrl,
-          domain: normalized.domain,
-          routeKey: normalized.routeKey,
-          pathPrefix: normalized.pathPrefix,
-          pinned: true,
-          includeSubdomains,
-        }, resolved.contentType, resolved.bytes, replaceKey);
+        const resolver = this.requireResolver();
+        const authority = this.requireAuthority();
+        return pinCustomUrl({
+          resolveUrl: (url) => resolver.resolveUrl(url),
+          putPinned: (pinScope, entry, contentType, bytes, pinReplaceKey) => authority.putPinned(pinScope, entry, contentType, bytes, pinReplaceKey),
+        }, normalizeScope(scope), iconUrl, includeSubdomains, replaceKey);
       }, "Downloads and pins a custom icon URL workspace-wide.");
       if (import.meta.env.MODE === "development") {
         await siyuan.rpc.bind("cache.trace.set", async (enabled: boolean) => {
