@@ -11,7 +11,7 @@ import {
   type ProviderPreset,
   type ResolverMode,
 } from "./resolver-contract";
-import { createIconRule } from "./icon-rule";
+import { createIconRule, reconcilePresentRules, type PresentRuleContext } from "./icon-rule";
 import {
   CACHE_POLICY_FIELDS,
   clamp,
@@ -28,6 +28,7 @@ import {
   localDiscoveryRegionFor,
 } from "./frontend-render-work";
 import {
+  applyCacheChangeEvent,
   cachedIconForScope,
   isCacheEntryFresh,
   planScanDecision,
@@ -90,6 +91,7 @@ export default class LinkmarkPlugin extends Plugin {
   private manualRefreshKeys = new Map<string, number>();
   private automaticFetchGeneration = 0;
   private cacheGeneration = 0;
+  private lastCacheRevision: number | undefined;
   private traceEnabled = false;
   private readonly inputListener = (event: Event) => this.scheduleInputScan(event.target);
 
@@ -100,9 +102,12 @@ export default class LinkmarkPlugin extends Plugin {
     await this.loadKernelState();
     await this.subscribeToKernelChanges();
     this.addSetting();
-    this.rebuildRules();
-    this.renderRules();
     this.startObserver();
+    // The initial scan runs immediately instead of on the scan debounce so
+    // cached scopes render at the first frame; the trailing scheduled scan
+    // is a safety net for content that changed during load.
+    this.scanLinks();
+    this.renderRules();
     this.scheduleScan();
   }
 
@@ -139,13 +144,39 @@ export default class LinkmarkPlugin extends Plugin {
     }
   }
 
+  /**
+   * Recovers from a Cache revision gap by refetching the authoritative
+   * snapshot. The tracked revision only advances when the refetch succeeds,
+   * so a suspended window keeps retrying the snapshot on the next event.
+   */
+  private async refetchCacheSnapshot() {
+    try {
+      this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+      this.updateCacheCount();
+      this.requestRuleRebuild();
+      this.scheduleScan();
+      return true;
+    } catch (error) {
+      console.warn("[siyuan-linkmark] Unable to refetch the cache snapshot", error);
+      return false;
+    }
+  }
+
   private async subscribeToKernelChanges() {
     const bind = this.kernel?.rpc.bind;
     if (!bind) return;
     await bind("cache.changed", (params) => {
-      const cache = params?.cache ?? params?.params?.cache;
-      if (!cache || typeof cache !== "object") return;
-      this.cache = cache as Record<string, CacheEntry>;
+      const payload = params?.params && typeof params.params === "object" ? params.params : params;
+      const application = applyCacheChangeEvent(this.cache, payload, this.lastCacheRevision);
+      if (application.status === "ignored") return;
+      if (application.status === "refetch") {
+        void this.refetchCacheSnapshot().then((refetched) => {
+          if (refetched) this.lastCacheRevision = application.revision;
+        });
+        return;
+      }
+      this.lastCacheRevision = application.revision;
+      this.cache = application.cache;
       for (const key of this.manualRefreshKeys.keys()) {
         if (this.cache[key]) this.manualRefreshKeys.delete(key);
       }
@@ -1249,7 +1280,14 @@ export default class LinkmarkPlugin extends Plugin {
     if (!this.settings.enabled) return false;
     const domains = this.collectDocumentDomains(root);
 
-    let rulesChanged = false;
+    const reconciled = reconcilePresentRules({
+      discovery: [...domains.values()].map(({ scope }) => scope),
+      context: this.presentRuleContext(),
+      previous: this.iconRules,
+      full: !root,
+    });
+    this.iconRules = reconciled.rules;
+
     domains.forEach(({ scope, targetUrl }, key) => {
       const decision = planScanDecision({
         scopeKey: key,
@@ -1263,18 +1301,10 @@ export default class LinkmarkPlugin extends Plugin {
         void this.expireCachedDomain(decision.cacheKey, decision.entry);
         return;
       }
-      if (decision.action === "keep") {
-        const rule = createIconRule(scope, decision.entry.url, this.settings.iconSize);
-        if (this.iconRules.get(key) !== rule) {
-          this.iconRules.set(key, rule);
-          rulesChanged = true;
-        }
-        if (decision.fetch) void this.fetchAndCache(scope, targetUrl);
-        return;
-      }
+      if (decision.action === "keep" && decision.fetch) void this.fetchAndCache(scope, targetUrl);
       if (decision.action === "fetch") void this.fetchAndCache(scope, targetUrl);
     });
-    return rulesChanged;
+    return reconciled.changed;
   }
 
   private fetchAndCache(
@@ -1386,25 +1416,37 @@ export default class LinkmarkPlugin extends Plugin {
   }
 
   private rebuildRules() {
-    this.iconRules.clear();
-    if (this.settings.enabled) {
-      const entries = Object.entries(this.cache).sort(([a], [b]) => Number(a.includes("::")) - Number(b.includes("::")));
-      for (const [key, entry] of entries) {
-        if (entry.routeKey && this.cache[entry.domain ?? key.split("::")[0]]?.pinned) {
-          continue;
-        }
-        const pausedLegacyMonogram = this.settings.pauseAutomaticFetch
-          && entry.source === "generated monogram"
-          && entry.resolverVersion !== RESOLVER_VERSION;
-        const current = entry.pinned || entry.resolverVersion === RESOLVER_VERSION || pausedLegacyMonogram;
-        const fresh = this.settings.pauseAutomaticFetch || isCacheEntryFresh(entry, this.settings.cacheDays);
-        if (current && fresh) {
-          const scope = scopeFromCacheKey(key, entry.domain, entry.pathPrefix);
-          this.iconRules.set(key, createIconRule(scope, entry.url, this.settings.iconSize));
-        }
-      }
+    if (!this.settings.enabled) {
+      this.iconRules.clear();
+      this.updateCacheCount();
+      return;
     }
+    // The rule map keys are the known Present scopes, so a rebuild recomputes
+    // their rules against the current cache. Scopes whose entry left the
+    // cache produce no rule and are evicted; adding rules for scopes that
+    // were never present is the full scan's job.
+    const scopes: LinkScope[] = [];
+    for (const key of this.iconRules.keys()) {
+      const entry = this.cache[key];
+      if (entry) scopes.push(scopeFromCacheKey(key, entry.domain, entry.pathPrefix));
+    }
+    const reconciled = reconcilePresentRules({
+      discovery: scopes,
+      context: this.presentRuleContext(),
+      previous: this.iconRules,
+      full: true,
+    });
+    this.iconRules = reconciled.rules;
     this.updateCacheCount();
+  }
+
+  private presentRuleContext(): PresentRuleContext {
+    return {
+      cache: this.cache,
+      iconSize: this.settings.iconSize,
+      cacheDays: this.settings.cacheDays,
+      pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
+    };
   }
 
   private setRule(scope: LinkScope, url: string) {

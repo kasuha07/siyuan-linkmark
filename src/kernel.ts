@@ -65,7 +65,7 @@ class LinkmarkKernel {
         cachePolicy: this.policy,
         resolverVersion: RESOLVER_VERSION,
         privateIconUrl: (iconId) => `/plugin/private/${siyuan.plugin.name}/icon/${encodeURIComponent(iconId)}`,
-        onStateChange: async (cache) => siyuan.rpc.broadcast("cache.changed", { cache }),
+        onCacheChanged: async (event) => siyuan.rpc.broadcast("cache.changed", event),
         onResolutionFailure: async (scope, category) => siyuan.rpc.broadcast("cache.resolution-failed", { key: scope.key, category }),
         traceSink: this.traceSink,
       });

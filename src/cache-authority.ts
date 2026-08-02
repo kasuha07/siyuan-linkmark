@@ -76,11 +76,23 @@ export interface IconResolver {
   ): Promise<ResolvedIcon | null>;
 }
 
+/**
+ * A revisioned incremental broadcast describing one committed Cache
+ * persistence batch: the entries that were added or replaced and the Link
+ * scope keys that left the cache. The revision is a strictly increasing
+ * per-process counter, so a Frontend client can detect a missed batch.
+ */
+export type CacheChangeEvent = {
+  revision: number;
+  upserts: Record<string, CacheEntry>;
+  removed: string[];
+};
+
 export type CacheAuthorityOptions = {
   cachePolicy?: CachePolicy;
   resolverVersion?: number;
   privateIconUrl?: (iconId: string) => string;
-  onStateChange?: (cache: Record<string, CacheEntry>) => Promise<void> | void;
+  onCacheChanged?: (event: CacheChangeEvent) => Promise<void> | void;
   onResolutionFailure?: (scope: LinkScope, category: ResolutionFailureCategory) => Promise<void> | void;
   traceSink?: ResolutionTraceSink;
 };
@@ -122,6 +134,7 @@ export class KernelCacheAuthority {
   private initializing?: Promise<void>;
   private policy: CachePolicy;
   private iconSequence = 0;
+  private cacheRevision = 0;
   private traceSequence = 0;
   private readonly traceTerminals = new Set<string>();
   private traceSink?: ResolutionTraceSink;
@@ -277,9 +290,10 @@ export class KernelCacheAuthority {
         await this.storage.remove(this.iconPath(iconId));
         throw new Error("Pinned icon operation was superseded by a newer cache change");
       }
+      const previousCache = this.cache;
       this.cache = nextCache;
       completeInvalidations();
-      await this.notify(nextCache);
+      await this.notify(previousCache, nextCache);
       await this.removePayload(previous, iconId);
       await this.removePayload(replaced, iconId);
       return copyEntry(nextEntry);
@@ -295,6 +309,7 @@ export class KernelCacheAuthority {
         this.completeInvalidation(key, generation);
         return;
       }
+      const previousCache = this.cache;
       const nextCache = { ...this.cache };
       delete nextCache[key];
       try {
@@ -305,7 +320,7 @@ export class KernelCacheAuthority {
       }
       this.cache = nextCache;
       this.completeInvalidation(key, generation);
-      await this.notify(nextCache);
+      await this.notify(previousCache, nextCache);
       await this.removePayload(previous);
     });
   }
@@ -321,6 +336,7 @@ export class KernelCacheAuthority {
     }
     return this.enqueueCacheMutation(async () => {
       const removable = Object.entries(this.cache).filter(([, entry]) => !entry.pinned);
+      const previousCache = this.cache;
       const nextCache = Object.fromEntries(Object.entries(this.cache).filter(([, entry]) => entry.pinned));
       try {
         await this.persist(nextCache);
@@ -330,7 +346,7 @@ export class KernelCacheAuthority {
       }
       this.cache = nextCache;
       for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
-      await this.notify(nextCache);
+      await this.notify(previousCache, nextCache);
       for (const [, entry] of removable) await this.removePayload(entry);
     });
   }
@@ -348,6 +364,7 @@ export class KernelCacheAuthority {
         for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
         return;
       }
+      const previousCache = this.cache;
       const nextCache = Object.fromEntries(Object.entries(this.cache).filter(([, entry]) => entry.source !== "generated monogram"));
       try {
         await this.persist(nextCache);
@@ -357,7 +374,7 @@ export class KernelCacheAuthority {
       }
       this.cache = nextCache;
       for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
-      await this.notify(nextCache);
+      await this.notify(previousCache, nextCache);
       for (const [, entry] of generated) await this.removePayload(entry);
     });
   }
@@ -368,10 +385,27 @@ export class KernelCacheAuthority {
   }
 
   async icon(iconId: string) {
-    const entry = Object.values(this.cache).find((candidate) => candidate.iconId === iconId);
+    const entry = this.entryForIconId(iconId);
     if (!entry) return undefined;
     const bytes = await this.iconBytes(iconId);
     return bytes ? { bytes, contentType: entry.contentType ?? "application/octet-stream" } : undefined;
+  }
+
+  /**
+   * Resolves an iconId to its Cache entry. New-format iconIds embed the
+   * scope key losslessly, so the key is parsed back out and a known entry is
+   * verified in O(1); a known key whose entry carries a different iconId is
+   * a mismatch and never serves. iconIds that do not parse or decode to an
+   * unknown key fall back to the former linear scan so legacy-format
+   * entries keep serving.
+   */
+  private entryForIconId(iconId: string) {
+    const key = scopeKeyFromIconId(iconId);
+    if (key !== undefined && this.cache[key]) {
+      const entry = this.cache[key];
+      return entry.iconId === iconId ? entry : undefined;
+    }
+    return Object.values(this.cache).find((candidate) => candidate.iconId === iconId);
   }
 
   private async commitResolved(
@@ -399,6 +433,7 @@ export class KernelCacheAuthority {
 
   private async persistResolvedCommitBatch(batch: Array<{ commit: ResolvedCommit }>) {
     const entries: Array<CacheEntry | null> = Array(batch.length).fill(null);
+    const previousCache = this.cache;
     const prepared: Array<{
       index: number;
       generation: number;
@@ -484,9 +519,9 @@ export class KernelCacheAuthority {
     }
 
     if (committed.length > 0) {
-      // A batch publishes one isolated durable snapshot, so connected clients
-      // rebuild once even when several scopes resolve together.
-      await this.notify(this.cache);
+      // A batch publishes one isolated event, so connected clients reconcile
+      // once even when several scopes resolve together.
+      await this.notify(previousCache, this.cache);
       for (const pending of committed) {
         entries[pending.index] = copyEntry(pending.entry);
         await this.removePayload(pending.previous, pending.entry.iconId);
@@ -548,8 +583,17 @@ export class KernelCacheAuthority {
     return write;
   }
 
-  private async notify(cache = this.cache) {
-    await this.options.onStateChange?.(copyCache(cache));
+  private async notify(previous: Record<string, CacheEntry>, next: Record<string, CacheEntry>) {
+    this.cacheRevision += 1;
+    const upserts: Record<string, CacheEntry> = {};
+    for (const [key, entry] of Object.entries(next)) {
+      if (previous[key] !== entry) upserts[key] = copyEntry(entry);
+    }
+    const removed: string[] = [];
+    for (const key of Object.keys(previous)) {
+      if (!(key in next)) removed.push(key);
+    }
+    await this.options.onCacheChanged?.({ revision: this.cacheRevision, upserts, removed });
   }
 
   private async notifyResolutionFailure(scope: LinkScope, category: ResolutionFailureCategory) {
@@ -639,13 +683,9 @@ export class KernelCacheAuthority {
       && (!replaceKey || replaceKey === key || replacedGeneration === undefined || this.isCurrentGeneration(replaceKey, replacedGeneration));
   }
 
-  private iconIdFor(key: string) {
-    return encodeURIComponent(key).replace(/%/g, "_");
-  }
-
   private nextIconId(key: string) {
     this.iconSequence += 1;
-    return `${this.iconIdFor(key)}-${this.now().toString(36)}-${this.iconSequence.toString(36)}`;
+    return `${encodeScopeKey(key)}-${this.now().toString(36)}-${this.iconSequence.toString(36)}`;
   }
 
   private iconPath(iconId: string) {
@@ -676,6 +716,30 @@ function copyCache(cache: Record<string, CacheEntry>): Record<string, CacheEntry
 
 function copyEntry(entry: CacheEntry): CacheEntry {
   return { ...entry };
+}
+
+/**
+ * Losslessly encodes a Link scope key for embedding in an iconId. The
+ * base64url alphabet already matches the Private icon route's allowed
+ * characters, so the encoded key round-trips through the URL untouched.
+ */
+function encodeScopeKey(key: string) {
+  return Buffer.from(key, "utf8").toString("base64url");
+}
+
+/**
+ * Parses a new-format iconId back to its Link scope key. The base36
+ * suffixes contain no `-`, so the two rightmost `-` delimiters split them
+ * off unambiguously even when the base64url key part contains `-`. Returns
+ * undefined when the iconId cannot be a new-format id, so the caller can
+ * fall back to the legacy linear scan.
+ */
+function scopeKeyFromIconId(iconId: string): string | undefined {
+  const suffixDash = iconId.lastIndexOf("-");
+  if (suffixDash <= 0) return undefined;
+  const keyDash = iconId.lastIndexOf("-", suffixDash - 1);
+  if (keyDash <= 0) return undefined;
+  return Buffer.from(iconId.slice(0, keyDash), "base64url").toString("utf8");
 }
 
 /**

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { shareDomainFor } from "../src/parent-domain";
 import {
+  applyCacheChangeEvent,
   cachedIconForScope,
   FAILURE_COOLDOWN,
   isCacheEntryFresh,
@@ -146,5 +147,101 @@ describe("planScanDecision", () => {
 
   it("fetches missing scopes", () => {
     expect(decide()).toEqual({ action: "fetch" });
+  });
+});
+
+describe("applyCacheChangeEvent", () => {
+  const base = () => ({
+    "example.com": entry(),
+    "docs.qq.com::doc": entry({ url: "route-icon.png", domain: "docs.qq.com" }),
+  });
+
+  it("applies upserts and removed keys to an isolated copy", () => {
+    const cache = base();
+    const upserted = entry({ url: "new-icon.png" });
+    const application = applyCacheChangeEvent(cache, {
+      revision: 7,
+      upserts: { "new.example.com": upserted },
+      removed: ["docs.qq.com::doc"],
+    }, 6);
+
+    expect(application).toMatchObject({ status: "applied", revision: 7 });
+    if (application.status === "applied") {
+      expect(application.cache).toEqual({
+        "example.com": cache["example.com"],
+        "new.example.com": upserted,
+      });
+      expect(application.cache["new.example.com"]).not.toBe(upserted);
+      expect(cache).toEqual(base());
+    }
+  });
+
+  it("treats the first event as valid without a prior revision", () => {
+    const application = applyCacheChangeEvent({}, {
+      revision: 12,
+      upserts: { "example.com": entry() },
+      removed: [],
+    }, undefined);
+    expect(application).toMatchObject({ status: "applied", revision: 12 });
+    if (application.status === "applied") {
+      expect(application.cache["example.com"]).toMatchObject({ url: "https://cdn.example.com/icon.png" });
+    }
+  });
+
+  it("detects a revision gap and requests a snapshot refetch", () => {
+    const application = applyCacheChangeEvent(base(), {
+      revision: 9,
+      upserts: { "new.example.com": entry() },
+      removed: ["example.com"],
+    }, 4);
+    expect(application).toEqual({ status: "refetch", revision: 9 });
+  });
+
+  it("ignores stale events at or below the last seen revision", () => {
+    for (const revision of [5, 4]) {
+      const application = applyCacheChangeEvent(base(), {
+        revision,
+        upserts: { "new.example.com": entry() },
+        removed: ["example.com"],
+      }, 5);
+      expect(application).toEqual({ status: "ignored" });
+    }
+  });
+
+  it("ignores malformed events", () => {
+    for (const event of [
+      null,
+      "cache",
+      7,
+      [],
+      { upserts: {}, removed: [] },
+      { revision: 1, removed: [] },
+      { revision: 1, upserts: {} },
+      { revision: "1", upserts: {}, removed: [] },
+      { revision: 1, upserts: [], removed: [] },
+      { revision: 1, upserts: {}, removed: "x" },
+      { revision: Number.NaN, upserts: {}, removed: [] },
+    ]) {
+      expect(applyCacheChangeEvent(base(), event, 0)).toEqual({ status: "ignored" });
+    }
+  });
+
+  it("keeps existing entries when an upserted entry is malformed", () => {
+    const cache = base();
+    const application = applyCacheChangeEvent(cache, {
+      revision: 8,
+      upserts: { "example.com": { fetchedAt: 1 }, "new.example.com": entry({ url: "ok.png" }) },
+      removed: [],
+    }, 7);
+    expect(application.status).toBe("applied");
+    if (application.status === "applied") {
+      expect(application.cache["example.com"]).toBe(cache["example.com"]);
+      expect(application.cache["new.example.com"]).toMatchObject({ url: "ok.png" });
+    }
+  });
+
+  it("advances the tracked revision even for an empty event", () => {
+    const application = applyCacheChangeEvent(base(), { revision: 3, upserts: {}, removed: [] }, 2);
+    expect(application).toMatchObject({ status: "applied", revision: 3 });
   });
 });

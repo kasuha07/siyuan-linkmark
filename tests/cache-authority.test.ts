@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   KernelCacheAuthority,
   ResolutionError,
+  type CacheChangeEvent,
   type CacheEntry,
   type CacheStorage,
   type LinkScope,
@@ -133,8 +134,8 @@ function expectSanitizedRecords(records: ResolutionTraceRecord[]) {
 }
 
 function subscribers() {
-  const cacheEvents: Array<Record<string, CacheEntry>> = [];
-  const waitFor = async (predicate: (events: Array<Record<string, CacheEntry>>) => boolean, description: string) => {
+  const cacheEvents: CacheChangeEvent[] = [];
+  const waitFor = async (predicate: (events: CacheChangeEvent[]) => boolean, description: string) => {
     await vi.waitFor(() => {
       if (!predicate(cacheEvents)) throw new Error(`timed out waiting for ${description}`);
     }, { timeout: 2000 });
@@ -180,7 +181,7 @@ describe("KernelCacheAuthority", () => {
     const watched = subscribers();
     const resolve = vi.fn(async () => resolved());
     const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => 100, {
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
 
@@ -253,12 +254,12 @@ describe("KernelCacheAuthority", () => {
     vi.stubGlobal("queueMicrotask", undefined);
     try {
       const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => resolved() }, () => 100, {
-        onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+        onCacheChanged: (event) => { watched.cacheEvents.push(event); },
       });
       await authority.initialize();
 
       await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
-      await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+      await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -283,7 +284,7 @@ describe("KernelCacheAuthority", () => {
     const storage = new BlockingCacheIndexStorage();
     const watched = subscribers();
     const authority = new KernelCacheAuthority(storage, { resolve: async () => resolved() }, () => 100, {
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
     const indexWriteStarted = storage.blockNextCacheIndexWrite();
@@ -293,7 +294,7 @@ describe("KernelCacheAuthority", () => {
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     storage.releaseCacheIndexWrite();
 
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
     expect(authority.snapshot()["example.com"]).toMatchObject({ source: "test resolver" });
   });
 
@@ -307,7 +308,7 @@ describe("KernelCacheAuthority", () => {
         return await new Promise((resolve) => { resolveDownload = resolve; });
       },
     }, () => 100, {
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
 
@@ -316,9 +317,9 @@ describe("KernelCacheAuthority", () => {
     await vi.waitFor(() => expect(calls).toBe(1));
 
     resolveDownload?.(resolved());
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
     expect(calls).toBe(1);
-    expect(watched.cacheEvents[0]["example.com"]).toMatchObject({
+    expect(watched.cacheEvents[0].upserts["example.com"]).toMatchObject({
       domain: "example.com",
       source: "test resolver",
       url: expect.stringContaining("/api/plugin/private/siyuan-linkmark/icon/"),
@@ -442,20 +443,20 @@ describe("KernelCacheAuthority", () => {
     await vi.waitFor(() => expect(resolve).toHaveBeenCalled());
   });
 
-  it("broadcasts isolated cache snapshots without structuredClone in the kernel runtime", async () => {
-    const received: Record<string, CacheEntry>[] = [];
+  it("broadcasts isolated upsert entry copies without structuredClone in the kernel runtime", async () => {
+    const received: CacheChangeEvent[] = [];
     vi.stubGlobal("structuredClone", undefined);
     try {
       const authority = new KernelCacheAuthority(new MemoryStorage(), {
         resolve: async () => resolved(),
       }, () => 100, {
-        onStateChange: (cache) => { received.push(cache); },
+        onCacheChanged: (event) => { received.push(event); },
       });
       await authority.initialize();
 
       await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
       await vi.waitFor(() => expect(received).toHaveLength(1));
-      received[0]["example.com"].source = "subscriber mutation";
+      received[0].upserts["example.com"].source = "subscriber mutation";
       const snapshot = authority.snapshot();
       snapshot["example.com"].source = "caller mutation";
 
@@ -515,7 +516,7 @@ describe("KernelCacheAuthority", () => {
         return resolved(`resolver ${call}`);
       },
     }, () => 100, {
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
 
@@ -528,15 +529,15 @@ describe("KernelCacheAuthority", () => {
     await vi.waitFor(() => expect(calls).toBe(2));
     releases[1]?.();
 
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the replacement commit broadcast");
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the replacement commit broadcast");
     expect(authority.snapshot()).toEqual({
       "example.com": expect.objectContaining({ source: "resolver 2" }),
     });
   });
 
-  it("persists concurrent resolved scopes in one cache-index batch and broadcasts once", async () => {
+  it("persists concurrent resolved scopes in one cache-index batch and broadcasts one change event", async () => {
     const storage = new CountingCacheIndexStorage();
-    const received: Record<string, CacheEntry>[] = [];
+    const received: CacheChangeEvent[] = [];
     const releaseDownloads: Array<() => void> = [];
     const authority = new KernelCacheAuthority(storage, {
       resolve: async (requested) => {
@@ -544,7 +545,7 @@ describe("KernelCacheAuthority", () => {
         return resolved(requested.key);
       },
     }, () => 100, {
-      onStateChange: (cache) => { received.push(cache); },
+      onCacheChanged: (event) => { received.push(event); },
     });
     await authority.initialize();
 
@@ -559,8 +560,12 @@ describe("KernelCacheAuthority", () => {
     expect(storage.cacheIndexWrites).toBe(1);
     expect(received).toEqual([
       {
-        "first.example.com": expect.objectContaining({ source: "first.example.com" }),
-        "second.example.com": expect.objectContaining({ source: "second.example.com" }),
+        revision: 1,
+        upserts: {
+          "first.example.com": expect.objectContaining({ source: "first.example.com" }),
+          "second.example.com": expect.objectContaining({ source: "second.example.com" }),
+        },
+        removed: [],
       },
     ]);
     expect(authority.snapshot()).toEqual({
@@ -571,12 +576,12 @@ describe("KernelCacheAuthority", () => {
 
   it("does not publish any resolved scope when its cache-index batch fails", async () => {
     const storage = new FailingCacheIndexStorage();
-    const received: Record<string, CacheEntry>[] = [];
+    const received: CacheChangeEvent[] = [];
     const failures: Array<{ key: string; category: string }> = [];
     const authority = new KernelCacheAuthority(storage, {
       resolve: async (requested) => resolved(requested.key),
     }, () => 100, {
-      onStateChange: (cache) => { received.push(cache); },
+      onCacheChanged: (event) => { received.push(event); },
       onResolutionFailure: (failedScope, category) => { failures.push({ key: failedScope.key, category }); },
     });
     await authority.initialize();
@@ -632,11 +637,11 @@ describe("KernelCacheAuthority", () => {
 
   it("retains pinned entries when clearing the workspace cache", async () => {
     const storage = new MemoryStorage();
-    const received: Record<string, CacheEntry>[] = [];
+    const received: CacheChangeEvent[] = [];
     const authority = new KernelCacheAuthority(storage, {
       resolve: async () => resolved(),
     }, () => 100, {
-      onStateChange: (cache) => { received.push(cache); },
+      onCacheChanged: (event) => { received.push(event); },
     });
     await authority.initialize();
     await authority.putPinned(scope("pinned.example.com"), entry({ domain: "pinned.example.com", pinned: true }), "image/png", new Uint8Array([9]).buffer);
@@ -743,11 +748,11 @@ describe("KernelCacheAuthority", () => {
   });
 
   it("keeps distinct route Link scopes independent", async () => {
-    const received: Record<string, CacheEntry>[] = [];
+    const received: CacheChangeEvent[] = [];
     const authority = new KernelCacheAuthority(new MemoryStorage(), {
       resolve: async (requested) => resolved(requested.key),
     }, () => 100, {
-      onStateChange: (cache) => { received.push(cache); },
+      onCacheChanged: (event) => { received.push(event); },
     });
     await authority.initialize();
 
@@ -765,22 +770,22 @@ describe("KernelCacheAuthority", () => {
 
   it("publishes a refreshed icon under a new private payload before cleaning the old payload", async () => {
     const storage = new MemoryStorage();
-    const received: Record<string, CacheEntry>[] = [];
+    const received: CacheChangeEvent[] = [];
     let byte = 1;
     const authority = new KernelCacheAuthority(storage, {
       resolve: async () => resolved(`test resolver ${byte++}`),
     }, () => 100, {
-      onStateChange: (cache) => { received.push(cache); },
+      onCacheChanged: (event) => { received.push(event); },
     });
     await authority.initialize();
 
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(received).toHaveLength(1));
-    const first = received[0]["example.com"];
+    const first = received[0].upserts["example.com"];
 
     await expect(authority.getOrQueue(scope(), true)).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(received).toHaveLength(2));
-    const second = received[1]["example.com"];
+    const second = received[1].upserts["example.com"];
 
     expect(first.iconId).not.toBe(second.iconId);
     await expect(authority.icon(first.iconId!)).resolves.toBeUndefined();
@@ -828,7 +833,7 @@ describe("KernelCacheAuthority", () => {
       resolve: async () => await new Promise((resolve) => { resolveDownload = resolve; }),
     }, () => now, {
       traceSink: trace.sink,
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
 
@@ -844,7 +849,7 @@ describe("KernelCacheAuthority", () => {
 
     now = 160;
     resolveDownload?.(resolved());
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
 
     expect(trace.events()).toEqual(["accepted", "started", "resolved", "persisted", "committed"]);
     expect(new Set(trace.records.map((record) => record.task)).size).toBe(1);
@@ -1074,7 +1079,7 @@ describe("KernelCacheAuthority", () => {
     const watched = subscribers();
     const authority = new KernelCacheAuthority(storage, { resolve: async () => resolved() }, () => 100, {
       traceSink: trace.sink,
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
     const indexWriteStarted = storage.blockNextCacheIndexWrite();
@@ -1085,7 +1090,7 @@ describe("KernelCacheAuthority", () => {
     expect(trace.events()).toEqual(["accepted", "started", "resolved"]);
 
     storage.releaseCacheIndexWrite();
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
     await settle();
     expect(trace.events()).toEqual(["accepted", "started", "resolved", "persisted", "committed"]);
     expectSanitizedRecords(trace.records);
@@ -1096,17 +1101,172 @@ describe("KernelCacheAuthority", () => {
     const failures: Array<{ key: string; category: string }> = [];
     const resolve = vi.fn(async () => resolved());
     const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => 100, {
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
       onResolutionFailure: (failedScope, category) => { failures.push({ key: failedScope.key, category }); },
     });
     await authority.initialize();
 
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
 
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(authority.snapshot()).toEqual({ "example.com": expect.objectContaining({ source: "test resolver" }) });
     expect(failures).toEqual([]);
+  });
+
+  it("increments the cache revision exactly once per committed event", async () => {
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async (requested) => resolved(requested.key),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+
+    await authority.putPinned(scope("first.example.com"), entry({ domain: "first.example.com", pinned: true }), "image/png", new Uint8Array([1]).buffer);
+    await authority.putPinned(scope("second.example.com"), entry({ domain: "second.example.com", pinned: true }), "image/png", new Uint8Array([2]).buffer);
+    await expect(authority.getOrQueue(scope("third.example.com"))).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(authority.snapshot()["third.example.com"]).toBeDefined());
+    await authority.remove("third.example.com");
+
+    expect(received.map((event) => event.revision)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("reports removed keys for remove, clear, clear-generated, and pin-replace operations", async () => {
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async (requested) => resolved(requested.key),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+    let nextEvent = 0;
+
+    await authority.putPinned(scope("generated.example.com"), entry({ domain: "generated.example.com", pinned: true, source: "generated monogram" }), "image/svg+xml", new Uint8Array([1]).buffer);
+    await authority.putPinned(scope("pinned.example.com"), entry({ domain: "pinned.example.com", pinned: true }), "image/png", new Uint8Array([2]).buffer);
+    await expect(authority.getOrQueue(scope("plain.example.com"))).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(authority.snapshot()["plain.example.com"]).toBeDefined());
+    nextEvent = received.length;
+
+    await authority.remove("plain.example.com");
+    await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
+    expect(received[nextEvent]).toEqual({ revision: expect.any(Number), upserts: {}, removed: ["plain.example.com"] });
+    nextEvent = received.length;
+
+    await authority.clearGenerated();
+    await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
+    expect(received[nextEvent]).toEqual({ revision: expect.any(Number), upserts: {}, removed: ["generated.example.com"] });
+    nextEvent = received.length;
+
+    await expect(authority.getOrQueue(scope("plain-2.example.com"))).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(authority.snapshot()["plain-2.example.com"]).toBeDefined());
+    nextEvent = received.length;
+
+    await authority.clear();
+    await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
+    expect(received[nextEvent]).toEqual({ revision: expect.any(Number), upserts: {}, removed: ["plain-2.example.com"] });
+    nextEvent = received.length;
+
+    await authority.putPinned(scope("second.example.com"), entry({ domain: "second.example.com", pinned: true }), "image/png", new Uint8Array([3]).buffer);
+    await authority.putPinned(scope("first.example.com"), entry({ domain: "first.example.com", pinned: true }), "image/png", new Uint8Array([4]).buffer, "second.example.com");
+    await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
+    expect(received[received.length - 1]).toEqual({
+      revision: expect.any(Number),
+      upserts: { "first.example.com": expect.objectContaining({ pinned: true }) },
+      removed: ["second.example.com"],
+    });
+  });
+
+  it("resolves new-format iconIds in constant time and rejects mismatches", async () => {
+    const storage = new MemoryStorage();
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => resolved() }, () => 100);
+    await authority.initialize();
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(authority.snapshot()["example.com"]).toBeDefined());
+    const iconId = authority.snapshot()["example.com"].iconId!;
+
+    await expect(authority.icon(iconId)).resolves.toMatchObject({ contentType: "image/png" });
+    const mismatch = `${iconId.slice(0, iconId.lastIndexOf("-"))}-9`;
+    await expect(authority.icon(mismatch)).resolves.toBeUndefined();
+    await expect(authority.icon("unknown-key")).resolves.toBeUndefined();
+    await expect(authority.icon("unknown.example.com-2pc-1")).resolves.toBeUndefined();
+  });
+
+  it("still serves legacy-format iconIds through the linear scan", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("favicon-cache-v2.json", JSON.stringify({
+      "example.com": entry({
+        domain: "example.com", iconId: "example.com-2pc-1",
+        url: "/plugin/private/siyuan-linkmark/icon/example.com-2pc-1", contentType: "image/png",
+      }),
+      "a-b.example.com": entry({
+        domain: "a-b.example.com", iconId: "a-b.example.com-2pc-1",
+        url: "/plugin/private/siyuan-linkmark/icon/a-b.example.com-2pc-1", contentType: "image/png",
+      }),
+    }));
+    storage.files.set("icons/example.com-2pc-1.base64", Buffer.from([1, 2, 3]).toString("base64"));
+    storage.files.set("icons/a-b.example.com-2pc-1.base64", Buffer.from([4, 5]).toString("base64"));
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    await expect(authority.icon("example.com-2pc-1")).resolves.toMatchObject({ contentType: "image/png" });
+    await expect(authority.icon("a-b.example.com-2pc-1")).resolves.toMatchObject({ contentType: "image/png" });
+    await expect(authority.icon("example.com-2pc-2")).resolves.toBeUndefined();
+  });
+
+  it("does not serve a stale iconId for an entry that was refreshed or removed", async () => {
+    const storage = new MemoryStorage();
+    const received: CacheChangeEvent[] = [];
+    let byte = 1;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => resolved(`test resolver ${byte++}`),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    const stale = received[0].upserts["example.com"].iconId!;
+
+    await expect(authority.getOrQueue(scope(), true)).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+    const current = received[1].upserts["example.com"].iconId!;
+    expect(current).not.toBe(stale);
+    await expect(authority.icon(stale)).resolves.toBeUndefined();
+
+    await authority.remove(scope().key);
+    await vi.waitFor(() => expect(authority.snapshot()).toEqual({}));
+    await expect(authority.icon(current)).resolves.toBeUndefined();
+  });
+
+  it("resolves new-format and legacy iconIds against a 10,000-entry cache fixture", async () => {
+    const storage = new MemoryStorage();
+    const entries: Record<string, CacheEntry> = {};
+    let encodedIconId = "";
+    const legacyIconId = "legacy.example.com-2pc-1";
+    const now = 100;
+    for (let index = 0; index < 10_000; index += 1) {
+      const key = `domain-${index}.example.com`;
+      const id = `${Buffer.from(key).toString("base64url")}-${now.toString(36)}-${index.toString(36)}`;
+      if (index === 5_000) encodedIconId = id;
+      entries[key] = entry({
+        domain: key, iconId: id, url: `/plugin/private/siyuan-linkmark/icon/${id}`, contentType: "image/png",
+      });
+    }
+    entries["legacy.example.com"] = entry({
+      domain: "legacy.example.com", iconId: legacyIconId,
+      url: `/plugin/private/siyuan-linkmark/icon/${legacyIconId}`, contentType: "image/png",
+    });
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(entries));
+    storage.files.set(`icons/${encodedIconId}.base64`, Buffer.from([1, 2, 3]).toString("base64"));
+    storage.files.set(`icons/${legacyIconId}.base64`, Buffer.from([4]).toString("base64"));
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => now);
+    await authority.initialize();
+
+    await expect(authority.icon(encodedIconId)).resolves.toMatchObject({ contentType: "image/png" });
+    await expect(authority.icon(legacyIconId)).resolves.toMatchObject({ contentType: "image/png" });
+    await expect(authority.icon(`${encodedIconId.slice(0, encodedIconId.lastIndexOf("-"))}-zzz`)).resolves.toBeUndefined();
   });
 });
 
