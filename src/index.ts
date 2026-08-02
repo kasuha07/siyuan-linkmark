@@ -33,6 +33,14 @@ import {
   shareDomainFor,
   type CacheEntry,
 } from "./frontend-cache-state";
+import {
+  base64ToBlob,
+  blobToBase64,
+  errorText,
+  formatFileSize,
+  iconFormat,
+  normalizeDomainInput,
+} from "./frontend-format";
 import { fetchOutcomeFor, type FetchOutcome } from "./refresh-outcome";
 import { scopeForUrl, scopeFromCacheKey, type LinkScope } from "./url-scope";
 
@@ -359,7 +367,7 @@ export default class LinkmarkPlugin extends Plugin {
       }
     };
     saveOverride.addEventListener("click", () => {
-      const domain = this.normalizeDomainInput(overrideDomain.value);
+      const domain = normalizeDomainInput(overrideDomain.value);
       if (!domain) {
         showMessage(t("monogramDomainInvalid"));
         return;
@@ -948,7 +956,7 @@ export default class LinkmarkPlugin extends Plugin {
         pathPrefix: scope.pathPrefix,
         pinned: true,
         includeSubdomains,
-      }, blob.type || "image/png", await this.blobToBase64(blob), selectedScope.key);
+      }, blob.type || "image/png", await blobToBase64(blob), selectedScope.key);
       this.cache[scope.key] = selected;
       if (selectedScope.key !== scope.key) delete this.cache[selectedScope.key];
       this.failedDomains.delete(scope.key);
@@ -965,20 +973,6 @@ export default class LinkmarkPlugin extends Plugin {
       showMessage(this.t("customIconSaveFailed"));
       return false;
     }
-  }
-
-  private async blobToBase64(blob: Blob) {
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    let binary = "";
-    for (const byte of bytes) binary += String.fromCharCode(byte);
-    return btoa(binary);
-  }
-
-  private base64ToBlob(base64: string, contentType: string) {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-    return new Blob([bytes], { type: contentType });
   }
 
   private async restoreAutomaticIcon(key: string) {
@@ -1132,7 +1126,7 @@ export default class LinkmarkPlugin extends Plugin {
           status.textContent = candidates.length === 0 ? this.t("noCandidates") : this.t("candidateCount").replace("{count}", String(candidates.length));
         }
         for (const candidate of candidates) {
-          const blob = this.base64ToBlob(candidate.base64, candidate.contentType);
+          const blob = base64ToBlob(candidate.base64, candidate.contentType);
           const card = document.createElement("button");
           card.type = "button";
           card.className = "siyuan-linkmark-candidate-card";
@@ -1146,8 +1140,8 @@ export default class LinkmarkPlugin extends Plugin {
           label.textContent = this.resolverSourceLabel(candidate.source);
           const details = document.createElement("small");
           details.className = "siyuan-linkmark-candidate-details";
-          const format = this.iconFormat(blob);
-          const size = this.formatFileSize(blob.size);
+          const format = iconFormat(blob, this.t("unknownIconFormat"));
+          const size = formatFileSize(blob.size);
           details.textContent = format === "SVG"
             ? `${format} · ${this.t("vectorIcon")} · ${size}`
             : `${format} · ${size}`;
@@ -1170,37 +1164,6 @@ export default class LinkmarkPlugin extends Plugin {
       }
     };
     void loadCandidates(this.settings.allowFullPageDiscovery || Boolean(selectedScope.discoverPage));
-  }
-
-  private iconFormat(blob: Blob) {
-    const formats: Record<string, string> = {
-      "image/gif": "GIF",
-      "image/jpeg": "JPEG",
-      "image/png": "PNG",
-      "image/svg+xml": "SVG",
-      "image/vnd.microsoft.icon": "ICO",
-      "image/x-icon": "ICO",
-      "image/webp": "WEBP",
-    };
-    return formats[blob.type.toLowerCase()]
-      ?? (blob.type.replace(/^image\//, "").toUpperCase() || this.t("unknownIconFormat"));
-  }
-
-  private formatFileSize(bytes: number) {
-    if (bytes < 1024) return `${bytes} B`;
-    const kilobytes = bytes / 1024;
-    return `${kilobytes < 10 ? kilobytes.toFixed(1) : Math.round(kilobytes)} KB`;
-  }
-
-  private normalizeDomainInput(value: string) {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    try {
-      const url = new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`);
-      return url.hostname.toLowerCase() || null;
-    } catch {
-      return null;
-    }
   }
 
   private async invalidateGeneratedMonograms() {
@@ -1396,22 +1359,13 @@ export default class LinkmarkPlugin extends Plugin {
       this.manualRefreshKeys.delete(scope.key);
       if (invalidated()) return "failure";
       console.warn(`[siyuan-linkmark] Unable to cache ${scope.key}`, error);
-      this.failureReasons.set(scope.key, `${scope.key} · kernel resolve · ${this.errorText(error)}`);
+      this.failureReasons.set(scope.key, `${scope.key} · kernel resolve · ${errorText(error)}`);
       this.failedDomains.set(scope.key, Date.now());
       // Do not create a pseudo-element when no verified image exists, which
       // prevents an empty gap beside the link.
       return "failure";
     } finally {
       this.pendingDomains.delete(scope.key);
-    }
-  }
-
-  private errorText(error: unknown) {
-    if (error instanceof Error) return error.message;
-    try {
-      return JSON.stringify(error);
-    } catch {
-      return String(error);
     }
   }
 
