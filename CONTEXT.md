@@ -37,7 +37,7 @@ The standalone `kasuha07/siyuan-linkmark` GitHub repository, which retains the p
 _Avoid_: GitHub fork, upstream repository
 
 **Independent release line**:
-The Linkmark version series beginning at `0.1.0`, with recent updates limited to Linkmark releases rather than the upstream-derived `auto-favicon` release history.
+The Linkmark version series beginning at `0.1.0`, with release notes on GitHub Releases rather than the upstream-derived `auto-favicon` release history.
 _Avoid_: fork release, v0.6.x continuation
 
 **Legacy data isolation**:

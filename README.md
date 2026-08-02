@@ -118,18 +118,4 @@ Report bugs and feature requests through the new repository's [GitHub Issues](ht
 
 When reporting a problem, please include the Linkmark and SiYuan versions, operating system, affected public URL, network strategy, favicon provider and fallback setting, and any relevant `[siyuan-linkmark] Unable to cache` console error. Remove private URLs, note content, tokens, and local paths before posting.
 
-## Recent updates
-
-### Linkmark 0.1.1
-
-- Resolve cache-miss icons asynchronously in the kernel: the interface stays responsive and background discovery respects a per-site time budget instead of holding an open request.
-- Batch concurrent favicon-cache index commits into one durable JSON write and one client-state update.
-- Tighten URL-safety checks so unique-local (`fc00::/7`) and link-local (`fe80::/10`) IPv6 ranges are treated as private, and probe the parent domain of `www.*` sites when exact candidates fail.
-- Send the correct JSON content type on favicon-proxy requests.
-
-### Linkmark 0.1.0
-
-- Establish the independent Linkmark identity, repository, package namespace, and release line.
-- Discover, display, and locally cache website icons while preserving pinned icons and privacy-focused network controls.
-
-See [GitHub Releases](https://github.com/kasuha07/siyuan-linkmark/releases) for the complete version history.
+See [GitHub Releases](https://github.com/kasuha07/siyuan-linkmark/releases) for the version history.

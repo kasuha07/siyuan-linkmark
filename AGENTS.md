@@ -42,8 +42,8 @@ in `dist/`.
 ## Release
 
 - Keep versions aligned in `package.json`, `package-lock.json`, and `plugin.json`.
-- Keep the recent-updates sections in both READMEs synchronized and limited to
-  the latest two releases; link to GitHub Releases for the complete history.
+- Write the per-release changelog in the GitHub Release notes; do not maintain a
+  recent-updates section in the READMEs.
 - Commit and push the intended source state before tagging.
 - Never move or reuse a tag that has already been published or indexed by the
   SiYuan Bazaar; increment the version instead.
