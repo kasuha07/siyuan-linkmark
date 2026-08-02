@@ -97,15 +97,19 @@ The cache entry that applies to a link scope after pinned, subdomain-shared, and
 _Avoid_: cache hit, lookup result
 
 **Cache snapshot**:
-An isolated view of the authoritative cache that an RPC caller or state-change subscriber may read without changing the cache authority; a Frontend client reads it at startup and when a Cache revision gap is detected.
+An isolated view of the authoritative cache that an RPC caller or state-change subscriber may read without changing the cache authority, carrying the Cache revision and Cache epoch current when the view was taken; a Frontend client adopts them as its baseline at startup, when a Cache revision gap is detected, and when the Cache epoch changes.
 _Avoid_: live cache object, mutable cache reference
 
 **Cache change event**:
-A cache-authority broadcast that reports which Cache entries changed and which Link scopes were removed since the previous event, tagged with a Cache revision.
+A cache-authority broadcast that reports which Cache entries changed and which Link scopes were removed since the previous event, tagged with a Cache revision and the Cache epoch.
 _Avoid_: full cache broadcast, cache snapshot push
 
 **Cache revision**:
-The strictly increasing per-process number attached to each Cache change event; a gap between the last revision a Frontend client saw and the next event's revision means its local cache is out of date.
+The strictly increasing per-process number attached to each Cache change event and Cache snapshot; a gap between the last revision a Frontend client saw and the next event's revision means its local cache is out of date, and the number is discarded when the Cache epoch changes.
+_Avoid_: version number, cache generation
+
+**Cache epoch**:
+The per-process marker identifying a Cache authority instance, changing whenever the kernel plugin starts or reloads; a Frontend client uses it to detect that the per-process Cache revision was reset and resynchronize.
 _Avoid_: version number, cache generation
 
 **Cache persistence batch**:
