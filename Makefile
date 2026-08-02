@@ -21,9 +21,11 @@ dev-build:
 
 dev-container: dev-build
 	@mkdir -p "$(SIYUAN_WORKSPACE)" "$(DIST_DIR)"
-	@if docker container inspect "$(SIYUAN_CONTAINER)" >/dev/null 2>&1; then \
+	@started=0; \
+	if docker container inspect "$(SIYUAN_CONTAINER)" >/dev/null 2>&1; then \
 		if [ "$$(docker container inspect --format '{{.State.Running}}' "$(SIYUAN_CONTAINER)")" != "true" ]; then \
-			docker container start "$(SIYUAN_CONTAINER)"; \
+			docker container start "$(SIYUAN_CONTAINER)" >/dev/null || exit 1; \
+			started=1; \
 		fi; \
 	else \
 		docker run --detach \
@@ -33,7 +35,12 @@ dev-container: dev-build
 			--volume "$(SIYUAN_WORKSPACE):/siyuan/workspace" \
 			"$(SIYUAN_IMAGE)" serve \
 			--workspace=/siyuan/workspace \
-			--accessAuthCode="$(SIYUAN_ACCESS_AUTH_CODE)"; \
+			--accessAuthCode="$(SIYUAN_ACCESS_AUTH_CODE)" >/dev/null || exit 1; \
+		started=1; \
+	fi; \
+	if [ "$$started" -eq 1 ]; then \
+		sleep 2; \
+		npm run build; \
 	fi
 
 dev-stop:
