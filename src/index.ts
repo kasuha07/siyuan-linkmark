@@ -7,11 +7,20 @@ import {
   type FallbackMode,
   type MonogramColorMode,
   type MonogramShape,
-  type MonogramStyle,
   type ProviderPreset,
   type ResolverMode,
 } from "./icon-resolver";
 import { createIconRule } from "./icon-rule";
+import {
+  CACHE_POLICY_FIELDS,
+  clamp,
+  defaultSettings,
+  mergeFrontendSettings,
+  monogramSignature,
+  pickCachePolicy,
+  type MonogramOverride,
+  type Settings,
+} from "./frontend-settings";
 import {
   addedLinkDiscoveryRegionFor,
   flushFrontendRenderWork,
@@ -35,25 +44,6 @@ type CacheEntry = {
 };
 
 type FetchTrigger = "automatic" | "manual";
-type MonogramOverride = Omit<MonogramStyle, "colorMode"> & { letter: string };
-
-type Settings = {
-  enabled: boolean;
-  pauseAutomaticFetch: boolean;
-  allowFullPageDiscovery: boolean;
-  provider: string;
-  providerPreset: ProviderPreset;
-  resolverMode: ResolverMode;
-  fallbackMode: FallbackMode;
-  monogramColorMode: MonogramColorMode;
-  monogramPrimary: string;
-  monogramSecondary: string;
-  monogramText: string;
-  monogramShape: MonogramShape;
-  monogramOverrides: Record<string, MonogramOverride>;
-  iconSize: number;
-  cacheDays: number;
-};
 
 const DISPLAY_SETTINGS_FILE = "display-settings-v2.json";
 const RUNTIME_STYLE_ID = "siyuan-linkmark-runtime-style";
@@ -76,24 +66,6 @@ const LOCAL_DISCOVERY_SELECTORS = {
   editor: EDITOR_SELECTOR,
   block: EDITOR_BLOCK_SELECTOR,
   staticContainer: STATIC_CONTAINER_SELECTOR,
-};
-
-const defaultSettings: Settings = {
-  enabled: true,
-  pauseAutomaticFetch: false,
-  allowFullPageDiscovery: false,
-  provider: "https://example.com/favicon/{domain}",
-  providerPreset: "auto",
-  resolverMode: "mainland",
-  fallbackMode: "monogram",
-  monogramColorMode: "domain",
-  monogramPrimary: "#4F7CFF",
-  monogramSecondary: "#745CFF",
-  monogramText: "#FFFFFF",
-  monogramShape: "rounded",
-  monogramOverrides: {},
-  iconSize: 1,
-  cacheDays: 30,
 };
 
 export default class LinkmarkPlugin extends Plugin {
@@ -124,14 +96,7 @@ export default class LinkmarkPlugin extends Plugin {
   async onload() {
     this.addToolbar();
     const loadedDisplaySettings = await this.loadData(DISPLAY_SETTINGS_FILE);
-    const saved = (loadedDisplaySettings && typeof loadedDisplaySettings === "object" && !Array.isArray(loadedDisplaySettings)
-      ? loadedDisplaySettings
-      : {}) as Partial<Settings>;
-    this.settings = {
-      ...defaultSettings,
-      ...saved,
-      monogramOverrides: { ...defaultSettings.monogramOverrides, ...(saved.monogramOverrides ?? {}) },
-    };
+    this.settings = mergeFrontendSettings(loadedDisplaySettings);
     await this.loadKernelState();
     await this.subscribeToKernelChanges();
     this.addSetting();
@@ -209,11 +174,7 @@ export default class LinkmarkPlugin extends Plugin {
 
   private applyCachePolicy(policy: Partial<Settings> | undefined) {
     if (!policy || typeof policy !== "object") return;
-    const keys: Array<keyof Settings> = [
-      "pauseAutomaticFetch", "allowFullPageDiscovery", "provider", "providerPreset", "resolverMode", "fallbackMode",
-      "monogramColorMode", "monogramPrimary", "monogramSecondary", "monogramText", "monogramShape", "monogramOverrides", "cacheDays",
-    ];
-    for (const key of keys) {
+    for (const key of CACHE_POLICY_FIELDS) {
       if (policy[key] !== undefined) this.settings[key] = policy[key] as never;
     }
   }
@@ -224,14 +185,7 @@ export default class LinkmarkPlugin extends Plugin {
   }
 
   private async saveCachePolicy() {
-    const {
-      pauseAutomaticFetch, allowFullPageDiscovery, provider, providerPreset, resolverMode, fallbackMode,
-      monogramColorMode, monogramPrimary, monogramSecondary, monogramText, monogramShape, monogramOverrides, cacheDays,
-    } = this.settings;
-    const policy = await this.callKernel<Partial<Settings>>("cache.policy.set", {
-      pauseAutomaticFetch, allowFullPageDiscovery, provider, providerPreset, resolverMode, fallbackMode,
-      monogramColorMode, monogramPrimary, monogramSecondary, monogramText, monogramShape, monogramOverrides, cacheDays,
-    });
+    const policy = await this.callKernel<Partial<Settings>>("cache.policy.set", pickCachePolicy(this.settings));
     this.applyCachePolicy(policy);
   }
 
@@ -476,7 +430,7 @@ export default class LinkmarkPlugin extends Plugin {
 
     this.setting = new Setting({
       confirmCallback: async () => {
-        const previousMonogramSignature = this.monogramSignature(this.settings);
+        const previousMonogramSignature = monogramSignature(this.settings);
         const wasPaused = this.settings.pauseAutomaticFetch;
         this.settings.enabled = enabled.checked;
         this.settings.pauseAutomaticFetch = pauseAutomaticFetch.checked;
@@ -491,11 +445,11 @@ export default class LinkmarkPlugin extends Plugin {
         this.settings.monogramText = monogramText.value;
         this.settings.monogramShape = monogramShape.value as MonogramShape;
         this.settings.monogramOverrides = { ...draftOverrides };
-        this.settings.iconSize = this.clamp(Number(iconSize.value), 0.7, 1.8, 1);
-        this.settings.cacheDays = this.clamp(Number(cacheDays.value), 0, 365, 30);
+        this.settings.iconSize = clamp(Number(iconSize.value), 0.7, 1.8, 1);
+        this.settings.cacheDays = clamp(Number(cacheDays.value), 0, 365, 30);
         await this.saveDisplaySettings();
         await this.saveCachePolicy();
-        if (previousMonogramSignature !== this.monogramSignature(this.settings)) {
+        if (previousMonogramSignature !== monogramSignature(this.settings)) {
           await this.invalidateGeneratedMonograms();
         }
         if (!wasPaused && this.settings.pauseAutomaticFetch) this.automaticFetchGeneration += 1;
@@ -1246,10 +1200,6 @@ export default class LinkmarkPlugin extends Plugin {
     return `${kilobytes < 10 ? kilobytes.toFixed(1) : Math.round(kilobytes)} KB`;
   }
 
-  private clamp(value: number, min: number, max: number, fallback: number) {
-    return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
-  }
-
   private normalizeDomainInput(value: string) {
     const trimmed = value.trim();
     if (!trimmed) return null;
@@ -1266,17 +1216,6 @@ export default class LinkmarkPlugin extends Plugin {
     const labels = domain.split(".");
     if (labels.length < 2 || labels.some((label) => !label)) return null;
     return parentDomainOf(domain) ?? domain;
-  }
-
-  private monogramSignature(settings: Settings) {
-    return JSON.stringify({
-      colorMode: settings.monogramColorMode,
-      primary: settings.monogramPrimary,
-      secondary: settings.monogramSecondary,
-      text: settings.monogramText,
-      shape: settings.monogramShape,
-      overrides: settings.monogramOverrides,
-    });
   }
 
   private async invalidateGeneratedMonograms() {
