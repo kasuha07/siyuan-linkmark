@@ -80,6 +80,10 @@ _Avoid_: permanent icon, protected file
 The authoritative record associating a link scope with its resolved or pinned private icon and resolution metadata.
 _Avoid_: favicon file, cache row
 
+**Cache match**:
+The cache entry that applies to a link scope after pinned, subdomain-shared, and domain-fallback precedence resolution.
+_Avoid_: cache hit, lookup result
+
 **Cache snapshot**:
 An isolated view of the authoritative cache that an RPC caller or state-change subscriber may read without changing the cache authority.
 _Avoid_: live cache object, mutable cache reference
@@ -104,9 +108,17 @@ _Avoid_: frontend preference, device setting
 A frontend-client setting that affects only how that client renders Linkmark without changing the shared cache.
 _Avoid_: cache policy, workspace setting
 
+**Frontend settings**:
+The frontend client's combined settings object, mirroring the cache policy fields it may change while carrying its own display preferences.
+_Avoid_: plugin settings, workspace policy
+
 **Independent icon rendering**:
 The frontend behavior that renders Linkmark's selected icon according to its own cache and display rules, without detecting, preserving, or prioritizing another plugin's icon.
 _Avoid_: Link Icon compatibility, cooperative rendering
+
+**Icon rule**:
+The frontend-generated runtime stylesheet fragment that maps a link scope to the icon URL chosen for it, sized by the display preference.
+_Avoid_: style rule, selector string
 
 **Specific-page discovery**:
 An optional workspace cache policy that permits retrieving an external link's path, without its query parameters or fragment, to discover a page-specific icon. It is disabled by default; default resolution probes standard root icon paths and configured providers without retrieving HTML documents or manifests.
