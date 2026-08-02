@@ -2,6 +2,8 @@
 
 # Linkmark
 
+[![CI](https://github.com/kasuha07/siyuan-linkmark/actions/workflows/check.yml/badge.svg)](https://github.com/kasuha07/siyuan-linkmark/actions/workflows/check.yml)
+
 Linkmark automatically discovers, displays, and locally caches website icons for SiYuan links. When no usable favicon is available, it can generate a colorful domain monogram locally.
 
 ![Linkmark link icons and local cache](preview.png)

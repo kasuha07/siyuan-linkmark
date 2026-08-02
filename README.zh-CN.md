@@ -2,6 +2,8 @@
 
 # Linkmark 链接印记
 
+[![CI](https://github.com/kasuha07/siyuan-linkmark/actions/workflows/check.yml/badge.svg)](https://github.com/kasuha07/siyuan-linkmark/actions/workflows/check.yml)
+
 链接印记自动为思源链接发现、显示并本地缓存网站图标。无法获得真实 favicon 时，可以在本地生成彩色域名字母图标。
 
 ![链接印记的链接图标与本地缓存](preview.png)

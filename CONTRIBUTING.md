@@ -45,6 +45,10 @@ trace is missing.
 
 Do not commit `node_modules`, local caches, SiYuan workspace data, or API keys.
 
+Pull requests and pushes to `main` are checked automatically by
+`.github/workflows/check.yml`, which runs `npm run check` and the build and
+package validation.
+
 Maintainer releases are automated by `.github/workflows/release.yml`. Keep the
 versions in `package.json`, `package-lock.json`, and `plugin.json` aligned, push
 the source commit, and then push a `vX.Y.Z` tag. GitHub Actions will build and
@@ -91,6 +95,9 @@ Get-Content dev/siyuan-workspace/temp/siyuan.log -Wait | Select-String "resoluti
 不代表追踪记录缺失。
 
 请不要提交 `node_modules`、本地缓存、思源工作空间数据或任何 API 密钥。
+
+推送到 `main` 的提交及 Pull Request 会由 `.github/workflows/check.yml` 自动执行
+`npm run check` 以及构建与发布包校验。
 
 维护者发布版本时由 `.github/workflows/release.yml` 自动处理。请先确保
 `package.json`、`package-lock.json` 和 `plugin.json` 中的版本一致，推送源码提交，
