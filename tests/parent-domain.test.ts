@@ -12,21 +12,21 @@ import {
 
 describe("parentDomainOf", () => {
   it("returns no parent for registrable domains without one", () => {
-    expect(parentDomainOf("example.com")).toBeUndefined();
+    expect(parentDomainOf("example.dev")).toBeUndefined();
     expect(parentDomainOf("example.co.uk")).toBeUndefined();
     expect(parentDomainOf("localhost")).toBeUndefined();
   });
 
   it("returns exactly the one registrable parent for subdomains", () => {
-    expect(parentDomainOf("sub.example.com")).toBe("example.com");
-    expect(parentDomainOf("a.b.example.com")).toBe("example.com");
+    expect(parentDomainOf("sub.example.dev")).toBe("example.dev");
+    expect(parentDomainOf("a.b.example.dev")).toBe("example.dev");
     expect(parentDomainOf("sub.example.co.uk")).toBe("example.co.uk");
   });
 
   it("treats the www label as an ordinary subdomain", () => {
-    expect(parentDomainOf("www.example.com")).toBe("example.com");
+    expect(parentDomainOf("www.example.dev")).toBe("example.dev");
     expect(parentDomainOf("www.example.co.uk")).toBe("example.co.uk");
-    expect(parentDomainOf("www.sub.example.com")).toBe("example.com");
+    expect(parentDomainOf("www.sub.example.dev")).toBe("example.dev");
   });
 
   it("never returns a PSL public suffix", () => {
@@ -50,35 +50,41 @@ describe("parentDomainOf", () => {
 
   it("rejects addresses, special-use, and malformed domains", () => {
     expect(parentDomainOf("192.168.1.1")).toBeUndefined();
-    expect(parentDomainOf("example.com:8080")).toBeUndefined();
+    expect(parentDomainOf("example.dev:8080")).toBeUndefined();
     expect(parentDomainOf("::1")).toBeUndefined();
     expect(parentDomainOf("[::1]")).toBeUndefined();
-    expect(parentDomainOf("example..com")).toBeUndefined();
+    expect(parentDomainOf("example..dev")).toBeUndefined();
     expect(parentDomainOf("foo.local")).toBeUndefined();
+    expect(parentDomainOf("foo.onion")).toBeUndefined();
+    expect(parentDomainOf("x.home.arpa")).toBeUndefined();
+    expect(parentDomainOf("foo.alt")).toBeUndefined();
+    expect(parentDomainOf("example.com")).toBeUndefined();
+    expect(parentDomainOf("www.example.net")).toBeUndefined();
+    expect(parentDomainOf("x.6tisch.arpa")).toBeUndefined();
   });
 
   it("normalizes case and IDN spelling", () => {
-    expect(parentDomainOf("SUB.EXAMPLE.COM")).toBe("example.com");
+    expect(parentDomainOf("SUB.EXAMPLE.DEV")).toBe("example.dev");
     expect(parentDomainOf("www.MÜNCHEN.de")).toBe("xn--mnchen-3ya.de");
   });
 });
 
 describe("shareDomainFor", () => {
   it("keeps the eTLD+1 itself when no parent exists", () => {
-    expect(shareDomainFor("example.com")).toBe("example.com");
+    expect(shareDomainFor("example.dev")).toBe("example.dev");
     expect(shareDomainFor("example.co.uk")).toBe("example.co.uk");
   });
 
   it("derives the single PSL eTLD+1", () => {
-    expect(shareDomainFor("sub.example.com")).toBe("example.com");
-    expect(shareDomainFor("a.b.example.com")).toBe("example.com");
+    expect(shareDomainFor("sub.example.dev")).toBe("example.dev");
+    expect(shareDomainFor("a.b.example.dev")).toBe("example.dev");
     expect(shareDomainFor("sub.example.co.uk")).toBe("example.co.uk");
   });
 
   it("drops the www label to the registrable domain", () => {
-    expect(shareDomainFor("www.example.com")).toBe("example.com");
+    expect(shareDomainFor("www.example.dev")).toBe("example.dev");
     expect(shareDomainFor("www.example.co.uk")).toBe("example.co.uk");
-    expect(shareDomainFor("www.sub.example.com")).toBe("example.com");
+    expect(shareDomainFor("www.sub.example.dev")).toBe("example.dev");
   });
 
   it("keeps tenant eTLD+1s under PSL Private suffixes", () => {
@@ -104,20 +110,25 @@ describe("shareDomainFor", () => {
 
   it("rejects addresses, special-use, and malformed labels", () => {
     expect(shareDomainFor("127.0.0.1")).toBeNull();
-    expect(shareDomainFor("example.com:8080")).toBeNull();
+    expect(shareDomainFor("example.dev:8080")).toBeNull();
     expect(shareDomainFor("localhost")).toBeNull();
     expect(shareDomainFor("www.localhost")).toBeNull();
-    expect(shareDomainFor("a..example.com")).toBeNull();
-    expect(shareDomainFor("foo_bar.com")).toBeNull();
+    expect(shareDomainFor("a..example.dev")).toBeNull();
+    expect(shareDomainFor("foo_bar.dev")).toBeNull();
+    expect(shareDomainFor("foo.onion")).toBeNull();
+    expect(shareDomainFor("x.home.arpa")).toBeNull();
+    expect(shareDomainFor("foo.alt")).toBeNull();
+    expect(shareDomainFor("example.com")).toBeNull();
+    expect(shareDomainFor("sub.example.org")).toBeNull();
   });
 });
 
 describe("shareEligibilityOf", () => {
   it("marks an ICANN eTLD+1 scope as eligible with its share domain", () => {
-    expect(shareEligibilityOf("example.com")).toEqual({ eligible: true, shareDomain: "example.com" });
-    expect(shareEligibilityOf("sub.example.com")).toEqual({ eligible: true, shareDomain: "example.com" });
+    expect(shareEligibilityOf("example.dev")).toEqual({ eligible: true, shareDomain: "example.dev" });
+    expect(shareEligibilityOf("sub.example.dev")).toEqual({ eligible: true, shareDomain: "example.dev" });
     expect(shareEligibilityOf("example.co.uk")).toEqual({ eligible: true, shareDomain: "example.co.uk" });
-    expect(shareEligibilityOf("www.example.com")).toEqual({ eligible: true, shareDomain: "example.com" });
+    expect(shareEligibilityOf("www.example.dev")).toEqual({ eligible: true, shareDomain: "example.dev" });
   });
 
   it("rejects scopes beneath PSL Private-suffix families", () => {
@@ -159,47 +170,55 @@ describe("shareEligibilityOf", () => {
     expect(shareEligibilityOf("localhost")).toEqual({ eligible: false, reason: "special-use" });
     expect(shareEligibilityOf("www.localhost")).toEqual({ eligible: false, reason: "special-use" });
     expect(shareEligibilityOf("foo.local")).toEqual({ eligible: false, reason: "special-use" });
+    expect(shareEligibilityOf("foo.onion")).toEqual({ eligible: false, reason: "special-use" });
+    expect(shareEligibilityOf("x.home.arpa")).toEqual({ eligible: false, reason: "special-use" });
+    expect(shareEligibilityOf("foo.alt")).toEqual({ eligible: false, reason: "special-use" });
+    expect(shareEligibilityOf("example.com")).toEqual({ eligible: false, reason: "special-use" });
+    expect(shareEligibilityOf("www.example.net")).toEqual({ eligible: false, reason: "special-use" });
   });
 
   it("rejects malformed values and values without a registrable domain", () => {
-    expect(shareEligibilityOf("a..example.com")).toEqual({ eligible: false, reason: "malformed" });
-    expect(shareEligibilityOf("example.com:8080")).toEqual({ eligible: false, reason: "malformed" });
+    expect(shareEligibilityOf("a..example.dev")).toEqual({ eligible: false, reason: "malformed" });
+    expect(shareEligibilityOf("example.dev:8080")).toEqual({ eligible: false, reason: "malformed" });
     expect(shareEligibilityOf("unknownxyz")).toEqual({ eligible: false, reason: "public-suffix" });
   });
 });
 
 describe("isEligibleShareTarget", () => {
   it("accepts only exactly a non-public-suffix eTLD+1 outside exclusions", () => {
-    expect(isEligibleShareTarget("example.com")).toBe(true);
+    expect(isEligibleShareTarget("example.dev")).toBe(true);
     expect(isEligibleShareTarget("example.co.uk")).toBe(true);
-    expect(isEligibleShareTarget("www.example.com")).toBe(false);
-    expect(isEligibleShareTarget("a.b.example.com")).toBe(false);
+    expect(isEligibleShareTarget("www.example.dev")).toBe(false);
+    expect(isEligibleShareTarget("a.b.example.dev")).toBe(false);
     expect(isEligibleShareTarget("foo.github.io")).toBe(false);
     expect(isEligibleShareTarget("github.io")).toBe(false);
     expect(isEligibleShareTarget("qq.com")).toBe(false);
     expect(isEligibleShareTarget("127.0.0.1")).toBe(false);
+    expect(isEligibleShareTarget("example.com")).toBe(false);
+    expect(isEligibleShareTarget("foo.onion")).toBe(false);
+    expect(isEligibleShareTarget("x.home.arpa")).toBe(false);
   });
 });
 
 describe("pickerScopeChoices", () => {
   it("offers the shared choice only for an eligible parent", () => {
-    expect(pickerScopeChoices({ domain: "sub.example.com" })).toEqual([
+    expect(pickerScopeChoices({ domain: "sub.example.dev" })).toEqual([
       { kind: "domain" },
-      { kind: "subdomains", shareDomain: "example.com" },
+      { kind: "subdomains", shareDomain: "example.dev" },
     ]);
-    expect(pickerScopeChoices({ domain: "a.b.example.com" })).toEqual([
+    expect(pickerScopeChoices({ domain: "a.b.example.dev" })).toEqual([
       { kind: "domain" },
-      { kind: "subdomains", shareDomain: "example.com" },
+      { kind: "subdomains", shareDomain: "example.dev" },
     ]);
   });
 
   it("keeps Current Type and Current Domain for route scopes", () => {
-    expect(pickerScopeChoices({ domain: "sub.example.com", routeKey: "doc" })).toEqual([
+    expect(pickerScopeChoices({ domain: "sub.example.dev", routeKey: "doc" })).toEqual([
       { kind: "type" },
       { kind: "domain" },
-      { kind: "subdomains", shareDomain: "example.com" },
+      { kind: "subdomains", shareDomain: "example.dev" },
     ]);
-    expect(pickerScopeChoices({ domain: "example.com", routeKey: "doc" })).toEqual([
+    expect(pickerScopeChoices({ domain: "example.dev", routeKey: "doc" })).toEqual([
       { kind: "type" },
       { kind: "domain" },
     ]);
@@ -231,8 +250,18 @@ describe("pickerScopeChoices", () => {
   });
 
   it("offers no shared choice without a parent", () => {
-    expect(pickerScopeChoices({ domain: "example.com" })).toEqual([{ kind: "domain" }]);
+    expect(pickerScopeChoices({ domain: "example.dev" })).toEqual([{ kind: "domain" }]);
     expect(pickerScopeChoices({ domain: "127.0.0.1" })).toEqual([{ kind: "domain" }]);
+  });
+
+  it("never exposes the shared choice for special-use names", () => {
+    expect(pickerScopeChoices({ domain: "foo.onion" })).toEqual([{ kind: "domain" }]);
+    expect(pickerScopeChoices({ domain: "x.home.arpa", routeKey: "doc" })).toEqual([
+      { kind: "type" },
+      { kind: "domain" },
+    ]);
+    expect(pickerScopeChoices({ domain: "foo.alt" })).toEqual([{ kind: "domain" }]);
+    expect(pickerScopeChoices({ domain: "www.example.com" })).toEqual([{ kind: "domain" }]);
   });
 });
 

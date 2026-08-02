@@ -36,22 +36,18 @@ export type PickerScopeChoice =
  * tldts is the sole PSL parser: every calculation includes the ICANN and
  * Private sections plus special-use and IP detection, so eTLD+1 results are
  * reproducible from the release-bundled list. No runtime suffix-list request
- * is ever made.
+ * is ever made. `detectSpecialUse` exposes the IANA Special-Use Domain Names
+ * registry verdict (RFC 6761/6762/7686/8375/9476 and successors) as
+ * `isSpecialUse`, covering each listed name and all of its sub-domains.
  */
 const TLDTS_OPTIONS = {
   allowPrivateDomains: true,
   detectIp: true,
+  detectSpecialUse: true,
   extractHostname: false,
   mixedInputs: false,
   validateHostname: true,
 };
-
-/**
- * RFC 6761/6762 special-use suffixes carried in the PSL. Hostnames at or
- * beneath these names have no internet registrable domain, so they never
- * acquire a parent or shared-pin scope.
- */
-const SPECIAL_USE_SUFFIXES = new Set(["example", "invalid", "localhost", "local", "test"]);
 
 /**
  * The reviewed Shared-pin exclusion table. Each entry is an eTLD+1 boundary
@@ -178,8 +174,12 @@ function classifyHostname(hostname: string): HostClassification {
   if (!normalized) return { kind: "invalid", normalized: hostname.trim().toLowerCase(), reason: "malformed" };
   const parsed = parse(normalized, TLDTS_OPTIONS);
   if (parsed.isIp) return { kind: "invalid", normalized, reason: "ip-address" };
+  // The tldts special-use signal is the IANA registry verdict: `foo.onion`,
+  // `x.home.arpa`, `foo.alt`, `example.com`, and every other listed name or
+  // sub-domain has no internet registrable domain, so it never acquires a
+  // parent or shared-pin scope.
+  if (parsed.isSpecialUse) return { kind: "invalid", normalized, reason: "special-use" };
   const suffix = parsed.publicSuffix ?? "";
-  if (SPECIAL_USE_SUFFIXES.has(suffix)) return { kind: "invalid", normalized, reason: "special-use" };
   const registrable = parsed.domain;
   if (!registrable) {
     return suffix === normalized
