@@ -1,27 +1,27 @@
 import { ResolutionError, type IconResolver, type LinkScope, type ResolvedIcon, type ResolutionTrigger } from "./cache-authority";
+import { monogramSvg } from "./monogram";
 import { parentDomainOf } from "./parent-domain";
+import { MAX_ICON_BYTES, type CachePolicyFields } from "./resolver-contract";
 import type { CandidateAttemptInfo } from "./resolution-trace";
 import { isAuthenticationRedirect, isAuthenticationTarget, isSafePublicTarget } from "./url-safety";
 
-export type KernelResolverPolicy = {
-  provider: string;
-  providerPreset: "auto" | "faviconkit" | "faviconim" | "iconhorse" | "custom";
-  resolverMode: "mainland" | "global" | "direct";
-  fallbackMode: "monogram" | "none";
-  allowFullPageDiscovery: boolean;
-  monogramColorMode: "domain" | "custom";
-  monogramPrimary: string;
-  monogramSecondary: string;
-  monogramText: string;
-  monogramShape: "rounded" | "circle" | "square";
-  monogramOverrides: Record<string, { letter: string; primary: string; secondary: string; text: string; shape: "rounded" | "circle" | "square" }>;
-};
+export type KernelResolverPolicy = Pick<CachePolicyFields,
+  | "provider"
+  | "providerPreset"
+  | "resolverMode"
+  | "fallbackMode"
+  | "allowFullPageDiscovery"
+  | "monogramColorMode"
+  | "monogramPrimary"
+  | "monogramSecondary"
+  | "monogramText"
+  | "monogramShape"
+  | "monogramOverrides">;
 
 export type ForwardResponse = { body: string; contentType?: string; headers?: Record<string, string | string[]>; status: number; url?: string };
 export type ForwardProxy = (url: string, responseEncoding: "text" | "base64", contentType: string, timeout?: number) => Promise<ForwardResponse | null>;
 
 type Candidate = { url: string; source: string };
-const MAX_ICON_BYTES = 2 * 1024 * 1024;
 const MAX_RESOLUTION_CANDIDATE_ATTEMPTS = 4;
 const MAX_RESOLUTION_BUDGET_MS = 10_000;
 const MAX_REDIRECTS = 3;
@@ -321,28 +321,15 @@ export class ForwardProxyIconResolver implements IconResolver {
 
   private monogram(domain: string): ResolvedIcon {
     const policy = this.policy();
-    const style = policy.monogramOverrides[domain] ?? {
-      letter: domain.replace(/^www\./, "").match(/[a-z0-9]/i)?.[0] ?? "?",
+    const svg = monogramSvg({
+      domain,
+      colorMode: policy.monogramColorMode,
       primary: policy.monogramPrimary,
       secondary: policy.monogramSecondary,
       text: policy.monogramText,
       shape: policy.monogramShape,
-    };
-    const letter = escapeXml(Array.from(style.letter.trim() || "?")[0].toUpperCase());
-    let hash = 0;
-    for (const character of domain) hash = ((hash << 5) - hash + character.charCodeAt(0)) | 0;
-    const hue = Math.abs(hash) % 360;
-    const primary = policy.monogramColorMode === "domain" && !policy.monogramOverrides[domain]
-      ? `hsl(${hue} 72% 58%)`
-      : safeColor(style.primary, "#4F7CFF");
-    const secondary = policy.monogramColorMode === "domain" && !policy.monogramOverrides[domain]
-      ? `hsl(${(hue + 28) % 360} 68% 42%)`
-      : safeColor(style.secondary, "#745CFF");
-    const text = safeColor(style.text, "#FFFFFF");
-    const body = style.shape === "circle"
-      ? '<circle cx="32" cy="32" r="32" fill="url(#g)"/>'
-      : `<rect width="64" height="64" rx="${style.shape === "square" ? 4 : 14}" fill="url(#g)"/>`;
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="${primary}"/><stop offset="1" stop-color="${secondary}"/></linearGradient></defs>${body}<text x="32" y="43" text-anchor="middle" font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="${text}">${letter}</text></svg>`;
+      overrides: policy.monogramOverrides,
+    });
     const bytes = Buffer.from(svg, "utf8");
     return { bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), contentType: "image/svg+xml", source: "generated monogram" };
   }
@@ -401,12 +388,4 @@ function imageContentType(bytes: Buffer, contentType?: string) {
   if (bytes.subarray(0, 3).toString("hex") === "ffd8ff") return "image/jpeg";
   if (bytes.subarray(0, 4).toString("ascii") === "GIF8") return "image/gif";
   return "image/svg+xml";
-}
-
-function safeColor(value: string, fallback: string) {
-  return /^#[0-9a-f]{6}$/i.test(value) ? value.toUpperCase() : fallback;
-}
-
-function escapeXml(value: string) {
-  return value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
 }

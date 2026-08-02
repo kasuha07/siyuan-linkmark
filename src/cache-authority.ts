@@ -1,3 +1,4 @@
+import type { CachePolicyFields } from "./resolver-contract";
 import type { CandidateAttemptInfo, ResolutionTraceRecord, ResolutionTraceSink } from "./resolution-trace";
 
 export type CacheEntry = {
@@ -26,10 +27,7 @@ export type LinkScope = {
   discoverPage?: boolean;
 };
 
-export type CachePolicy = {
-  cacheDays: number;
-  pauseAutomaticFetch?: boolean;
-};
+export type CachePolicy = Pick<CachePolicyFields, "cacheDays" | "pauseAutomaticFetch">;
 
 export type ResolvedIcon = {
   bytes: ArrayBuffer;

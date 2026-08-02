@@ -1,14 +1,16 @@
 import { confirm, Dialog, Menu, Plugin, Setting, showMessage } from "siyuan";
 import "./style.css";
 import type { CacheRequestResult } from "./cache-authority";
+import { isDecodableImage } from "./image-decode";
 import {
-  isDecodableImage,
+  RESOLVER_VERSION,
   type FallbackMode,
   type MonogramColorMode,
+  type MonogramOverride,
   type MonogramShape,
   type ProviderPreset,
   type ResolverMode,
-} from "./icon-resolver";
+} from "./resolver-contract";
 import { createIconRule } from "./icon-rule";
 import {
   CACHE_POLICY_FIELDS,
@@ -17,7 +19,6 @@ import {
   mergeFrontendSettings,
   monogramSignature,
   pickCachePolicy,
-  type MonogramOverride,
   type Settings,
 } from "./frontend-settings";
 import {
@@ -49,7 +50,6 @@ type FetchTrigger = "automatic" | "manual";
 const DISPLAY_SETTINGS_FILE = "display-settings-v2.json";
 const RUNTIME_STYLE_ID = "siyuan-linkmark-runtime-style";
 const FEEDBACK_URL = "https://github.com/kasuha07/siyuan-linkmark/issues";
-const RESOLVER_VERSION = 6;
 const MANUAL_FAILURE_WINDOW = 60 * 1000;
 const RULE_RENDER_BATCH_DELAY = 16;
 const LINK_SELECTOR = [
@@ -218,7 +218,7 @@ export default class LinkmarkPlugin extends Plugin {
     const pauseAutomaticFetch = document.createElement("input");
     pauseAutomaticFetch.type = "checkbox";
     pauseAutomaticFetch.className = "b3-switch fn__flex-center";
-    pauseAutomaticFetch.checked = this.settings.pauseAutomaticFetch;
+    pauseAutomaticFetch.checked = Boolean(this.settings.pauseAutomaticFetch);
 
     const allowFullPageDiscovery = document.createElement("input");
     allowFullPageDiscovery.type = "checkbox";
@@ -1255,7 +1255,7 @@ export default class LinkmarkPlugin extends Plugin {
         scopeKey: key,
         scope,
         cache: this.cache,
-        pauseAutomaticFetch: this.settings.pauseAutomaticFetch,
+        pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
         cacheDays: this.settings.cacheDays,
         failedAt: this.failedDomains.get(key),
       });

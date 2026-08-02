@@ -28,5 +28,6 @@ instead of pinning each drifting copy.
 - A `www.<sub>.<tld>` includeSubdomains pin now shares across the registrable
   domain instead of stopping at the first subdomain level; the previous
   frontend behavior is preserved everywhere else.
-- The frontend copies of the network resolution functions remain in
-  `src/icon-resolver.ts` as dead code and are intentionally untested.
+- The frontend copies of the network resolution functions were deleted in the
+  shared-contract refactor (spec 0004); the kernel plugin is the only component
+  that resolves, downloads, or generates icons.

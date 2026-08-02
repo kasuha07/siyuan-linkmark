@@ -21,7 +21,11 @@ in `dist/`.
 
 - TypeScript, Vite, npm, and the SiYuan plugin API.
 - `src/index.ts`: plugin lifecycle, settings, cache management, and UI.
-- `src/icon-resolver.ts`: favicon discovery and resolution.
+- `src/kernel.ts`: the kernel-plugin cache authority entry point.
+- `src/resolver-contract.ts`: shared resolver types, constants, and default cache policy.
+- `src/kernel-resolver.ts`: the only favicon discovery and resolution component.
+- `src/monogram.ts`: kernel monogram generation.
+- `src/image-decode.ts`: frontend image-decode validation for pinned icons.
 - `src/style.css`: plugin UI styles.
 - `i18n/`: English and Chinese strings; keep both key sets aligned.
 - `scripts/render-assets.mjs`: generated image assets.
