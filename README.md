@@ -122,7 +122,10 @@ When reporting a problem, please include the Linkmark and SiYuan versions, opera
 
 ### Linkmark 0.1.1
 
+- Resolve cache-miss icons asynchronously in the kernel: the interface stays responsive and background discovery respects a per-site time budget instead of holding an open request.
 - Batch concurrent favicon-cache index commits into one durable JSON write and one client-state update.
+- Tighten URL-safety checks so unique-local (`fc00::/7`) and link-local (`fe80::/10`) IPv6 ranges are treated as private, and probe the parent domain of `www.*` sites when exact candidates fail.
+- Send the correct JSON content type on favicon-proxy requests.
 
 ### Linkmark 0.1.0
 
