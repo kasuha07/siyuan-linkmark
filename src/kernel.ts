@@ -169,6 +169,7 @@ class LinkmarkKernel {
       body: JSON.stringify({
         url,
         method: "GET",
+        redirect: false,
         timeout,
         contentType,
         headers: [{ "User-Agent": "Mozilla/5.0 (compatible; SiYuan Linkmark/0.1.0)" }, { Accept: responseEncoding === "text" ? "text/html,application/xhtml+xml,application/json" : "image/avif,image/webp,image/*,*/*" }],
@@ -178,9 +179,15 @@ class LinkmarkKernel {
       }),
     });
     if (!response.ok) return null;
-    const envelope = await response.json() as { code?: number; data?: { body?: string; contentType?: string; status?: number; url?: string } };
-    if (envelope.code !== 0 || !envelope.data?.body || typeof envelope.data.status !== "number") return null;
-    return { body: envelope.data.body, contentType: envelope.data.contentType, status: envelope.data.status, url: envelope.data.url };
+    const envelope = await response.json() as { code?: number; data?: { body?: string; contentType?: string; headers?: Record<string, string | string[]>; status?: number; url?: string } };
+    if (envelope.code !== 0 || typeof envelope.data?.body !== "string" || typeof envelope.data.status !== "number") return null;
+    return {
+      body: envelope.data.body,
+      contentType: envelope.data.contentType,
+      headers: envelope.data.headers,
+      status: envelope.data.status,
+      url: envelope.data.url,
+    };
   }
 
   private async handlePrivateRequest(request: kernel.IServerRequest): Promise<kernel.IHttpResponse> {

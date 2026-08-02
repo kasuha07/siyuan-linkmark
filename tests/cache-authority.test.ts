@@ -1172,6 +1172,93 @@ describe("ForwardProxyIconResolver", () => {
     ]);
   });
 
+  it("follows three public redirects, including a cross-origin CDN hop", async () => {
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding !== "base64") return null;
+      if (url === "https://example.com/favicon.ico") return {
+        body: "", status: 301, headers: { location: ["/redirect-1"] }, url,
+      };
+      if (url === "https://example.com/redirect-1") return {
+        body: "", status: 303, headers: { location: ["/redirect-2"] }, url,
+      };
+      if (url === "https://example.com/redirect-2") return {
+        body: "", status: 308, headers: { location: ["https://cdn.example.net/icon"] }, url,
+      };
+      if (url === "https://cdn.example.net/icon") return {
+        body: Buffer.from([1, 2, 3]).toString("base64"), contentType: "image/png", status: 200, url,
+      };
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).resolves.toMatchObject({ source: "root favicon.ico", contentType: "image/png" });
+    expect(forward.mock.calls.map(([url]) => url)).toEqual([
+      "https://example.com/favicon.ico",
+      "https://example.com/redirect-1",
+      "https://example.com/redirect-2",
+      "https://cdn.example.net/icon",
+    ]);
+  });
+
+  it.each([302, 307])("follows %i redirects", async (status) => {
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding !== "base64") return null;
+      if (url === "https://example.com/favicon.ico") return {
+        body: "", status, headers: { Location: ["/favicon.png"] }, url,
+      };
+      if (url === "https://example.com/favicon.png") return {
+        body: Buffer.from([1, 2, 3]).toString("base64"), contentType: "image/png", status: 200, url,
+      };
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).resolves.toMatchObject({ source: "root favicon.ico", contentType: "image/png" });
+  });
+
+  it("rejects authentication, unsafe, malformed, and over-limit redirect targets", async () => {
+    const cases = [
+      "/login",
+      "http://127.0.0.1/icon.png",
+      "http://[",
+      undefined,
+    ];
+    for (const location of cases) {
+      const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+        if (encoding !== "base64") return null;
+        if (url === "https://example.com/favicon.ico") return {
+          body: "", status: 302, ...(location === undefined ? {} : { headers: { Location: [location] } }), url,
+        };
+        return null;
+      });
+      const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+      await expect(resolver.resolve(scope())).rejects.toMatchObject({ category: "exhausted" });
+      expect(forward).toHaveBeenCalledTimes(4);
+    }
+
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding !== "base64") return null;
+      if (url === "https://example.com/favicon.ico" || /^https:\/\/cdn\.example\.net\/step-[1-3]$/.test(url)) {
+        const step = url === "https://example.com/favicon.ico" ? 1 : Number(url.at(-1)) + 1;
+        return { body: "", status: 302, headers: { Location: [`https://cdn.example.net/step-${step}`] }, url };
+      }
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).rejects.toMatchObject({ category: "exhausted" });
+    expect(forward.mock.calls.map(([url]) => url)).toEqual([
+      "https://example.com/favicon.ico",
+      "https://cdn.example.net/step-1",
+      "https://cdn.example.net/step-2",
+      "https://cdn.example.net/step-3",
+      "https://example.com/favicon.png",
+      "https://example.com/favicon.svg",
+      "https://example.com/apple-touch-icon.png",
+    ]);
+  });
+
   it("orders exact-domain candidates before parent-domain candidates", async () => {
     const downloads: string[] = [];
     const forward = vi.fn<ForwardProxy>(async (url, encoding) => {

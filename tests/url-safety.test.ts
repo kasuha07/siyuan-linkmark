@@ -85,9 +85,9 @@ describe("isAuthenticationRedirect", () => {
     expect(isAuthenticationRedirect(requested, "https://example.com/icon.png")).toBe(false);
   });
 
-  it("returns true for a cross-origin redirect", () => {
-    expect(isAuthenticationRedirect(requested, "https://cdn.other.com/icon.png")).toBe(true);
-    expect(isAuthenticationRedirect(requested, "https://example.com:8443/icon.png")).toBe(true);
+  it("allows cross-origin redirects that do not target authentication", () => {
+    expect(isAuthenticationRedirect(requested, "https://cdn.other.com/icon.png")).toBe(false);
+    expect(isAuthenticationRedirect(requested, "https://example.com:8443/icon.png")).toBe(false);
   });
 
   it("returns true for accounts, passport, and login hosts", () => {

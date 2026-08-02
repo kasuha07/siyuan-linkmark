@@ -1,7 +1,7 @@
 import { ResolutionError, type IconResolver, type LinkScope, type ResolvedIcon, type ResolutionTrigger } from "./cache-authority";
 import { parentDomainOf } from "./parent-domain";
 import type { CandidateAttemptInfo } from "./resolution-trace";
-import { isAuthenticationRedirect, isSafePublicTarget } from "./url-safety";
+import { isAuthenticationRedirect, isAuthenticationTarget, isSafePublicTarget } from "./url-safety";
 
 export type KernelResolverPolicy = {
   provider: string;
@@ -17,13 +17,14 @@ export type KernelResolverPolicy = {
   monogramOverrides: Record<string, { letter: string; primary: string; secondary: string; text: string; shape: "rounded" | "circle" | "square" }>;
 };
 
-export type ForwardResponse = { body: string; contentType?: string; status: number; url?: string };
+export type ForwardResponse = { body: string; contentType?: string; headers?: Record<string, string | string[]>; status: number; url?: string };
 export type ForwardProxy = (url: string, responseEncoding: "text" | "base64", contentType: string, timeout?: number) => Promise<ForwardResponse | null>;
 
 type Candidate = { url: string; source: string };
 const MAX_ICON_BYTES = 2 * 1024 * 1024;
 const MAX_RESOLUTION_CANDIDATE_ATTEMPTS = 4;
 const MAX_RESOLUTION_BUDGET_MS = 10_000;
+const MAX_REDIRECTS = 3;
 
 type DownloadOutcome =
   | { kind: "resolved"; resolved: ResolvedIcon }
@@ -133,7 +134,7 @@ export class ForwardProxyIconResolver implements IconResolver {
   }
 
   private async discoverPageIcons(target: URL, requestedTarget: URL, source: string, deadline: number): Promise<Candidate[]> {
-    const page = await this.forwardBounded(target.href, "text", "text/html", deadline);
+    const page = await this.forwardFollowingRedirects(target.href, "text", "text/html", deadline);
     if (!page || page.status < 200 || page.status >= 300 || !page.body || isAuthenticationRedirect(requestedTarget, page.url)) return [];
     const base = page.url ?? target.href;
     const candidates = [...page.body.matchAll(/<link\b[^>]*>/gi)].flatMap((match) => {
@@ -162,7 +163,7 @@ export class ForwardProxyIconResolver implements IconResolver {
 
   private async discoverManifestIcons(manifestUrl: URL, requestedTarget: URL, source: string, deadline: number): Promise<Candidate[]> {
     if (!isSafePublicTarget(manifestUrl)) return [];
-    const response = await this.forwardBounded(manifestUrl.href, "text", "application/manifest+json", deadline);
+    const response = await this.forwardFollowingRedirects(manifestUrl.href, "text", "application/manifest+json", deadline);
     if (!response || response.status < 200 || response.status >= 300 || !response.body || isAuthenticationRedirect(requestedTarget, response.url)) return [];
     try {
       const manifest = JSON.parse(response.body) as { icons?: Array<{ src?: string; purpose?: string }> };
@@ -189,7 +190,7 @@ export class ForwardProxyIconResolver implements IconResolver {
   ): Promise<DownloadOutcome> {
     let response: ForwardResponse | null;
     try {
-      response = await this.forwardBounded(candidate.url, "base64", "application/octet-stream", deadline);
+      response = await this.forwardFollowingRedirects(candidate.url, "base64", "application/octet-stream", deadline);
     } catch (error) {
       const outcome: DownloadOutcome =
         error instanceof ResolutionError && error.category === "timeout"
@@ -277,8 +278,36 @@ export class ForwardProxyIconResolver implements IconResolver {
     });
   }
 
+  private async forwardFollowingRedirects(url: string, responseEncoding: "text" | "base64", contentType: string, deadline: number) {
+    let current: URL;
+    try {
+      current = new URL(url);
+    } catch {
+      return null;
+    }
+    if (!isSafePublicTarget(current)) return null;
+
+    for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
+      const response = await this.forwardBounded(current.href, responseEncoding, contentType, deadline);
+      if (!response) return null;
+      if (!isRedirect(response.status)) return { ...response, url: current.href };
+      if (redirects === MAX_REDIRECTS) return null;
+
+      const location = responseHeader(response.headers, "location");
+      if (!location) return null;
+      try {
+        const next = new URL(location, current);
+        if (!isSafePublicTarget(next) || isAuthenticationTarget(next)) return null;
+        current = next;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
   private async download(candidate: Candidate): Promise<ResolvedIcon | null> {
-    const response = await this.forward(candidate.url, "base64", "application/octet-stream", 5000);
+    const response = await this.forwardFollowingRedirects(candidate.url, "base64", "application/octet-stream", Date.now() + 5000);
     if (!response || response.status < 200 || response.status >= 300 || !response.body || isAuthenticationRedirect(new URL(candidate.url), response.url)) return null;
     if (!isWellFormedBase64(response.body)) return null;
     const bytes = Buffer.from(response.body, "base64");
@@ -337,6 +366,16 @@ function providerCandidates(domain: string, policy: KernelResolverPolicy, source
     { url: `https://icons.duckduckgo.com/ip3/${encoded}.ico`, source: `${sourcePrefix}DuckDuckGo favicon` },
   );
   return result;
+}
+
+function isRedirect(status: number) {
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+function responseHeader(headers: ForwardResponse["headers"], name: string) {
+  if (!headers) return undefined;
+  const value = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1];
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function attributesFor(tag: string) {

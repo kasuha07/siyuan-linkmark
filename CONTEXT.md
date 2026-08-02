@@ -57,7 +57,7 @@ An HTTP(S) URL that the cache authority may retrieve through the forward proxy, 
 _Avoid_: safe URL, external URL
 
 **Authentication redirect**:
-A candidate retrieval that ends on an accounts, passport, or login host, on a login, sign-in, or auth path, or on a different origin; the cache authority treats it as a failed candidate rather than an icon.
+A candidate retrieval whose observed redirect hop targets an accounts, passport, or login host or a login, sign-in, or auth path. Cross-origin public HTTP(S) hops are allowed, while a hop with a missing, malformed, or non-public Location is invalid; the cache authority treats all of these failures as failed candidates rather than icons.
 _Avoid_: login page, redirect loop
 
 **Kernel plugin**:
