@@ -30,9 +30,9 @@ import {
   cachedIconForScope,
   isCacheEntryFresh,
   planScanDecision,
-  shareDomainFor,
   type CacheEntry,
 } from "./frontend-cache-state";
+import { shareDomainFor } from "./parent-domain";
 import {
   base64ToBlob,
   blobToBase64,

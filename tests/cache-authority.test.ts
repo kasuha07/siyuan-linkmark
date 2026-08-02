@@ -132,11 +132,6 @@ function expectSanitizedRecords(records: ResolutionTraceRecord[]) {
   }
 }
 
-type Subscriber<T> = {
-  events: T[];
-  waitFor(predicate: (events: T[]) => boolean, description: string): Promise<void>;
-};
-
 function subscribers() {
   const cacheEvents: Array<Record<string, CacheEntry>> = [];
   const waitFor = async (predicate: (events: Array<Record<string, CacheEntry>>) => boolean, description: string) => {
@@ -196,6 +191,61 @@ describe("KernelCacheAuthority", () => {
     const result = await authority.getOrQueue(scope());
     expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ source: "test resolver" }) });
     expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("refetches a stale cache entry", async () => {
+    let now = 1_000;
+    const resolve = vi.fn(async () => resolved());
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => now, {
+      cachePolicy: { cacheDays: 30 },
+    });
+    await authority.initialize();
+
+    await authority.getOrQueue(scope());
+    await vi.waitFor(() => expect(authority.snapshot()["example.com"]).toBeDefined());
+    now += 31 * 86400000;
+
+    const result = await authority.getOrQueue(scope());
+    await vi.waitFor(() => expect(authority.snapshot()["example.com"]?.fetchedAt).toBe(now));
+
+    expect(result).toEqual({ status: "queued" });
+    expect(resolve).toHaveBeenCalledTimes(2);
+  });
+
+  it("never expires entries while cacheDays is zero", async () => {
+    let now = 1_000;
+    const resolve = vi.fn(async () => resolved());
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => now, {
+      cachePolicy: { cacheDays: 0 },
+    });
+    await authority.initialize();
+
+    await authority.getOrQueue(scope());
+    await vi.waitFor(() => expect(authority.snapshot()["example.com"]).toBeDefined());
+    now += 3650 * 86400000;
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({
+      status: "ready",
+      entry: expect.objectContaining({ fetchedAt: 1_000 }),
+    });
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("generates unique private icon names under a frozen clock", async () => {
+    const resolve = vi.fn(async () => resolved());
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => 1_000);
+    await authority.initialize();
+
+    await authority.getOrQueue(scope("example.com"));
+    await authority.getOrQueue({ key: "example.com::doc", domain: "example.com", targetUrl: "https://example.com/doc" });
+    await vi.waitFor(() => expect(Object.keys(authority.snapshot())).toHaveLength(2));
+
+    const [first, second] = Object.values(authority.snapshot()).map((entry) => entry.iconId!);
+    expect(first).not.toBe(second);
+    for (const iconId of [first, second]) {
+      expect(iconId).toMatch(/^[A-Za-z0-9._-]+$/);
+      expect(privateIconIdFromPath(`/plugin/private/siyuan-linkmark/icon/${iconId}`, "siyuan-linkmark")).toBe(iconId);
+    }
   });
 
   it("commits a resolved icon when queueMicrotask is unavailable", async () => {
@@ -1072,7 +1122,7 @@ describe("ForwardProxyIconResolver", () => {
 
   it("does not probe parent-domain or provider candidates on the default fast path", async () => {
     const forward = vi.fn<ForwardProxy>(async () => null);
-    const policy = { ...resolverPolicy, providerPreset: "custom", resolverMode: "mainland" as const };
+    const policy = { ...resolverPolicy, providerPreset: "custom" as const, resolverMode: "mainland" as const };
     const resolver = new ForwardProxyIconResolver(forward, () => policy);
     const multiLabelScope: LinkScope = {
       key: "docs.example.co.uk",
@@ -1102,6 +1152,46 @@ describe("ForwardProxyIconResolver", () => {
 
     await expect(resolver.resolve({ ...scope(), discoverPage: true }, "automatic")).rejects.toMatchObject({ category: "exhausted" });
     expect(downloads).toHaveLength(4);
+  });
+
+  it("downloads candidates in priority order and stops at the first success", async () => {
+    const downloads: string[] = [];
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      downloads.push(url);
+      if (url === "https://example.com/favicon.png" && encoding === "base64") {
+        return { body: Buffer.from([1, 2, 3]).toString("base64"), contentType: "image/png", status: 200, url };
+      }
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).resolves.toMatchObject({ source: "root favicon.png", contentType: "image/png" });
+    expect(downloads).toEqual([
+      "https://example.com/favicon.ico",
+      "https://example.com/favicon.png",
+    ]);
+  });
+
+  it("orders exact-domain candidates before parent-domain candidates", async () => {
+    const downloads: string[] = [];
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding === "base64") downloads.push(url);
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+    const subScope: LinkScope = { key: "docs.example.com", domain: "docs.example.com", targetUrl: "https://docs.example.com/" };
+
+    await expect(resolver.candidates({ ...subScope, discoverPage: true }, true)).resolves.toEqual([]);
+    expect(downloads).toEqual([
+      "https://docs.example.com/favicon.ico",
+      "https://docs.example.com/favicon.png",
+      "https://docs.example.com/favicon.svg",
+      "https://docs.example.com/apple-touch-icon.png",
+      "https://example.com/favicon.ico",
+      "https://example.com/favicon.png",
+      "https://example.com/favicon.svg",
+      "https://example.com/apple-touch-icon.png",
+    ]);
   });
 
   it("stops resolution when the ten-second budget expires", async () => {

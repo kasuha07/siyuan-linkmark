@@ -12,15 +12,21 @@
     "assets": "node scripts/render-assets.mjs",
     "dev": "node scripts/dev.mjs",
     "build": "vite build && vite build --config vite.kernel.config.ts",
-    "check": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src tests --max-warnings=0",
+    "check": "npm run typecheck && npm run lint && npm run test",
     "check:package": "node scripts/assert-package.mjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.10.2",
+    "eslint": "^10.8.0",
     "sharp": "^0.35.3",
     "siyuan": "^1.0.3",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.65.0",
     "vite": "^6.0.5",
     "vite-plugin-static-copy": "^2.2.0",
     "vitest": "^3.2.7"

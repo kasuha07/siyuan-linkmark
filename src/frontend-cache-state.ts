@@ -1,4 +1,4 @@
-import { parentDomainOf } from "./icon-resolver";
+import { shareDomainFor } from "./parent-domain";
 import type { LinkScope } from "./url-scope";
 
 export type CacheEntry = {
@@ -34,13 +34,6 @@ export function cachedIconForScope(cache: Record<string, CacheEntry>, scope: Lin
   if (exact) return { cacheKey: scope.key, entry: exact };
   const domainFallback = scope.routeKey ? cache[scope.domain] : undefined;
   return domainFallback ? { cacheKey: scope.domain, entry: domainFallback } : null;
-}
-
-export function shareDomainFor(domain: string) {
-  if (domain.includes(":") || /^\d+(?:\.\d+){3}$/.test(domain)) return null;
-  const labels = domain.split(".");
-  if (labels.length < 2 || labels.some((label) => !label)) return null;
-  return parentDomainOf(domain) ?? domain;
 }
 
 export function isCacheEntryFresh(entry: CacheEntry, cacheDays: number, now = Date.now()) {

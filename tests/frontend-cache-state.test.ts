@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { shareDomainFor } from "../src/parent-domain";
 import {
   cachedIconForScope,
   FAILURE_COOLDOWN,
   isCacheEntryFresh,
   planScanDecision,
-  shareDomainFor,
   type CacheEntry,
 } from "../src/frontend-cache-state";
 

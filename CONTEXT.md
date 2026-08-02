@@ -52,6 +52,14 @@ _Avoid_: frontend cache, client cache
 A cache authority request that obtains a validated public icon candidate through SiYuan's server-side network proxy.
 _Avoid_: frontend cross-origin request, direct client download
 
+**Public target**:
+An HTTP(S) URL that the cache authority may retrieve through the forward proxy, excluding loopback, link-local, private, CGNAT, multicast, and reserved addresses.
+_Avoid_: safe URL, external URL
+
+**Authentication redirect**:
+A candidate retrieval that ends on an accounts, passport, or login host, on a login, sign-in, or auth path, or on a different origin; the cache authority treats it as a failed candidate rather than an icon.
+_Avoid_: login page, redirect loop
+
 **Kernel plugin**:
 A SiYuan v3.7-or-later `kernel.js` component that runs with the SiYuan kernel rather than an individual application window.
 _Avoid_: background tab, browser worker
@@ -75,6 +83,10 @@ _Avoid_: cache writer, cache owner
 **Pinned icon**:
 A user-selected cache entry that survives ordinary refresh and cache cleanup until the user restores automatic resolution or removes it.
 _Avoid_: permanent icon, protected file
+
+**Share-pin domain**:
+The registrable domain, after dropping the `www.` label, that an includeSubdomains pin applies to across the parent chain.
+_Avoid_: parent domain, effective domain
 
 **Cache entry**:
 The authoritative record associating a link scope with its resolved or pinned private icon and resolution metadata.
@@ -127,6 +139,10 @@ _Avoid_: ordinary favicon retrieval, automatic page visit
 **Link scope**:
 The cache identity for a link: a domain or a domain-plus-route key when the site needs route-specific icons.
 _Avoid_: bare domain, page URL
+
+**Parent-domain probing**:
+The resolution fallback that retrieves the registrable parent domain's candidates after the exact-domain candidates fail.
+_Avoid_: domain fallback, second request
 
 **Invalidated task**:
 A resolution task that began before a later workspace cache operation and is no longer allowed to commit its result.

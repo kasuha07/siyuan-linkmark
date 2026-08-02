@@ -55,7 +55,6 @@ const MAX_ICON_BYTES = 2 * 1024 * 1024;
 const MAX_CANDIDATE_ATTEMPTS = 16;
 const MAX_CANDIDATE_RESULTS = 8;
 const MAX_PARENT_CANDIDATE_RESULTS = 3;
-const COMMON_SECOND_LEVEL_DOMAINS = new Set(["ac", "co", "com", "edu", "gov", "net", "org"]);
 
 export async function resolveBestIcon(targetUrl: string, options: ResolverOptions): Promise<ResolvedIcon | null> {
   const target = new URL(targetUrl);
@@ -145,16 +144,6 @@ export async function discoverIconCandidates(targetUrl: string, options: Resolve
     ...exactResults.slice(0, MAX_CANDIDATE_RESULTS - parentResults.length),
     ...parentResults,
   ];
-}
-
-export function parentDomainOf(domain: string) {
-  const normalized = domain.toLowerCase().replace(/^\[|\]$/g, "");
-  if (normalized.includes(":") || /^\d+(?:\.\d+){3}$/.test(normalized)) return null;
-  const labels = normalized.split(".");
-  if (labels.length < 3 || labels.some((label) => !label)) return null;
-  const parent = labels.slice(1);
-  if (parent.length === 2 && parent[1].length === 2 && COMMON_SECOND_LEVEL_DOMAINS.has(parent[0])) return null;
-  return parent.join(".");
 }
 
 async function resolveCandidateGroup(candidates: Candidate[], seen: Set<string>) {
@@ -482,15 +471,6 @@ function dataUrlToBlob(url: string): Blob | null {
   }
 }
 
-function isSafePublicTarget(url: URL) {
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return false;
-  if (host === "::1" || host.startsWith("fc") || host.startsWith("fd") || host.startsWith("fe80:")) return false;
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (!ipv4) return true;
-  const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
-  return !(a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168));
-}
-import { isAuthenticationRedirect, type LinkScope } from "./url-scope";
+import { parentDomainOf } from "./parent-domain";
+import { isAuthenticationRedirect, isSafePublicTarget } from "./url-safety";
+import type { LinkScope } from "./url-scope";

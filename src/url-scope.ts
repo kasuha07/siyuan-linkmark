@@ -125,23 +125,6 @@ export function scopeMatchTarget(scope: LinkScope, protocol: "http" | "https") {
   return { exact: origin, boundaries: ["/", "?", "#", ":"] };
 }
 
-export function isAuthenticationRedirect(requested: URL, finalValue?: string) {
-  if (!finalValue) return false;
-  let finalUrl: URL;
-  try {
-    finalUrl = new URL(finalValue);
-  } catch {
-    return true;
-  }
-  if (finalUrl.href === requested.href) return false;
-  const host = finalUrl.hostname.toLowerCase();
-  const path = finalUrl.pathname.toLowerCase();
-  return host.startsWith("accounts.")
-    || host.startsWith("passport.")
-    || host.startsWith("login.")
-    || /(?:^|\/)(?:login|signin|sign-in|auth)(?:\/|$)/.test(path);
-}
-
 function route(routeKey: string, pathPrefix: string, iconUrl: string): RouteDefinition {
   return { routeKey, pathPrefix: `/${pathPrefix}`, iconUrl };
 }

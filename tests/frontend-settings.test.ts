@@ -7,7 +7,6 @@ import {
   mergeFrontendSettings,
   monogramSignature,
   pickCachePolicy,
-  type Settings,
 } from "../src/frontend-settings";
 
 describe("mergeFrontendSettings", () => {

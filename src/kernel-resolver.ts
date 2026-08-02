@@ -1,5 +1,7 @@
 import { ResolutionError, type IconResolver, type LinkScope, type ResolvedIcon, type ResolutionTrigger } from "./cache-authority";
+import { parentDomainOf } from "./parent-domain";
 import type { CandidateAttemptInfo } from "./resolution-trace";
+import { isAuthenticationRedirect, isSafePublicTarget } from "./url-safety";
 
 export type KernelResolverPolicy = {
   provider: string;
@@ -35,7 +37,7 @@ export class ForwardProxyIconResolver implements IconResolver {
 
   async resolve(
     scope: LinkScope,
-    trigger: ResolutionTrigger = "automatic",
+    _trigger: ResolutionTrigger = "automatic",
     onCandidate?: (info: CandidateAttemptInfo) => void,
   ): Promise<ResolvedIcon | null> {
     let target: URL;
@@ -337,65 +339,8 @@ function providerCandidates(domain: string, policy: KernelResolverPolicy, source
   return result;
 }
 
-function parentDomainOf(domain: string) {
-  const labels = domain.toLowerCase().replace(/^www\./, "").split(".");
-  if (labels.length < 3 || labels.some((label) => !label) || domain.includes(":")) return undefined;
-  const parent = labels.slice(1);
-  if (parent.length === 2 && parent[1].length === 2 && new Set(["ac", "co", "com", "edu", "gov", "net", "org"]).has(parent[0])) return undefined;
-  return parent.join(".");
-}
-
 function attributesFor(tag: string) {
   return Object.fromEntries([...tag.matchAll(/([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)].map((match) => [match[1].toLowerCase(), match[2] ?? match[3] ?? match[4] ?? ""]));
-}
-
-function isAuthenticationRedirect(requested: URL, received?: string) {
-  if (!received) return false;
-  try {
-    const finalUrl = new URL(received);
-    if (finalUrl.href === requested.href) return false;
-    const host = finalUrl.hostname.toLowerCase();
-    const path = finalUrl.pathname.toLowerCase();
-    return finalUrl.origin !== requested.origin
-      || host.startsWith("accounts.")
-      || host.startsWith("passport.")
-      || host.startsWith("login.")
-      || /(?:^|\/)(?:login|signin|sign-in|auth)(?:\/|$)/.test(path);
-  } catch {
-    return true;
-  }
-}
-
-function isSafePublicTarget(url: URL) {
-  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return false;
-  if (host === "::" || host === "::1" || /^(?:fc|fd|fe[89ab])(?:[0-9a-f])?:/i.test(host)) return false;
-  const mappedIpv4 = mappedIpv4Address(host);
-  if (mappedIpv4) return isPublicIpv4(mappedIpv4);
-  if (host.includes(":")) return true;
-  return isPublicIpv4(host);
-}
-
-function mappedIpv4Address(host: string) {
-  const value = host.match(/^::ffff:(.+)$/i)?.[1];
-  if (!value) return undefined;
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) return value;
-  const hexadecimal = value.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i);
-  if (!hexadecimal) return undefined;
-  const number = (parseInt(hexadecimal[1], 16) << 16) + parseInt(hexadecimal[2], 16);
-  return [(number >>> 24) & 255, (number >>> 16) & 255, (number >>> 8) & 255, number & 255].join(".");
-}
-
-function isPublicIpv4(host: string) {
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (!ipv4) return true;
-  const [a, b, c] = ipv4.slice(1).map(Number);
-  if ([a, b, c].some((part) => part > 255)) return false;
-  return !(a === 0 || a === 10 || a === 127 || (a === 100 && b >= 64 && b <= 127)
-    || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31)
-    || (a === 192 && (b === 0 || b === 168 || b === 2)) || (a === 198 && (b === 18 || b === 19))
-    || a >= 224);
 }
 
 function isImagePayload(bytes: Buffer, contentType?: string) {

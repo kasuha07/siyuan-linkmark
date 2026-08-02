@@ -15,5 +15,5 @@
       "siyuan": ["src/siyuan.d.ts"]
     }
   },
-  "include": ["src/**/*.ts", "vite.config.ts", "vite.kernel.config.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "vite.config.ts", "vite.kernel.config.ts"]
 }

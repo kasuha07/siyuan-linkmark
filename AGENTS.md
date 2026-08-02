@@ -13,8 +13,9 @@ npm run check
 npm run build
 ```
 
-`npm run check` must pass TypeScript validation. `npm run build` must produce the
-complete marketplace payload in `dist/`.
+`npm run check` must pass TypeScript validation, ESLint with zero warnings, and
+the vitest suite. `npm run build` must produce the complete marketplace payload
+in `dist/`.
 
 ## Stack and structure
 
