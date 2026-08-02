@@ -11,6 +11,7 @@ import {
   type ProviderPreset,
   type ResolverMode,
 } from "./icon-resolver";
+import { createIconRule } from "./icon-rule";
 import {
   addedLinkDiscoveryRegionFor,
   flushFrontendRenderWork,
@@ -1370,7 +1371,7 @@ export default class LinkmarkPlugin extends Plugin {
           void this.expireCachedDomain(cacheKey, cached);
           return;
         }
-        const rule = this.createRule(scope, cached.url);
+        const rule = createIconRule(scope, cached.url, this.settings.iconSize);
         if (this.iconRules.get(key) !== rule) {
           this.iconRules.set(key, rule);
           rulesChanged = true;
@@ -1541,7 +1542,7 @@ export default class LinkmarkPlugin extends Plugin {
         const fresh = this.settings.pauseAutomaticFetch || this.isCacheEntryFresh(entry);
         if (current && fresh) {
           const scope = scopeFromCacheKey(key, entry.domain, entry.pathPrefix);
-          this.iconRules.set(key, this.createRule(scope, entry.url));
+          this.iconRules.set(key, createIconRule(scope, entry.url, this.settings.iconSize));
         }
       }
     }
@@ -1550,46 +1551,10 @@ export default class LinkmarkPlugin extends Plugin {
 
   private setRule(scope: LinkScope, url: string) {
     if (!this.settings.enabled) return false;
-    const rule = this.createRule(scope, url);
+    const rule = createIconRule(scope, url, this.settings.iconSize);
     if (this.iconRules.get(scope.key) === rule) return false;
     this.iconRules.set(scope.key, rule);
     return true;
-  }
-
-  private createRule(scope: LinkScope, iconUrl: string) {
-    const selectors: string[] = [];
-    const elements = [
-      [".protyle-wysiwyg span[data-type~='a']", "data-href"],
-      [".protyle-wysiwyg span[data-type~='url']", "data-href"],
-      [".protyle-wysiwyg a", "href"],
-      [".b3-typography a", "href"],
-    ] as const;
-    for (const protocol of ["https", "http"] as const) {
-      const match = scopeMatchTarget(scope, protocol);
-      for (const [element, attribute] of elements) {
-        selectors.push(`${element}[${attribute}=${this.cssString(match.exact)}]::before`);
-        for (const boundary of match.boundaries) {
-          selectors.push(`${element}[${attribute}^=${this.cssString(match.exact + boundary)}]::before`);
-        }
-      }
-    }
-    const size = this.settings.iconSize;
-    return `${selectors.join(",\n")} {
-      content: "";
-      display: inline-block;
-      width: ${size}em;
-      height: ${size}em;
-      margin-right: 0.22em;
-      vertical-align: -0.12em;
-      background-image: url(${this.cssString(iconUrl)});
-      background-position: center;
-      background-size: contain;
-      background-repeat: no-repeat;
-    }`;
-  }
-
-  private cssString(value: string) {
-    return JSON.stringify(value).replace(/</g, "\\3c ");
   }
 
   private renderRules() {
