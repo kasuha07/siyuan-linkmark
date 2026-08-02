@@ -2,33 +2,18 @@ import type * as kernel from "siyuan/kernel";
 import {
   KernelCacheAuthority,
   type CacheEntry,
-  type CachePolicy,
   type CacheStorage,
   type LinkScope,
 } from "./cache-authority";
-import { ForwardProxyIconResolver, type KernelResolverPolicy } from "./kernel-resolver";
+import { ForwardProxyIconResolver } from "./kernel-resolver";
+import { pinCustomUrl } from "./pin-url";
 import { privateIconIdFromPath } from "./private-route";
+import { DEFAULT_CACHE_POLICY, RESOLVER_VERSION, type CachePolicyFields } from "./resolver-contract";
 import type { ResolutionTraceSink } from "./resolution-trace";
 
 const POLICY_FILE = "cache-policy-v2.json";
 
-type CachePolicyState = CachePolicy & KernelResolverPolicy;
-
-const defaultPolicy: CachePolicyState = {
-  cacheDays: 30,
-  pauseAutomaticFetch: false,
-  provider: "https://example.com/favicon/{domain}",
-  providerPreset: "auto",
-  resolverMode: "mainland",
-  fallbackMode: "monogram",
-  allowFullPageDiscovery: false,
-  monogramColorMode: "domain",
-  monogramPrimary: "#4F7CFF",
-  monogramSecondary: "#745CFF",
-  monogramText: "#FFFFFF",
-  monogramShape: "rounded",
-  monogramOverrides: {},
-};
+const defaultPolicy: CachePolicyFields = { ...DEFAULT_CACHE_POLICY };
 
 class KernelStorage implements CacheStorage {
   async get(path: string) {
@@ -53,7 +38,7 @@ class KernelStorage implements CacheStorage {
 }
 
 class LinkmarkKernel {
-  private policy: CachePolicyState = { ...defaultPolicy };
+  private policy: CachePolicyFields = { ...defaultPolicy };
   private authority?: KernelCacheAuthority;
   private resolver?: ForwardProxyIconResolver;
   private traceEnabled = false;
@@ -79,14 +64,14 @@ class LinkmarkKernel {
       this.resolver = new ForwardProxyIconResolver(this.forward.bind(this), () => this.policy);
       this.authority = new KernelCacheAuthority(new KernelStorage(), this.resolver, () => Date.now(), {
         cachePolicy: this.policy,
-        resolverVersion: 6,
+        resolverVersion: RESOLVER_VERSION,
         privateIconUrl: (iconId) => `/plugin/private/${siyuan.plugin.name}/icon/${encodeURIComponent(iconId)}`,
-        onStateChange: async (cache) => siyuan.rpc.broadcast("cache.changed", { cache }),
+        onCacheChanged: async (event) => siyuan.rpc.broadcast("cache.changed", event),
         onResolutionFailure: async (scope, category) => siyuan.rpc.broadcast("cache.resolution-failed", { key: scope.key, category }),
         traceSink: this.traceSink,
       });
       await this.authority.initialize();
-      await siyuan.rpc.bind("cache.snapshot", async () => this.requireAuthority().snapshot(), "Returns the authoritative favicon cache.");
+      await siyuan.rpc.bind("cache.snapshot", async () => this.requireAuthority().snapshot(), "Returns the authoritative favicon cache with its revision and epoch.");
       await siyuan.rpc.bind("cache.get-or-queue", async (scope: LinkScope, force = false, automatic = false) => {
         if (!this.authority) return { status: "unavailable" as const };
         return this.requireAuthority().getOrQueue(normalizeScope(scope), force, automatic);
@@ -95,7 +80,7 @@ class LinkmarkKernel {
       await siyuan.rpc.bind("cache.clear", async () => this.requireAuthority().clear(), "Clears non-pinned cache entries workspace-wide.");
       await siyuan.rpc.bind("cache.clear-generated", async () => this.requireAuthority().clearGenerated(), "Clears generated monograms after policy changes.");
       await siyuan.rpc.bind("cache.policy.get", async () => this.policy, "Returns workspace cache policy.");
-      await siyuan.rpc.bind("cache.policy.set", async (policy: Partial<CachePolicyState>) => this.setPolicy(policy), "Updates workspace cache policy.");
+      await siyuan.rpc.bind("cache.policy.set", async (policy: Partial<CachePolicyFields>) => this.setPolicy(policy), "Updates workspace cache policy.");
       await siyuan.rpc.bind("cache.pin", async (scope: LinkScope, entry: CacheEntry, contentType: string, base64: string, replaceKey?: string) => {
         const bytes = Buffer.from(base64, "base64");
         return this.requireAuthority().putPinned(normalizeScope(scope), entry, contentType, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), replaceKey);
@@ -105,20 +90,12 @@ class LinkmarkKernel {
         return candidates.map((candidate) => ({ ...candidate, base64: Buffer.from(candidate.bytes).toString("base64") }));
       }, "Returns server-downloaded icon candidates for a scope.");
       await siyuan.rpc.bind("cache.pin-url", async (scope: LinkScope, iconUrl: string, includeSubdomains = false, replaceKey?: string) => {
-        const normalized = normalizeScope(scope);
-        const resolved = await this.requireResolver().resolveUrl(iconUrl);
-        if (!resolved) throw new Error("Custom icon URL did not return a usable image");
-        return this.requireAuthority().putPinned(normalized, {
-          url: "",
-          fetchedAt: Date.now(),
-          source: "custom URL",
-          targetUrl: normalized.targetUrl,
-          domain: normalized.domain,
-          routeKey: normalized.routeKey,
-          pathPrefix: normalized.pathPrefix,
-          pinned: true,
-          includeSubdomains,
-        }, resolved.contentType, resolved.bytes, replaceKey);
+        const resolver = this.requireResolver();
+        const authority = this.requireAuthority();
+        return pinCustomUrl({
+          resolveUrl: (url) => resolver.resolveUrl(url),
+          putPinned: (pinScope, entry, contentType, bytes, pinReplaceKey) => authority.putPinned(pinScope, entry, contentType, bytes, pinReplaceKey),
+        }, normalizeScope(scope), iconUrl, includeSubdomains, replaceKey);
       }, "Downloads and pins a custom icon URL workspace-wide.");
       if (import.meta.env.MODE === "development") {
         await siyuan.rpc.bind("cache.trace.set", async (enabled: boolean) => {
@@ -143,7 +120,7 @@ class LinkmarkKernel {
     }
   }
 
-  private async setPolicy(policy: Partial<CachePolicyState>) {
+  private async setPolicy(policy: Partial<CachePolicyFields>) {
     this.policy = { ...this.policy, ...sanitizePolicy(policy) };
     this.requireAuthority().setPolicy(this.policy);
     await siyuan.storage.put(POLICY_FILE, JSON.stringify(this.policy));
@@ -156,7 +133,7 @@ class LinkmarkKernel {
     const stored = await storage.get(POLICY_FILE);
     if (!stored) return { ...defaultPolicy };
     try {
-      return { ...defaultPolicy, ...sanitizePolicy(JSON.parse(stored) as Partial<CachePolicyState>) };
+      return { ...defaultPolicy, ...sanitizePolicy(JSON.parse(stored) as Partial<CachePolicyFields>) };
     } catch {
       return { ...defaultPolicy };
     }
@@ -169,6 +146,7 @@ class LinkmarkKernel {
       body: JSON.stringify({
         url,
         method: "GET",
+        redirect: false,
         timeout,
         contentType,
         headers: [{ "User-Agent": "Mozilla/5.0 (compatible; SiYuan Linkmark/0.1.0)" }, { Accept: responseEncoding === "text" ? "text/html,application/xhtml+xml,application/json" : "image/avif,image/webp,image/*,*/*" }],
@@ -178,9 +156,15 @@ class LinkmarkKernel {
       }),
     });
     if (!response.ok) return null;
-    const envelope = await response.json() as { code?: number; data?: { body?: string; contentType?: string; status?: number; url?: string } };
-    if (envelope.code !== 0 || !envelope.data?.body || typeof envelope.data.status !== "number") return null;
-    return { body: envelope.data.body, contentType: envelope.data.contentType, status: envelope.data.status, url: envelope.data.url };
+    const envelope = await response.json() as { code?: number; data?: { body?: string; contentType?: string; headers?: Record<string, string | string[]>; status?: number; url?: string } };
+    if (envelope.code !== 0 || typeof envelope.data?.body !== "string" || typeof envelope.data.status !== "number") return null;
+    return {
+      body: envelope.data.body,
+      contentType: envelope.data.contentType,
+      headers: envelope.data.headers,
+      status: envelope.data.status,
+      url: envelope.data.url,
+    };
   }
 
   private async handlePrivateRequest(request: kernel.IServerRequest): Promise<kernel.IHttpResponse> {
@@ -217,9 +201,9 @@ function normalizeScope(scope: LinkScope): LinkScope {
   return { ...scope, targetUrl: new URL(path, target.origin).href };
 }
 
-function sanitizePolicy(policy: Partial<CachePolicyState>) {
-  const result: Partial<CachePolicyState> = {};
-  for (const key of Object.keys(defaultPolicy) as Array<keyof CachePolicyState>) {
+function sanitizePolicy(policy: Partial<CachePolicyFields>) {
+  const result: Partial<CachePolicyFields> = {};
+  for (const key of Object.keys(defaultPolicy) as Array<keyof CachePolicyFields>) {
     if (policy[key] !== undefined) (result as Record<string, unknown>)[key] = policy[key];
   }
   return result;

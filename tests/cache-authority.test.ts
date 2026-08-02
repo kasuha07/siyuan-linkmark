@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import {
   KernelCacheAuthority,
   ResolutionError,
+  type CacheChangeEvent,
   type CacheEntry,
   type CacheStorage,
   type LinkScope,
 } from "../src/cache-authority";
 import { privateIconIdFromPath } from "../src/private-route";
+import { INVALID_SHARE_DOMAIN } from "../src/parent-domain";
 import { fetchOutcomeFor, outcomeForCacheRequest } from "../src/refresh-outcome";
 import { ForwardProxyIconResolver, type ForwardProxy, type KernelResolverPolicy } from "../src/kernel-resolver";
 import type { ResolutionTraceRecord, ResolutionTraceSink } from "../src/resolution-trace";
@@ -80,6 +82,20 @@ class FailingCacheIndexStorage extends CountingCacheIndexStorage {
   }
 }
 
+class RecordingOrderStorage extends MemoryStorage {
+  readonly operations: string[] = [];
+
+  override async put(path: string, content: string) {
+    this.operations.push(`write ${path}`);
+    await super.put(path, content);
+  }
+
+  override async remove(path: string) {
+    this.operations.push(`remove ${path}`);
+    await super.remove(path);
+  }
+}
+
 const scope = (key = "example.com"): LinkScope => ({
   key,
   domain: "example.com",
@@ -109,6 +125,10 @@ const resolved = (source = "test resolver"): { bytes: ArrayBuffer; contentType: 
 
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+function snapshotCache(authority: KernelCacheAuthority): Record<string, CacheEntry> {
+  return authority.snapshot().cache;
+}
+
 class RecordingTrace {
   readonly records: ResolutionTraceRecord[] = [];
   readonly sink: ResolutionTraceSink = (record) => { this.records.push(record); };
@@ -133,8 +153,8 @@ function expectSanitizedRecords(records: ResolutionTraceRecord[]) {
 }
 
 function subscribers() {
-  const cacheEvents: Array<Record<string, CacheEntry>> = [];
-  const waitFor = async (predicate: (events: Array<Record<string, CacheEntry>>) => boolean, description: string) => {
+  const cacheEvents: CacheChangeEvent[] = [];
+  const waitFor = async (predicate: (events: CacheChangeEvent[]) => boolean, description: string) => {
     await vi.waitFor(() => {
       if (!predicate(cacheEvents)) throw new Error(`timed out waiting for ${description}`);
     }, { timeout: 2000 });
@@ -180,7 +200,7 @@ describe("KernelCacheAuthority", () => {
     const watched = subscribers();
     const resolve = vi.fn(async () => resolved());
     const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => 100, {
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
 
@@ -202,11 +222,11 @@ describe("KernelCacheAuthority", () => {
     await authority.initialize();
 
     await authority.getOrQueue(scope());
-    await vi.waitFor(() => expect(authority.snapshot()["example.com"]).toBeDefined());
+    await vi.waitFor(() => expect(snapshotCache(authority)["example.com"]).toBeDefined());
     now += 31 * 86400000;
 
     const result = await authority.getOrQueue(scope());
-    await vi.waitFor(() => expect(authority.snapshot()["example.com"]?.fetchedAt).toBe(now));
+    await vi.waitFor(() => expect(snapshotCache(authority)["example.com"]?.fetchedAt).toBe(now));
 
     expect(result).toEqual({ status: "queued" });
     expect(resolve).toHaveBeenCalledTimes(2);
@@ -221,7 +241,7 @@ describe("KernelCacheAuthority", () => {
     await authority.initialize();
 
     await authority.getOrQueue(scope());
-    await vi.waitFor(() => expect(authority.snapshot()["example.com"]).toBeDefined());
+    await vi.waitFor(() => expect(snapshotCache(authority)["example.com"]).toBeDefined());
     now += 3650 * 86400000;
 
     await expect(authority.getOrQueue(scope())).resolves.toEqual({
@@ -238,9 +258,9 @@ describe("KernelCacheAuthority", () => {
 
     await authority.getOrQueue(scope("example.com"));
     await authority.getOrQueue({ key: "example.com::doc", domain: "example.com", targetUrl: "https://example.com/doc" });
-    await vi.waitFor(() => expect(Object.keys(authority.snapshot())).toHaveLength(2));
+    await vi.waitFor(() => expect(Object.keys(snapshotCache(authority))).toHaveLength(2));
 
-    const [first, second] = Object.values(authority.snapshot()).map((entry) => entry.iconId!);
+    const [first, second] = Object.values(snapshotCache(authority)).map((entry) => entry.iconId!);
     expect(first).not.toBe(second);
     for (const iconId of [first, second]) {
       expect(iconId).toMatch(/^[A-Za-z0-9._-]+$/);
@@ -253,12 +273,12 @@ describe("KernelCacheAuthority", () => {
     vi.stubGlobal("queueMicrotask", undefined);
     try {
       const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => resolved() }, () => 100, {
-        onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+        onCacheChanged: (event) => { watched.cacheEvents.push(event); },
       });
       await authority.initialize();
 
       await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
-      await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+      await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -274,16 +294,16 @@ describe("KernelCacheAuthority", () => {
     const result = await authority.getOrQueue(scope());
 
     expect(result).toEqual({ status: "queued" });
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
   });
 
   it("returns queued while the cache-index persistence of an earlier task is still in flight", async () => {
     const storage = new BlockingCacheIndexStorage();
     const watched = subscribers();
     const authority = new KernelCacheAuthority(storage, { resolve: async () => resolved() }, () => 100, {
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
     const indexWriteStarted = storage.blockNextCacheIndexWrite();
@@ -293,8 +313,8 @@ describe("KernelCacheAuthority", () => {
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     storage.releaseCacheIndexWrite();
 
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
-    expect(authority.snapshot()["example.com"]).toMatchObject({ source: "test resolver" });
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
+    expect(snapshotCache(authority)["example.com"]).toMatchObject({ source: "test resolver" });
   });
 
   it("coalesces concurrent requests for the same Link scope", async () => {
@@ -307,7 +327,7 @@ describe("KernelCacheAuthority", () => {
         return await new Promise((resolve) => { resolveDownload = resolve; });
       },
     }, () => 100, {
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
 
@@ -316,9 +336,9 @@ describe("KernelCacheAuthority", () => {
     await vi.waitFor(() => expect(calls).toBe(1));
 
     resolveDownload?.(resolved());
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
     expect(calls).toBe(1);
-    expect(watched.cacheEvents[0]["example.com"]).toMatchObject({
+    expect(watched.cacheEvents[0].upserts["example.com"]).toMatchObject({
       domain: "example.com",
       source: "test resolver",
       url: expect.stringContaining("/api/plugin/private/siyuan-linkmark/icon/"),
@@ -442,24 +462,24 @@ describe("KernelCacheAuthority", () => {
     await vi.waitFor(() => expect(resolve).toHaveBeenCalled());
   });
 
-  it("broadcasts isolated cache snapshots without structuredClone in the kernel runtime", async () => {
-    const received: Record<string, CacheEntry>[] = [];
+  it("broadcasts isolated upsert entry copies without structuredClone in the kernel runtime", async () => {
+    const received: CacheChangeEvent[] = [];
     vi.stubGlobal("structuredClone", undefined);
     try {
       const authority = new KernelCacheAuthority(new MemoryStorage(), {
         resolve: async () => resolved(),
       }, () => 100, {
-        onStateChange: (cache) => { received.push(cache); },
+        onCacheChanged: (event) => { received.push(event); },
       });
       await authority.initialize();
 
       await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
       await vi.waitFor(() => expect(received).toHaveLength(1));
-      received[0]["example.com"].source = "subscriber mutation";
-      const snapshot = authority.snapshot();
+      received[0].upserts["example.com"].source = "subscriber mutation";
+      const snapshot = snapshotCache(authority);
       snapshot["example.com"].source = "caller mutation";
 
-      expect(authority.snapshot()["example.com"]).toMatchObject({ source: "test resolver" });
+      expect(snapshotCache(authority)["example.com"]).toMatchObject({ source: "test resolver" });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -479,7 +499,7 @@ describe("KernelCacheAuthority", () => {
     resolveDownload?.(resolved());
 
     await settle();
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     expect(storage.files.has("icons/example.com.base64")).toBe(false);
   });
 
@@ -501,7 +521,7 @@ describe("KernelCacheAuthority", () => {
 
     await settle();
     expect(failures).toEqual([]);
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
   });
 
   it("starts a replacement task after an invalidated scope finishes", async () => {
@@ -515,7 +535,7 @@ describe("KernelCacheAuthority", () => {
         return resolved(`resolver ${call}`);
       },
     }, () => 100, {
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
 
@@ -528,15 +548,15 @@ describe("KernelCacheAuthority", () => {
     await vi.waitFor(() => expect(calls).toBe(2));
     releases[1]?.();
 
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the replacement commit broadcast");
-    expect(authority.snapshot()).toEqual({
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the replacement commit broadcast");
+    expect(snapshotCache(authority)).toEqual({
       "example.com": expect.objectContaining({ source: "resolver 2" }),
     });
   });
 
-  it("persists concurrent resolved scopes in one cache-index batch and broadcasts once", async () => {
+  it("persists concurrent resolved scopes in one cache-index batch and broadcasts one change event", async () => {
     const storage = new CountingCacheIndexStorage();
-    const received: Record<string, CacheEntry>[] = [];
+    const received: CacheChangeEvent[] = [];
     const releaseDownloads: Array<() => void> = [];
     const authority = new KernelCacheAuthority(storage, {
       resolve: async (requested) => {
@@ -544,7 +564,7 @@ describe("KernelCacheAuthority", () => {
         return resolved(requested.key);
       },
     }, () => 100, {
-      onStateChange: (cache) => { received.push(cache); },
+      onCacheChanged: (event) => { received.push(event); },
     });
     await authority.initialize();
 
@@ -559,24 +579,74 @@ describe("KernelCacheAuthority", () => {
     expect(storage.cacheIndexWrites).toBe(1);
     expect(received).toEqual([
       {
-        "first.example.com": expect.objectContaining({ source: "first.example.com" }),
-        "second.example.com": expect.objectContaining({ source: "second.example.com" }),
+        epoch: expect.any(String),
+        revision: 1,
+        upserts: {
+          "first.example.com": expect.objectContaining({ source: "first.example.com" }),
+          "second.example.com": expect.objectContaining({ source: "second.example.com" }),
+        },
+        removed: [],
       },
     ]);
-    expect(authority.snapshot()).toEqual({
+    expect(snapshotCache(authority)).toEqual({
       "first.example.com": expect.objectContaining({ source: "first.example.com" }),
       "second.example.com": expect.objectContaining({ source: "second.example.com" }),
     });
   });
 
+  it("returns the cache with its revision and epoch from the snapshot", async () => {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => resolved(),
+    }, () => 100);
+    await authority.initialize();
+
+    expect(authority.snapshot()).toEqual({
+      cache: {},
+      revision: 0,
+      epoch: expect.any(String),
+    });
+  });
+
+  it("tags every change event with the epoch and advances the snapshot revision", async () => {
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => resolved(),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope("first.example.com"))).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    await authority.remove("first.example.com");
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+
+    expect(received[0].epoch).toBe(received[1].epoch);
+    expect(received.map((event) => event.revision)).toEqual([1, 2]);
+    expect(authority.snapshot()).toEqual({
+      cache: {},
+      revision: 2,
+      epoch: received[0].epoch,
+    });
+  });
+
+  it("uses a fresh epoch for a new authority instance", async () => {
+    const first = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => resolved() }, () => 100);
+    const second = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => resolved() }, () => 100);
+    await first.initialize();
+    await second.initialize();
+
+    expect(first.snapshot().epoch).not.toBe(second.snapshot().epoch);
+  });
+
   it("does not publish any resolved scope when its cache-index batch fails", async () => {
     const storage = new FailingCacheIndexStorage();
-    const received: Record<string, CacheEntry>[] = [];
+    const received: CacheChangeEvent[] = [];
     const failures: Array<{ key: string; category: string }> = [];
     const authority = new KernelCacheAuthority(storage, {
       resolve: async (requested) => resolved(requested.key),
     }, () => 100, {
-      onStateChange: (cache) => { received.push(cache); },
+      onCacheChanged: (event) => { received.push(event); },
       onResolutionFailure: (failedScope, category) => { failures.push({ key: failedScope.key, category }); },
     });
     await authority.initialize();
@@ -590,7 +660,7 @@ describe("KernelCacheAuthority", () => {
     expect(storage.cacheIndexWrites).toBe(1);
     expect(received).toEqual([]);
     expect(failures).toEqual([]);
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     expect([...storage.files.keys()].filter((path) => path.startsWith("icons/"))).toEqual([]);
   });
 
@@ -609,7 +679,7 @@ describe("KernelCacheAuthority", () => {
 
     await removal;
     await settle();
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     expect(storage.files.has("icons/example.com.base64")).toBe(false);
   });
 
@@ -627,16 +697,16 @@ describe("KernelCacheAuthority", () => {
     resolveDownload?.(resolved());
 
     await settle();
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
   });
 
   it("retains pinned entries when clearing the workspace cache", async () => {
     const storage = new MemoryStorage();
-    const received: Record<string, CacheEntry>[] = [];
+    const received: CacheChangeEvent[] = [];
     const authority = new KernelCacheAuthority(storage, {
       resolve: async () => resolved(),
     }, () => 100, {
-      onStateChange: (cache) => { received.push(cache); },
+      onCacheChanged: (event) => { received.push(event); },
     });
     await authority.initialize();
     await authority.putPinned(scope("pinned.example.com"), entry({ domain: "pinned.example.com", pinned: true }), "image/png", new Uint8Array([9]).buffer);
@@ -645,7 +715,7 @@ describe("KernelCacheAuthority", () => {
 
     await authority.clear();
 
-    expect(authority.snapshot()).toEqual({
+    expect(snapshotCache(authority)).toEqual({
       "pinned.example.com": expect.objectContaining({ pinned: true }),
     });
   });
@@ -660,7 +730,7 @@ describe("KernelCacheAuthority", () => {
 
     await expect(authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([2]).buffer)).rejects.toThrow("simulated storage failure");
 
-    expect(authority.snapshot()["example.com"]).toMatchObject({ iconId: first.iconId, pinned: true });
+    expect(snapshotCache(authority)["example.com"]).toMatchObject({ iconId: first.iconId, pinned: true });
     await expect(authority.icon(first.iconId!)).resolves.toMatchObject({ contentType: "image/png" });
     const result = await authority.getOrQueue(scope());
     expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: first.iconId, pinned: true }) });
@@ -713,7 +783,7 @@ describe("KernelCacheAuthority", () => {
 
     await authority.initialize();
 
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     expect(storage.files.has("favicon-cache-v2.json")).toBe(false);
     expect(storage.files.get("favicon-cache.json")).toContain("pinned.example.com");
   });
@@ -721,8 +791,8 @@ describe("KernelCacheAuthority", () => {
   it("loads pinned icons already stored in the Linkmark cache", async () => {
     const storage = new MemoryStorage();
     storage.files.set("favicon-cache-v2.json", JSON.stringify({
-      "pinned.example.com": entry({
-        domain: "pinned.example.com",
+      "pinned.example.dev": entry({
+        domain: "pinned.example.dev",
         pinned: true,
         url: "/plugin/private/siyuan-linkmark/icon/pinned-1",
         iconId: "pinned-1",
@@ -734,7 +804,7 @@ describe("KernelCacheAuthority", () => {
 
     await authority.initialize();
 
-    expect(authority.snapshot()["pinned.example.com"]).toMatchObject({
+    expect(snapshotCache(authority)["pinned.example.dev"]).toMatchObject({
       pinned: true,
       url: "/plugin/private/siyuan-linkmark/icon/pinned-1",
       iconId: "pinned-1",
@@ -743,11 +813,11 @@ describe("KernelCacheAuthority", () => {
   });
 
   it("keeps distinct route Link scopes independent", async () => {
-    const received: Record<string, CacheEntry>[] = [];
+    const received: CacheChangeEvent[] = [];
     const authority = new KernelCacheAuthority(new MemoryStorage(), {
       resolve: async (requested) => resolved(requested.key),
     }, () => 100, {
-      onStateChange: (cache) => { received.push(cache); },
+      onCacheChanged: (event) => { received.push(event); },
     });
     await authority.initialize();
 
@@ -757,7 +827,7 @@ describe("KernelCacheAuthority", () => {
     ]);
 
     await vi.waitFor(() => expect(received).toHaveLength(1));
-    expect(authority.snapshot()).toEqual({
+    expect(snapshotCache(authority)).toEqual({
       "docs.example.com::doc": expect.objectContaining({ source: "docs.example.com::doc" }),
       "docs.example.com::sheet": expect.objectContaining({ source: "docs.example.com::sheet" }),
     });
@@ -765,22 +835,22 @@ describe("KernelCacheAuthority", () => {
 
   it("publishes a refreshed icon under a new private payload before cleaning the old payload", async () => {
     const storage = new MemoryStorage();
-    const received: Record<string, CacheEntry>[] = [];
+    const received: CacheChangeEvent[] = [];
     let byte = 1;
     const authority = new KernelCacheAuthority(storage, {
       resolve: async () => resolved(`test resolver ${byte++}`),
     }, () => 100, {
-      onStateChange: (cache) => { received.push(cache); },
+      onCacheChanged: (event) => { received.push(event); },
     });
     await authority.initialize();
 
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(received).toHaveLength(1));
-    const first = received[0]["example.com"];
+    const first = received[0].upserts["example.com"];
 
     await expect(authority.getOrQueue(scope(), true)).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(received).toHaveLength(2));
-    const second = received[1]["example.com"];
+    const second = received[1].upserts["example.com"];
 
     expect(first.iconId).not.toBe(second.iconId);
     await expect(authority.icon(first.iconId!)).resolves.toBeUndefined();
@@ -800,7 +870,7 @@ describe("KernelCacheAuthority", () => {
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(failures).toHaveLength(1));
     expect(failures[0]).toEqual({ key: "example.com", category: "network" });
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     expect([...storage.files.keys()].filter((path) => path.startsWith("icons/"))).toEqual([]);
   });
 
@@ -816,7 +886,7 @@ describe("KernelCacheAuthority", () => {
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(failures).toHaveLength(1));
     expect(failures[0]).toEqual({ key: "example.com", category: "exhausted" });
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
   });
 
   it("traces a cache miss from acceptance through resolve, persist, and commit", async () => {
@@ -828,7 +898,7 @@ describe("KernelCacheAuthority", () => {
       resolve: async () => await new Promise((resolve) => { resolveDownload = resolve; }),
     }, () => now, {
       traceSink: trace.sink,
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
 
@@ -844,7 +914,7 @@ describe("KernelCacheAuthority", () => {
 
     now = 160;
     resolveDownload?.(resolved());
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
 
     expect(trace.events()).toEqual(["accepted", "started", "resolved", "persisted", "committed"]);
     expect(new Set(trace.records.map((record) => record.task)).size).toBe(1);
@@ -1074,7 +1144,7 @@ describe("KernelCacheAuthority", () => {
     const watched = subscribers();
     const authority = new KernelCacheAuthority(storage, { resolve: async () => resolved() }, () => 100, {
       traceSink: trace.sink,
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
     });
     await authority.initialize();
     const indexWriteStarted = storage.blockNextCacheIndexWrite();
@@ -1085,7 +1155,7 @@ describe("KernelCacheAuthority", () => {
     expect(trace.events()).toEqual(["accepted", "started", "resolved"]);
 
     storage.releaseCacheIndexWrite();
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
     await settle();
     expect(trace.events()).toEqual(["accepted", "started", "resolved", "persisted", "committed"]);
     expectSanitizedRecords(trace.records);
@@ -1096,17 +1166,335 @@ describe("KernelCacheAuthority", () => {
     const failures: Array<{ key: string; category: string }> = [];
     const resolve = vi.fn(async () => resolved());
     const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => 100, {
-      onStateChange: (cache) => { watched.cacheEvents.push(cache); },
+      onCacheChanged: (event) => { watched.cacheEvents.push(event); },
       onResolutionFailure: (failedScope, category) => { failures.push({ key: failedScope.key, category }); },
     });
     await authority.initialize();
 
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
-    await watched.waitForCache((events) => Boolean(events[0]?.["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
 
     expect(resolve).toHaveBeenCalledTimes(1);
-    expect(authority.snapshot()).toEqual({ "example.com": expect.objectContaining({ source: "test resolver" }) });
+    expect(snapshotCache(authority)).toEqual({ "example.com": expect.objectContaining({ source: "test resolver" }) });
     expect(failures).toEqual([]);
+  });
+
+  it("increments the cache revision exactly once per committed event", async () => {
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async (requested) => resolved(requested.key),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+
+    await authority.putPinned(scope("first.example.com"), entry({ domain: "first.example.com", pinned: true }), "image/png", new Uint8Array([1]).buffer);
+    await authority.putPinned(scope("second.example.com"), entry({ domain: "second.example.com", pinned: true }), "image/png", new Uint8Array([2]).buffer);
+    await expect(authority.getOrQueue(scope("third.example.com"))).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(snapshotCache(authority)["third.example.com"]).toBeDefined());
+    await authority.remove("third.example.com");
+
+    expect(received.map((event) => event.revision)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("reports removed keys for remove, clear, clear-generated, and pin-replace operations", async () => {
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async (requested) => resolved(requested.key),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+    let nextEvent = 0;
+
+    await authority.putPinned(scope("generated.example.com"), entry({ domain: "generated.example.com", pinned: true, source: "generated monogram" }), "image/svg+xml", new Uint8Array([1]).buffer);
+    await authority.putPinned(scope("pinned.example.com"), entry({ domain: "pinned.example.com", pinned: true }), "image/png", new Uint8Array([2]).buffer);
+    await expect(authority.getOrQueue(scope("plain.example.com"))).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(snapshotCache(authority)["plain.example.com"]).toBeDefined());
+    nextEvent = received.length;
+
+    await authority.remove("plain.example.com");
+    await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), upserts: {}, removed: ["plain.example.com"] });
+    nextEvent = received.length;
+
+    await authority.clearGenerated();
+    await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), upserts: {}, removed: ["generated.example.com"] });
+    nextEvent = received.length;
+
+    await expect(authority.getOrQueue(scope("plain-2.example.com"))).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(snapshotCache(authority)["plain-2.example.com"]).toBeDefined());
+    nextEvent = received.length;
+
+    await authority.clear();
+    await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), upserts: {}, removed: ["plain-2.example.com"] });
+    nextEvent = received.length;
+
+    await authority.putPinned(scope("second.example.com"), entry({ domain: "second.example.com", pinned: true }), "image/png", new Uint8Array([3]).buffer);
+    await authority.putPinned(scope("first.example.com"), entry({ domain: "first.example.com", pinned: true }), "image/png", new Uint8Array([4]).buffer, "second.example.com");
+    await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
+    expect(received[received.length - 1]).toEqual({
+      epoch: expect.any(String),
+      revision: expect.any(Number),
+      upserts: { "first.example.com": expect.objectContaining({ pinned: true }) },
+      removed: ["second.example.com"],
+    });
+  });
+
+  it("resolves new-format iconIds in constant time and rejects mismatches", async () => {
+    const storage = new MemoryStorage();
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => resolved() }, () => 100);
+    await authority.initialize();
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(snapshotCache(authority)["example.com"]).toBeDefined());
+    const iconId = snapshotCache(authority)["example.com"].iconId!;
+
+    await expect(authority.icon(iconId)).resolves.toMatchObject({ contentType: "image/png" });
+    const mismatch = `${iconId.slice(0, iconId.lastIndexOf("-"))}-9`;
+    await expect(authority.icon(mismatch)).resolves.toBeUndefined();
+    await expect(authority.icon("unknown-key")).resolves.toBeUndefined();
+    await expect(authority.icon("unknown.example.com-2pc-1")).resolves.toBeUndefined();
+  });
+
+  it("still serves legacy-format iconIds through the linear scan", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("favicon-cache-v2.json", JSON.stringify({
+      "example.com": entry({
+        domain: "example.com", iconId: "example.com-2pc-1",
+        url: "/plugin/private/siyuan-linkmark/icon/example.com-2pc-1", contentType: "image/png",
+      }),
+      "a-b.example.com": entry({
+        domain: "a-b.example.com", iconId: "a-b.example.com-2pc-1",
+        url: "/plugin/private/siyuan-linkmark/icon/a-b.example.com-2pc-1", contentType: "image/png",
+      }),
+    }));
+    storage.files.set("icons/example.com-2pc-1.base64", Buffer.from([1, 2, 3]).toString("base64"));
+    storage.files.set("icons/a-b.example.com-2pc-1.base64", Buffer.from([4, 5]).toString("base64"));
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    await expect(authority.icon("example.com-2pc-1")).resolves.toMatchObject({ contentType: "image/png" });
+    await expect(authority.icon("a-b.example.com-2pc-1")).resolves.toMatchObject({ contentType: "image/png" });
+    await expect(authority.icon("example.com-2pc-2")).resolves.toBeUndefined();
+  });
+
+  it("does not serve a stale iconId for an entry that was refreshed or removed", async () => {
+    const storage = new MemoryStorage();
+    const received: CacheChangeEvent[] = [];
+    let byte = 1;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => resolved(`test resolver ${byte++}`),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    const stale = received[0].upserts["example.com"].iconId!;
+
+    await expect(authority.getOrQueue(scope(), true)).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+    const current = received[1].upserts["example.com"].iconId!;
+    expect(current).not.toBe(stale);
+    await expect(authority.icon(stale)).resolves.toBeUndefined();
+
+    await authority.remove(scope().key);
+    await vi.waitFor(() => expect(snapshotCache(authority)).toEqual({}));
+    await expect(authority.icon(current)).resolves.toBeUndefined();
+  });
+
+  it("resolves new-format and legacy iconIds against a 10,000-entry cache fixture", async () => {
+    const storage = new MemoryStorage();
+    const entries: Record<string, CacheEntry> = {};
+    let encodedIconId = "";
+    const legacyIconId = "legacy.example.com-2pc-1";
+    const now = 100;
+    for (let index = 0; index < 10_000; index += 1) {
+      const key = `domain-${index}.example.com`;
+      const id = `${Buffer.from(key).toString("base64url")}-${now.toString(36)}-${index.toString(36)}`;
+      if (index === 5_000) encodedIconId = id;
+      entries[key] = entry({
+        domain: key, iconId: id, url: `/plugin/private/siyuan-linkmark/icon/${id}`, contentType: "image/png",
+      });
+    }
+    entries["legacy.example.com"] = entry({
+      domain: "legacy.example.com", iconId: legacyIconId,
+      url: `/plugin/private/siyuan-linkmark/icon/${legacyIconId}`, contentType: "image/png",
+    });
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(entries));
+    storage.files.set(`icons/${encodedIconId}.base64`, Buffer.from([1, 2, 3]).toString("base64"));
+    storage.files.set(`icons/${legacyIconId}.base64`, Buffer.from([4]).toString("base64"));
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => now);
+    await authority.initialize();
+
+    await expect(authority.icon(encodedIconId)).resolves.toMatchObject({ contentType: "image/png" });
+    await expect(authority.icon(legacyIconId)).resolves.toMatchObject({ contentType: "image/png" });
+    await expect(authority.icon(`${encodedIconId.slice(0, encodedIconId.lastIndexOf("-"))}-zzz`)).resolves.toBeUndefined();
+  });
+});
+
+describe("shared-pin eligibility and legacy migration", () => {
+  const hostScope = (domain: string): LinkScope => ({ key: domain, domain, targetUrl: `https://${domain}/` });
+  const hostEntry = (domain: string, overrides: Partial<CacheEntry> = {}): CacheEntry => ({
+    url: "", fetchedAt: 1, source: "legacy pin", domain, pinned: true,
+    ...overrides,
+  });
+
+  function preload(storage: MemoryStorage, pins: Array<[string, CacheEntry]>) {
+    const entries = Object.fromEntries(pins);
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(entries));
+    for (const [, cacheEntry] of pins) {
+      if (cacheEntry.iconId) {
+        storage.files.set(`icons/${cacheEntry.iconId}.base64`, Buffer.from([9]).toString("base64"));
+      }
+    }
+  }
+
+  it("rejects invalid shared pin requests with the stable invalid-share-domain error", async () => {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    for (const domain of ["github.io", "foo.github.io", "qq.com", "www.example.com", "a..example.com", "example.com", "foo.onion", "x.home.arpa", "foo.alt"]) {
+      await expect(
+        authority.putPinned(hostScope(domain), hostEntry(domain, { includeSubdomains: true }), "image/png", new Uint8Array([1]).buffer),
+      ).rejects.toThrow(INVALID_SHARE_DOMAIN);
+    }
+    expect(snapshotCache(authority)).toEqual({});
+  });
+
+  it("accepts a valid shared pin at an eligible eTLD+1 and keeps it available", async () => {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    const pinned = await authority.putPinned(
+      hostScope("example.dev"),
+      hostEntry("example.dev", { includeSubdomains: true }),
+      "image/png",
+      new Uint8Array([1]).buffer,
+    );
+    expect(pinned).toMatchObject({ domain: "example.dev", pinned: true, includeSubdomains: true });
+
+    const result = await authority.getOrQueue(hostScope("example.dev"));
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: pinned.iconId, includeSubdomains: true }) });
+    expect(Object.keys(snapshotCache(authority))).toEqual(["example.dev"]);
+  });
+
+  it("still accepts exact pins at tenant eTLD+1s and inside reviewed exclusions", async () => {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    await expect(authority.putPinned(hostScope("foo.github.io"), hostEntry("foo.github.io"), "image/png", new Uint8Array([1]).buffer))
+      .resolves.toMatchObject({ domain: "foo.github.io", pinned: true });
+    await expect(authority.putPinned(hostScope("docs.qq.com"), hostEntry("docs.qq.com"), "image/png", new Uint8Array([2]).buffer))
+      .resolves.toMatchObject({ domain: "docs.qq.com", pinned: true });
+  });
+
+  it("retains valid shared pins and exact tenant pins during initialization", async () => {
+    const storage = new MemoryStorage();
+    preload(storage, [
+      ["example.dev", hostEntry("example.dev", { iconId: "legacy-1", includeSubdomains: true })],
+      ["foo.github.io", hostEntry("foo.github.io", { iconId: "legacy-2" })],
+      ["docs.qq.com", hostEntry("docs.qq.com", { iconId: "legacy-3" })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(Object.keys(snapshotCache(authority))).toEqual(["example.dev", "foo.github.io", "docs.qq.com"]);
+    for (const iconId of ["legacy-1", "legacy-2", "legacy-3"]) {
+      expect(storage.files.has(`icons/${iconId}.base64`)).toBe(true);
+    }
+  });
+
+  it("removes legacy public-suffix, Private-suffix, and reviewed-exclusion shared pins with their payloads", async () => {
+    const storage = new MemoryStorage();
+    preload(storage, [
+      ["example.dev", hostEntry("example.dev", { iconId: "keep-1", includeSubdomains: true })],
+      ["github.io", hostEntry("github.io", { iconId: "drop-1", includeSubdomains: true })],
+      ["foo.github.io", hostEntry("foo.github.io", { iconId: "drop-2", includeSubdomains: true })],
+      ["sub.foo.github.io", hostEntry("sub.foo.github.io", { iconId: "drop-3", includeSubdomains: true })],
+      ["b.example.dev", hostEntry("b.example.dev", { iconId: "drop-4", includeSubdomains: true })],
+      ["qq.com", hostEntry("qq.com", { iconId: "drop-5", includeSubdomains: true })],
+      ["x.feishu.cn", hostEntry("x.feishu.cn", { iconId: "drop-6", includeSubdomains: true })],
+      ["example.com", hostEntry("example.com", { iconId: "drop-7", includeSubdomains: true })],
+      ["foo.onion", hostEntry("foo.onion", { iconId: "drop-8", includeSubdomains: true })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(Object.keys(snapshotCache(authority))).toEqual(["example.dev"]);
+    expect(storage.files.has("icons/keep-1.base64")).toBe(true);
+    for (const iconId of ["drop-1", "drop-2", "drop-3", "drop-4", "drop-5", "drop-6", "drop-7", "drop-8"]) {
+      expect(storage.files.has(`icons/${iconId}.base64`)).toBe(false);
+    }
+    expect(JSON.parse(storage.files.get("favicon-cache-v2.json")!)).toEqual({
+      "example.dev": snapshotCache(authority)["example.dev"],
+    });
+  });
+
+  it("removes every pin whose target is a public suffix or special-use name, shared or exact", async () => {
+    const storage = new MemoryStorage();
+    preload(storage, [
+      ["example.dev", hostEntry("example.dev", { iconId: "keep-1" })],
+      ["github.io", hostEntry("github.io", { iconId: "drop-1" })],
+      ["localhost", hostEntry("localhost", { iconId: "drop-2" })],
+      ["example.com", hostEntry("example.com", { iconId: "drop-3" })],
+      ["foo.onion", hostEntry("foo.onion", { iconId: "drop-4" })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(Object.keys(snapshotCache(authority))).toEqual(["example.dev"]);
+    expect(storage.files.has("icons/drop-1.base64")).toBe(false);
+    expect(storage.files.has("icons/drop-2.base64")).toBe(false);
+    expect(storage.files.has("icons/drop-3.base64")).toBe(false);
+    expect(storage.files.has("icons/drop-4.base64")).toBe(false);
+  });
+
+  it("keeps exact pins at non-registrable hosts such as IP literals", async () => {
+    const storage = new MemoryStorage();
+    preload(storage, [
+      ["127.0.0.1", hostEntry("127.0.0.1", { iconId: "keep-1" })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(Object.keys(snapshotCache(authority))).toEqual(["127.0.0.1"]);
+    expect(storage.files.has("icons/keep-1.base64")).toBe(true);
+  });
+
+  it("writes the pruned index before deleting any payload", async () => {
+    const storage = new RecordingOrderStorage();
+    preload(storage, [
+      ["example.dev", hostEntry("example.dev", { iconId: "keep-1", includeSubdomains: true })],
+      ["github.io", hostEntry("github.io", { iconId: "drop-1", includeSubdomains: true })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(storage.operations).toEqual([
+      "write favicon-cache-v2.json",
+      "remove icons/drop-1.base64",
+    ]);
+    expect(storage.files.has("icons/keep-1.base64")).toBe(true);
+  });
+
+  it("fails initialization without removing records or payloads when the index write fails", async () => {
+    const storage = new FailingCacheIndexStorage();
+    preload(storage, [
+      ["example.dev", hostEntry("example.dev", { iconId: "keep-1", includeSubdomains: true })],
+      ["github.io", hostEntry("github.io", { iconId: "drop-1", includeSubdomains: true })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+
+    await expect(authority.initialize()).rejects.toThrow("cache-index write failed");
+    expect(storage.cacheIndexWrites).toBe(1);
+    const persisted = JSON.parse(storage.files.get("favicon-cache-v2.json")!) as Record<string, CacheEntry>;
+    expect(Object.keys(persisted)).toEqual(["example.dev", "github.io"]);
+    expect(storage.files.has("icons/keep-1.base64")).toBe(true);
+    expect(storage.files.has("icons/drop-1.base64")).toBe(true);
   });
 });
 
@@ -1172,6 +1560,93 @@ describe("ForwardProxyIconResolver", () => {
     ]);
   });
 
+  it("follows three public redirects, including a cross-origin CDN hop", async () => {
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding !== "base64") return null;
+      if (url === "https://example.com/favicon.ico") return {
+        body: "", status: 301, headers: { location: ["/redirect-1"] }, url,
+      };
+      if (url === "https://example.com/redirect-1") return {
+        body: "", status: 303, headers: { location: ["/redirect-2"] }, url,
+      };
+      if (url === "https://example.com/redirect-2") return {
+        body: "", status: 308, headers: { location: ["https://cdn.example.net/icon"] }, url,
+      };
+      if (url === "https://cdn.example.net/icon") return {
+        body: Buffer.from([1, 2, 3]).toString("base64"), contentType: "image/png", status: 200, url,
+      };
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).resolves.toMatchObject({ source: "root favicon.ico", contentType: "image/png" });
+    expect(forward.mock.calls.map(([url]) => url)).toEqual([
+      "https://example.com/favicon.ico",
+      "https://example.com/redirect-1",
+      "https://example.com/redirect-2",
+      "https://cdn.example.net/icon",
+    ]);
+  });
+
+  it.each([302, 307])("follows %i redirects", async (status) => {
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding !== "base64") return null;
+      if (url === "https://example.com/favicon.ico") return {
+        body: "", status, headers: { Location: ["/favicon.png"] }, url,
+      };
+      if (url === "https://example.com/favicon.png") return {
+        body: Buffer.from([1, 2, 3]).toString("base64"), contentType: "image/png", status: 200, url,
+      };
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).resolves.toMatchObject({ source: "root favicon.ico", contentType: "image/png" });
+  });
+
+  it("rejects authentication, unsafe, malformed, and over-limit redirect targets", async () => {
+    const cases = [
+      "/login",
+      "http://127.0.0.1/icon.png",
+      "http://[",
+      undefined,
+    ];
+    for (const location of cases) {
+      const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+        if (encoding !== "base64") return null;
+        if (url === "https://example.com/favicon.ico") return {
+          body: "", status: 302, ...(location === undefined ? {} : { headers: { Location: [location] } }), url,
+        };
+        return null;
+      });
+      const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+      await expect(resolver.resolve(scope())).rejects.toMatchObject({ category: "exhausted" });
+      expect(forward).toHaveBeenCalledTimes(4);
+    }
+
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding !== "base64") return null;
+      if (url === "https://example.com/favicon.ico" || /^https:\/\/cdn\.example\.net\/step-[1-3]$/.test(url)) {
+        const step = url === "https://example.com/favicon.ico" ? 1 : Number(url.at(-1)) + 1;
+        return { body: "", status: 302, headers: { Location: [`https://cdn.example.net/step-${step}`] }, url };
+      }
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    await expect(resolver.resolve(scope())).rejects.toMatchObject({ category: "exhausted" });
+    expect(forward.mock.calls.map(([url]) => url)).toEqual([
+      "https://example.com/favicon.ico",
+      "https://cdn.example.net/step-1",
+      "https://cdn.example.net/step-2",
+      "https://cdn.example.net/step-3",
+      "https://example.com/favicon.png",
+      "https://example.com/favicon.svg",
+      "https://example.com/apple-touch-icon.png",
+    ]);
+  });
+
   it("orders exact-domain candidates before parent-domain candidates", async () => {
     const downloads: string[] = [];
     const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
@@ -1179,19 +1654,96 @@ describe("ForwardProxyIconResolver", () => {
       return null;
     });
     const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
-    const subScope: LinkScope = { key: "docs.example.com", domain: "docs.example.com", targetUrl: "https://docs.example.com/" };
+    const subScope: LinkScope = { key: "docs.example.dev", domain: "docs.example.dev", targetUrl: "https://docs.example.dev/" };
 
     await expect(resolver.candidates({ ...subScope, discoverPage: true }, true)).resolves.toEqual([]);
     expect(downloads).toEqual([
-      "https://docs.example.com/favicon.ico",
-      "https://docs.example.com/favicon.png",
-      "https://docs.example.com/favicon.svg",
-      "https://docs.example.com/apple-touch-icon.png",
-      "https://example.com/favicon.ico",
-      "https://example.com/favicon.png",
-      "https://example.com/favicon.svg",
-      "https://example.com/apple-touch-icon.png",
+      "https://docs.example.dev/favicon.ico",
+      "https://docs.example.dev/favicon.png",
+      "https://docs.example.dev/favicon.svg",
+      "https://docs.example.dev/apple-touch-icon.png",
+      "https://example.dev/favicon.ico",
+      "https://example.dev/favicon.png",
+      "https://example.dev/favicon.svg",
+      "https://example.dev/apple-touch-icon.png",
     ]);
+  });
+
+  it("probes only the one registrable parent after exact-host candidates", async () => {
+    const downloads: string[] = [];
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding === "base64") downloads.push(url);
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+    const deepScope: LinkScope = { key: "a.b.example.dev", domain: "a.b.example.dev", targetUrl: "https://a.b.example.dev/" };
+
+    await expect(resolver.candidates(deepScope, true)).resolves.toEqual([]);
+    expect(downloads).toEqual([
+      "https://a.b.example.dev/favicon.ico",
+      "https://a.b.example.dev/favicon.png",
+      "https://a.b.example.dev/favicon.svg",
+      "https://a.b.example.dev/apple-touch-icon.png",
+      "https://example.dev/favicon.ico",
+      "https://example.dev/favicon.png",
+      "https://example.dev/favicon.svg",
+      "https://example.dev/apple-touch-icon.png",
+    ]);
+  });
+
+  it("probes the country-code registrable parent instead of an intermediate label", async () => {
+    const downloads: string[] = [];
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding === "base64") downloads.push(url);
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+    const coUkScope: LinkScope = { key: "docs.example.co.uk", domain: "docs.example.co.uk", targetUrl: "https://docs.example.co.uk/" };
+
+    await expect(resolver.candidates(coUkScope, true)).resolves.toEqual([]);
+    expect(downloads).toEqual([
+      "https://docs.example.co.uk/favicon.ico",
+      "https://docs.example.co.uk/favicon.png",
+      "https://docs.example.co.uk/favicon.svg",
+      "https://docs.example.co.uk/apple-touch-icon.png",
+      "https://example.co.uk/favicon.ico",
+      "https://example.co.uk/favicon.png",
+      "https://example.co.uk/favicon.svg",
+      "https://example.co.uk/apple-touch-icon.png",
+    ]);
+  });
+
+  it("never generates a public-suffix or provider-suffix candidate for hosted tenants", async () => {
+    const downloads: string[] = [];
+    const forward = vi.fn<ForwardProxy>(async (url, encoding) => {
+      if (encoding === "base64") downloads.push(url);
+      return null;
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+    const tenant: LinkScope = { key: "foo.github.io", domain: "foo.github.io", targetUrl: "https://foo.github.io/" };
+
+    await expect(resolver.candidates(tenant, true)).resolves.toEqual([]);
+    expect(downloads).toEqual([
+      "https://foo.github.io/favicon.ico",
+      "https://foo.github.io/favicon.png",
+      "https://foo.github.io/favicon.svg",
+      "https://foo.github.io/apple-touch-icon.png",
+    ]);
+
+    downloads.length = 0;
+    const deepTenant: LinkScope = { key: "a.foo.github.io", domain: "a.foo.github.io", targetUrl: "https://a.foo.github.io/" };
+    await expect(resolver.candidates(deepTenant, true)).resolves.toEqual([]);
+    expect(downloads).toEqual([
+      "https://a.foo.github.io/favicon.ico",
+      "https://a.foo.github.io/favicon.png",
+      "https://a.foo.github.io/favicon.svg",
+      "https://a.foo.github.io/apple-touch-icon.png",
+      "https://foo.github.io/favicon.ico",
+      "https://foo.github.io/favicon.png",
+      "https://foo.github.io/favicon.svg",
+      "https://foo.github.io/apple-touch-icon.png",
+    ]);
+    expect(downloads).not.toContain("https://github.io/favicon.ico");
   });
 
   it("stops resolution when the ten-second budget expires", async () => {

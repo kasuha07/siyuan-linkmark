@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { shareDomainFor } from "../src/parent-domain";
 import {
+  applyCacheChangeEvent,
   cachedIconForScope,
   FAILURE_COOLDOWN,
   isCacheEntryFresh,
@@ -17,19 +18,26 @@ const routeScope = { key: "docs.qq.com::doc", domain: "docs.qq.com", routeKey: "
 
 describe("shareDomainFor", () => {
   it("keeps the domain itself when no parent exists", () => {
-    expect(shareDomainFor("example.com")).toBe("example.com");
+    expect(shareDomainFor("example.dev")).toBe("example.dev");
   });
 
-  it("walks up to the parent domain", () => {
-    expect(shareDomainFor("www.example.com")).toBe("example.com");
-    expect(shareDomainFor("a.b.example.com")).toBe("b.example.com");
+  it("derives the single PSL eTLD+1", () => {
+    expect(shareDomainFor("www.example.dev")).toBe("example.dev");
+    expect(shareDomainFor("a.b.example.dev")).toBe("example.dev");
   });
 
-  it("rejects addresses and malformed labels", () => {
+  it("keeps tenant eTLD+1s under PSL Private suffixes", () => {
+    expect(shareDomainFor("foo.github.io")).toBe("foo.github.io");
+  });
+
+  it("rejects addresses, special-use, and malformed labels", () => {
     expect(shareDomainFor("127.0.0.1")).toBeNull();
-    expect(shareDomainFor("example.com:8080")).toBeNull();
+    expect(shareDomainFor("example.dev:8080")).toBeNull();
     expect(shareDomainFor("localhost")).toBeNull();
-    expect(shareDomainFor("a..example.com")).toBeNull();
+    expect(shareDomainFor("a..example.dev")).toBeNull();
+    expect(shareDomainFor("foo.onion")).toBeNull();
+    expect(shareDomainFor("x.home.arpa")).toBeNull();
+    expect(shareDomainFor("example.com")).toBeNull();
   });
 });
 
@@ -50,14 +58,40 @@ describe("cachedIconForScope", () => {
     expect(match).toEqual({ cacheKey: routeScope.domain, entry: cache[routeScope.domain] });
   });
 
-  it("applies a subdomain-shared pin along the whole parent chain", () => {
-    const cache = { "example.com": entry({ pinned: true, includeSubdomains: true }) };
-    const scope = { key: "a.b.example.com", domain: "a.b.example.com" };
-    expect(cachedIconForScope(cache, scope)?.cacheKey).toBe("example.com");
+  it("applies a subdomain-shared pin within its eligible eTLD+1", () => {
+    const cache = { "example.dev": entry({ pinned: true, includeSubdomains: true }) };
+    const scope = { key: "a.b.example.dev", domain: "a.b.example.dev" };
+    expect(cachedIconForScope(cache, scope)?.cacheKey).toBe("example.dev");
+  });
+
+  it("does not climb a parent chain to an intermediate shared pin", () => {
+    const cache = { "b.example.dev": entry({ domain: "b.example.dev", pinned: true, includeSubdomains: true }) };
+    const scope = { key: "a.b.example.dev", domain: "a.b.example.dev" };
+    expect(cachedIconForScope(cache, scope)).toBeNull();
+  });
+
+  it("does not consult a shared pin across a PSL Private-suffix boundary", () => {
+    const cache = { "foo.github.io": entry({ domain: "foo.github.io", pinned: true, includeSubdomains: true }) };
+    expect(cachedIconForScope(cache, { key: "a.foo.github.io", domain: "a.foo.github.io" })).toBeNull();
+  });
+
+  it("serves an exact pinned entry for a private-suffix tenant scope", () => {
+    const cache = { "foo.github.io": entry({ domain: "foo.github.io", pinned: true }) };
+    expect(cachedIconForScope(cache, { key: "foo.github.io", domain: "foo.github.io" })?.cacheKey).toBe("foo.github.io");
+  });
+
+  it("does not re-enable a legacy shared pin at a public suffix", () => {
+    const cache = { "github.io": entry({ domain: "github.io", pinned: true, includeSubdomains: true }) };
+    expect(cachedIconForScope(cache, { key: "a.foo.github.io", domain: "a.foo.github.io" })).toBeNull();
   });
 
   it("does not apply a pin that does not share subdomains", () => {
-    const cache = { "example.com": entry({ pinned: true }) };
+    const cache = { "example.dev": entry({ pinned: true }) };
+    expect(cachedIconForScope(cache, { key: "www.example.dev", domain: "www.example.dev" })).toBeNull();
+  });
+
+  it("does not apply a shared pin at a special-use name", () => {
+    const cache = { "example.com": entry({ domain: "example.com", pinned: true, includeSubdomains: true }) };
     expect(cachedIconForScope(cache, { key: "www.example.com", domain: "www.example.com" })).toBeNull();
   });
 
@@ -146,5 +180,139 @@ describe("planScanDecision", () => {
 
   it("fetches missing scopes", () => {
     expect(decide()).toEqual({ action: "fetch" });
+  });
+});
+
+describe("applyCacheChangeEvent", () => {
+  const epoch = "test-epoch";
+  const base = () => ({
+    "example.com": entry(),
+    "docs.qq.com::doc": entry({ url: "route-icon.png", domain: "docs.qq.com" }),
+  });
+
+  it("applies upserts and removed keys to an isolated copy", () => {
+    const cache = base();
+    const upserted = entry({ url: "new-icon.png" });
+    const application = applyCacheChangeEvent(cache, {
+      epoch,
+      revision: 7,
+      upserts: { "new.example.com": upserted },
+      removed: ["docs.qq.com::doc"],
+    }, 6);
+
+    expect(application).toMatchObject({ status: "applied", revision: 7 });
+    if (application.status === "applied") {
+      expect(application.cache).toEqual({
+        "example.com": cache["example.com"],
+        "new.example.com": upserted,
+      });
+      expect(application.cache["new.example.com"]).not.toBe(upserted);
+      expect(cache).toEqual(base());
+    }
+  });
+
+  it("treats the first event as valid without a prior revision", () => {
+    const application = applyCacheChangeEvent({}, {
+      epoch,
+      revision: 12,
+      upserts: { "example.com": entry() },
+      removed: [],
+    }, undefined);
+    expect(application).toMatchObject({ status: "applied", revision: 12 });
+    if (application.status === "applied") {
+      expect(application.cache["example.com"]).toMatchObject({ url: "https://cdn.example.com/icon.png" });
+    }
+  });
+
+  it("detects a revision gap and requests a snapshot refetch", () => {
+    const application = applyCacheChangeEvent(base(), {
+      epoch,
+      revision: 9,
+      upserts: { "new.example.com": entry() },
+      removed: ["example.com"],
+    }, 4);
+    expect(application).toEqual({ status: "refetch", revision: 9 });
+  });
+
+  it("ignores stale events at or below the last seen revision", () => {
+    for (const revision of [5, 4]) {
+      const application = applyCacheChangeEvent(base(), {
+        epoch,
+        revision,
+        upserts: { "new.example.com": entry() },
+        removed: ["example.com"],
+      }, 5);
+      expect(application).toEqual({ status: "ignored" });
+    }
+  });
+
+  it("ignores malformed events", () => {
+    for (const event of [
+      null,
+      "cache",
+      7,
+      [],
+      { upserts: {}, removed: [] },
+      { revision: 1, removed: [] },
+      { revision: 1, upserts: {} },
+      { revision: "1", upserts: {}, removed: [] },
+      { revision: 1, upserts: [], removed: [] },
+      { revision: 1, upserts: {}, removed: "x" },
+      { revision: Number.NaN, upserts: {}, removed: [] },
+      { revision: 1, upserts: {}, removed: [], epoch: 7 },
+      { revision: 1, upserts: {}, removed: [], epoch: undefined },
+    ]) {
+      expect(applyCacheChangeEvent(base(), event, 0)).toEqual({ status: "ignored" });
+    }
+  });
+
+  it("keeps existing entries when an upserted entry is malformed", () => {
+    const cache = base();
+    const application = applyCacheChangeEvent(cache, {
+      epoch,
+      revision: 8,
+      upserts: { "example.com": { fetchedAt: 1 }, "new.example.com": entry({ url: "ok.png" }) },
+      removed: [],
+    }, 7);
+    expect(application.status).toBe("applied");
+    if (application.status === "applied") {
+      expect(application.cache["example.com"]).toBe(cache["example.com"]);
+      expect(application.cache["new.example.com"]).toMatchObject({ url: "ok.png" });
+    }
+  });
+
+  it("advances the tracked revision even for an empty event", () => {
+    const application = applyCacheChangeEvent(base(), { epoch, revision: 3, upserts: {}, removed: [] }, 2);
+    expect(application).toMatchObject({ status: "applied", revision: 3 });
+  });
+
+  it("requests a refetch when an event arrives from a different epoch", () => {
+    const application = applyCacheChangeEvent(base(), {
+      epoch: "other-epoch",
+      revision: 1,
+      upserts: { "new.example.com": entry() },
+      removed: ["example.com"],
+    }, 42, epoch);
+    expect(application).toEqual({ status: "epoch-changed", revision: 1 });
+  });
+
+  it("applies an event whose epoch matches the expected epoch", () => {
+    const application = applyCacheChangeEvent(base(), {
+      epoch,
+      revision: 43,
+      upserts: { "new.example.com": entry() },
+      removed: [],
+    }, 42, epoch);
+    expect(application.status).toBe("applied");
+  });
+
+  it("does not compare epochs when no expected epoch has been adopted yet", () => {
+    const application = applyCacheChangeEvent({}, {
+      epoch,
+      revision: 3,
+      upserts: { "example.com": entry() },
+      removed: [],
+    }, undefined);
+    expect(application.status).toBe("applied");
   });
 });

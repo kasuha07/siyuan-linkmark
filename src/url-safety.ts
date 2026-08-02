@@ -18,10 +18,13 @@ export function isAuthenticationRedirect(requested: URL, finalValue?: string) {
     return true;
   }
   if (finalUrl.href === requested.href) return false;
-  const host = finalUrl.hostname.toLowerCase();
-  const path = finalUrl.pathname.toLowerCase();
-  return finalUrl.origin !== requested.origin
-    || host.startsWith("accounts.")
+  return isAuthenticationTarget(finalUrl);
+}
+
+export function isAuthenticationTarget(url: URL) {
+  const host = url.hostname.toLowerCase();
+  const path = url.pathname.toLowerCase();
+  return host.startsWith("accounts.")
     || host.startsWith("passport.")
     || host.startsWith("login.")
     || /(?:^|\/)(?:login|signin|sign-in|auth)(?:\/|$)/.test(path);

@@ -1,0 +1,3 @@
+# Validate forward-proxy redirects in Linkmark
+
+Linkmark disables SiYuan forward-proxy automatic redirects and follows at most three HTTP 301, 302, 303, 307, or 308 hops itself. Each Location is resolved against its hop and must be a public HTTP(S) target; cross-origin CDN hops remain valid, but authentication hosts and paths, malformed or missing Locations, private targets, and a fourth redirect fail that candidate. This is deliberately broader than same-origin-only handling so favicon.im and other services may use delivery hosts, while every hop remains visible to Linkmark and is requested afresh without Cookie, Authorization, or Referer headers.

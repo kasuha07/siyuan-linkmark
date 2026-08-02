@@ -1,0 +1,3 @@
+# Encode the Link scope key losslessly inside the private iconId
+
+Private icon requests resolve an iconId to its cache entry in O(1) without a maintained index: the iconId embeds the scope key encoded losslessly (base64url, whose alphabet already matches the private-route regex), so the kernel parses the key back out and verifies `cache[key].iconId === iconId` before serving, falling back to the former linear scan only for legacy-format iconIds. This was chosen over a `Map<iconId, entry>` that must stay synchronized at every cache mutation site and over a key-based private route, which would keep the same URL across icon refreshes and let browsers serve stale icons for the full `max-age=86400` instead of cache-busting on every new icon.

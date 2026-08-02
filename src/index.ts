@@ -1,15 +1,17 @@
 import { confirm, Dialog, Menu, Plugin, Setting, showMessage } from "siyuan";
 import "./style.css";
 import type { CacheRequestResult } from "./cache-authority";
+import { isDecodableImage } from "./image-decode";
 import {
-  isDecodableImage,
+  RESOLVER_VERSION,
   type FallbackMode,
   type MonogramColorMode,
+  type MonogramOverride,
   type MonogramShape,
   type ProviderPreset,
   type ResolverMode,
-} from "./icon-resolver";
-import { createIconRule } from "./icon-rule";
+} from "./resolver-contract";
+import { createIconRule, reconcilePresentRules, type PresentRuleContext } from "./icon-rule";
 import {
   CACHE_POLICY_FIELDS,
   clamp,
@@ -17,7 +19,6 @@ import {
   mergeFrontendSettings,
   monogramSignature,
   pickCachePolicy,
-  type MonogramOverride,
   type Settings,
 } from "./frontend-settings";
 import {
@@ -27,12 +28,14 @@ import {
   localDiscoveryRegionFor,
 } from "./frontend-render-work";
 import {
+  applyCacheChangeEvent,
   cachedIconForScope,
   isCacheEntryFresh,
   planScanDecision,
   type CacheEntry,
+  type CacheSnapshot,
 } from "./frontend-cache-state";
-import { shareDomainFor } from "./parent-domain";
+import { pickerScopeChoices } from "./parent-domain";
 import {
   base64ToBlob,
   blobToBase64,
@@ -49,7 +52,6 @@ type FetchTrigger = "automatic" | "manual";
 const DISPLAY_SETTINGS_FILE = "display-settings-v2.json";
 const RUNTIME_STYLE_ID = "siyuan-linkmark-runtime-style";
 const FEEDBACK_URL = "https://github.com/kasuha07/siyuan-linkmark/issues";
-const RESOLVER_VERSION = 6;
 const MANUAL_FAILURE_WINDOW = 60 * 1000;
 const RULE_RENDER_BATCH_DELAY = 16;
 const LINK_SELECTOR = [
@@ -90,6 +92,8 @@ export default class LinkmarkPlugin extends Plugin {
   private manualRefreshKeys = new Map<string, number>();
   private automaticFetchGeneration = 0;
   private cacheGeneration = 0;
+  private lastCacheRevision: number | undefined;
+  private lastCacheEpoch: string | undefined;
   private traceEnabled = false;
   private readonly inputListener = (event: Event) => this.scheduleInputScan(event.target);
 
@@ -100,9 +104,12 @@ export default class LinkmarkPlugin extends Plugin {
     await this.loadKernelState();
     await this.subscribeToKernelChanges();
     this.addSetting();
-    this.rebuildRules();
-    this.renderRules();
     this.startObserver();
+    // The initial scan runs immediately instead of on the scan debounce so
+    // cached scopes render at the first frame; the trailing scheduled scan
+    // is a safety net for content that changed during load.
+    this.scanLinks();
+    this.renderRules();
     this.scheduleScan();
   }
 
@@ -127,11 +134,11 @@ export default class LinkmarkPlugin extends Plugin {
 
   private async loadKernelState() {
     try {
-      const [cache, policy] = await Promise.all([
-        this.callKernel<Record<string, CacheEntry>>("cache.snapshot"),
+      const [snapshot, policy] = await Promise.all([
+        this.callKernel<CacheSnapshot>("cache.snapshot"),
         this.callKernel<Partial<Settings>>("cache.policy.get"),
       ]);
-      this.cache = cache && typeof cache === "object" ? cache : {};
+      this.adoptSnapshot(snapshot);
       this.applyCachePolicy(policy);
     } catch (error) {
       this.cache = {};
@@ -139,13 +146,50 @@ export default class LinkmarkPlugin extends Plugin {
     }
   }
 
+  /**
+   * Adopts a kernel Cache snapshot as the local baseline: the cache contents
+   * plus the revision and epoch captured at snapshot time. Revision and epoch
+   * are adopted only when the snapshot carries them, so an event stream from
+   * another epoch still triggers a rebaseline instead of being misapplied.
+   */
+  private adoptSnapshot(snapshot: CacheSnapshot | null | undefined) {
+    this.cache = snapshot && typeof snapshot.cache === "object" ? snapshot.cache : {};
+    if (typeof snapshot?.revision === "number") this.lastCacheRevision = snapshot.revision;
+    if (typeof snapshot?.epoch === "string") this.lastCacheEpoch = snapshot.epoch;
+  }
+
+  /**
+   * Recovers from a Cache revision gap or an epoch change by refetching the
+   * authoritative snapshot and adopting its revision and epoch as the new
+   * baseline. The baseline only advances when the refetch succeeds, so a
+   * suspended window keeps retrying the snapshot on the next event.
+   */
+  private async refetchCacheSnapshot() {
+    try {
+      this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
+      this.updateCacheCount();
+      this.requestRuleRebuild();
+      this.scheduleScan();
+      return true;
+    } catch (error) {
+      console.warn("[siyuan-linkmark] Unable to refetch the cache snapshot", error);
+      return false;
+    }
+  }
+
   private async subscribeToKernelChanges() {
     const bind = this.kernel?.rpc.bind;
     if (!bind) return;
     await bind("cache.changed", (params) => {
-      const cache = params?.cache ?? params?.params?.cache;
-      if (!cache || typeof cache !== "object") return;
-      this.cache = cache as Record<string, CacheEntry>;
+      const payload = params?.params && typeof params.params === "object" ? params.params : params;
+      const application = applyCacheChangeEvent(this.cache, payload, this.lastCacheRevision, this.lastCacheEpoch);
+      if (application.status === "ignored") return;
+      if (application.status === "refetch" || application.status === "epoch-changed") {
+        void this.refetchCacheSnapshot();
+        return;
+      }
+      this.lastCacheRevision = application.revision;
+      this.cache = application.cache;
       for (const key of this.manualRefreshKeys.keys()) {
         if (this.cache[key]) this.manualRefreshKeys.delete(key);
       }
@@ -218,7 +262,7 @@ export default class LinkmarkPlugin extends Plugin {
     const pauseAutomaticFetch = document.createElement("input");
     pauseAutomaticFetch.type = "checkbox";
     pauseAutomaticFetch.className = "b3-switch fn__flex-center";
-    pauseAutomaticFetch.checked = this.settings.pauseAutomaticFetch;
+    pauseAutomaticFetch.checked = Boolean(this.settings.pauseAutomaticFetch);
 
     const allowFullPageDiscovery = document.createElement("input");
     allowFullPageDiscovery.type = "checkbox";
@@ -777,7 +821,7 @@ export default class LinkmarkPlugin extends Plugin {
 
   private async removeCachedDomain(key: string) {
     await this.callKernel("cache.remove", key);
-    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.delete(key);
     this.manualRefreshKeys.delete(key);
     this.requestRuleRebuild();
@@ -979,7 +1023,7 @@ export default class LinkmarkPlugin extends Plugin {
     const entry = this.cache[key];
     if (!entry?.pinned) return;
     await this.callKernel("cache.remove", key);
-    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.delete(key);
     this.manualRefreshKeys.delete(key);
     this.requestRuleRebuild();
@@ -1001,7 +1045,8 @@ export default class LinkmarkPlugin extends Plugin {
     const root = dialog.element.querySelector<HTMLElement>(".siyuan-linkmark-picker");
     if (!root) return;
 
-    const sharedDomain = shareDomainFor(domain);
+    const scopeChoices = pickerScopeChoices(selectedScope);
+    const subdomainsChoice = scopeChoices.find((choice) => choice.kind === "subdomains");
 
     const controls = document.createElement("div");
     controls.className = "siyuan-linkmark-picker-controls";
@@ -1029,12 +1074,14 @@ export default class LinkmarkPlugin extends Plugin {
 
     const scopeSelect = document.createElement("select");
     scopeSelect.className = "b3-select";
-    if (selectedScope.routeKey) {
-      scopeSelect.add(new Option(this.t("pinCurrentType").replace("{type}", this.scopeTypeLabel(selectedScope)), "type"));
-    }
-    scopeSelect.add(new Option(this.t("pinCurrentDomain").replace("{domain}", domain), "domain"));
-    if (sharedDomain && sharedDomain !== domain) {
-      scopeSelect.add(new Option(this.t("applyToSubdomains").replace("{domain}", sharedDomain), "subdomains"));
+    for (const choice of scopeChoices) {
+      if (choice.kind === "type") {
+        scopeSelect.add(new Option(this.t("pinCurrentType").replace("{type}", this.scopeTypeLabel(selectedScope)), "type"));
+      } else if (choice.kind === "domain") {
+        scopeSelect.add(new Option(this.t("pinCurrentDomain").replace("{domain}", domain), "domain"));
+      } else {
+        scopeSelect.add(new Option(this.t("applyToSubdomains").replace("{domain}", choice.shareDomain), "subdomains"));
+      }
     }
     const shareRow = document.createElement("label");
     shareRow.className = "siyuan-linkmark-picker-scope";
@@ -1063,11 +1110,9 @@ export default class LinkmarkPlugin extends Plugin {
     let saving = false;
     const targetScopeForSelection = () => {
       const selection = scopeSelect.value;
-      return selection === "type"
-        ? selectedScope
-        : selection === "subdomains" && sharedDomain
-          ? { key: sharedDomain, domain: sharedDomain }
-          : { key: domain, domain };
+      if (selection === "type") return selectedScope;
+      if (selection === "subdomains" && subdomainsChoice) return { key: subdomainsChoice.shareDomain, domain: subdomainsChoice.shareDomain };
+      return { key: domain, domain };
     };
     const saveAndClose = async (blob: Blob, source: string) => {
       if (saving) return;
@@ -1168,7 +1213,7 @@ export default class LinkmarkPlugin extends Plugin {
 
   private async invalidateGeneratedMonograms() {
     await this.callKernel("cache.clear-generated");
-    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.clear();
     this.manualRefreshKeys.clear();
     this.requestRuleRebuild();
@@ -1178,7 +1223,7 @@ export default class LinkmarkPlugin extends Plugin {
   private async clearCache() {
     this.cacheGeneration += 1;
     await this.callKernel("cache.clear");
-    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.clear();
     this.manualRefreshKeys.clear();
     this.requestRuleRebuild();
@@ -1191,6 +1236,9 @@ export default class LinkmarkPlugin extends Plugin {
         this.scheduleScanForNode(record.target);
         if (record.type === "childList") {
           for (const node of record.addedNodes) this.scheduleAddedNodeScan(node);
+          if (this.removedNodesContainLink(record.removedNodes)) this.scheduleScan();
+        } else if (record.type === "attributes" && this.linkAttributeRemovedOrRewritten(record)) {
+          this.scheduleScan();
         }
       }
     });
@@ -1202,6 +1250,33 @@ export default class LinkmarkPlugin extends Plugin {
       attributeFilter: ["data-href", "href", "data-type"],
     });
     document.addEventListener("input", this.inputListener, true);
+  }
+
+  /**
+   * A link scope can leave the document without any added node to scan, so a
+   * removed link subtree escalates to a full discovery: the full scan evicts
+   * Icon rules for scopes that are no longer Present, which a local scan
+   * never does. The render-work debounce coalesces the removals protyle
+   * performs while re-creating elements during editing.
+   */
+  private removedNodesContainLink(nodes: NodeList): boolean {
+    for (const node of nodes) {
+      if (node instanceof Element && (node.matches(LINK_SELECTOR) || node.querySelector(LINK_SELECTOR))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Rewriting a link's href or data-href replaces the scope it represents,
+   * and dropping data-type or the href attributes un-links an element, so
+   * the previously Present scope may have left the document. Both escalate
+   * to a full discovery for the same eviction reason as a removed subtree.
+   */
+  private linkAttributeRemovedOrRewritten(record: MutationRecord): boolean {
+    const target = record.target instanceof Element ? record.target : null;
+    if (!target) return false;
+    if (record.attributeName === "href" || record.attributeName === "data-href") return true;
+    return record.attributeName === "data-type" && !target.matches(LINK_SELECTOR);
   }
 
   private scheduleScan(root?: Element | null) {
@@ -1249,13 +1324,20 @@ export default class LinkmarkPlugin extends Plugin {
     if (!this.settings.enabled) return false;
     const domains = this.collectDocumentDomains(root);
 
-    let rulesChanged = false;
+    const reconciled = reconcilePresentRules({
+      discovery: [...domains.values()].map(({ scope }) => scope),
+      context: this.presentRuleContext(),
+      previous: this.iconRules,
+      full: !root,
+    });
+    this.iconRules = reconciled.rules;
+
     domains.forEach(({ scope, targetUrl }, key) => {
       const decision = planScanDecision({
         scopeKey: key,
         scope,
         cache: this.cache,
-        pauseAutomaticFetch: this.settings.pauseAutomaticFetch,
+        pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
         cacheDays: this.settings.cacheDays,
         failedAt: this.failedDomains.get(key),
       });
@@ -1263,18 +1345,10 @@ export default class LinkmarkPlugin extends Plugin {
         void this.expireCachedDomain(decision.cacheKey, decision.entry);
         return;
       }
-      if (decision.action === "keep") {
-        const rule = createIconRule(scope, decision.entry.url, this.settings.iconSize);
-        if (this.iconRules.get(key) !== rule) {
-          this.iconRules.set(key, rule);
-          rulesChanged = true;
-        }
-        if (decision.fetch) void this.fetchAndCache(scope, targetUrl);
-        return;
-      }
+      if (decision.action === "keep" && decision.fetch) void this.fetchAndCache(scope, targetUrl);
       if (decision.action === "fetch") void this.fetchAndCache(scope, targetUrl);
     });
-    return rulesChanged;
+    return reconciled.changed;
   }
 
   private fetchAndCache(
@@ -1376,7 +1450,7 @@ export default class LinkmarkPlugin extends Plugin {
     try {
       if (this.cache[key] !== expected) return;
       await this.callKernel("cache.remove", key);
-      this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+      this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
       this.requestRuleRebuild();
       this.updateCacheCount();
     } finally {
@@ -1386,25 +1460,37 @@ export default class LinkmarkPlugin extends Plugin {
   }
 
   private rebuildRules() {
-    this.iconRules.clear();
-    if (this.settings.enabled) {
-      const entries = Object.entries(this.cache).sort(([a], [b]) => Number(a.includes("::")) - Number(b.includes("::")));
-      for (const [key, entry] of entries) {
-        if (entry.routeKey && this.cache[entry.domain ?? key.split("::")[0]]?.pinned) {
-          continue;
-        }
-        const pausedLegacyMonogram = this.settings.pauseAutomaticFetch
-          && entry.source === "generated monogram"
-          && entry.resolverVersion !== RESOLVER_VERSION;
-        const current = entry.pinned || entry.resolverVersion === RESOLVER_VERSION || pausedLegacyMonogram;
-        const fresh = this.settings.pauseAutomaticFetch || isCacheEntryFresh(entry, this.settings.cacheDays);
-        if (current && fresh) {
-          const scope = scopeFromCacheKey(key, entry.domain, entry.pathPrefix);
-          this.iconRules.set(key, createIconRule(scope, entry.url, this.settings.iconSize));
-        }
-      }
+    if (!this.settings.enabled) {
+      this.iconRules.clear();
+      this.updateCacheCount();
+      return;
     }
+    // The rule map keys are the known Present scopes, so a rebuild recomputes
+    // their rules against the current cache. Scopes whose entry left the
+    // cache produce no rule and are evicted; adding rules for scopes that
+    // were never present is the full scan's job.
+    const scopes: LinkScope[] = [];
+    for (const key of this.iconRules.keys()) {
+      const entry = this.cache[key];
+      if (entry) scopes.push(scopeFromCacheKey(key, entry.domain, entry.pathPrefix));
+    }
+    const reconciled = reconcilePresentRules({
+      discovery: scopes,
+      context: this.presentRuleContext(),
+      previous: this.iconRules,
+      full: true,
+    });
+    this.iconRules = reconciled.rules;
     this.updateCacheCount();
+  }
+
+  private presentRuleContext(): PresentRuleContext {
+    return {
+      cache: this.cache,
+      iconSize: this.settings.iconSize,
+      cacheDays: this.settings.cacheDays,
+      pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
+    };
   }
 
   private setRule(scope: LinkScope, url: string) {

@@ -57,7 +57,7 @@ An HTTP(S) URL that the cache authority may retrieve through the forward proxy, 
 _Avoid_: safe URL, external URL
 
 **Authentication redirect**:
-A candidate retrieval that ends on an accounts, passport, or login host, on a login, sign-in, or auth path, or on a different origin; the cache authority treats it as a failed candidate rather than an icon.
+A candidate retrieval whose observed redirect hop targets an accounts, passport, or login host or a login, sign-in, or auth path. Cross-origin public HTTP(S) hops are allowed, while a hop with a missing, malformed, or non-public Location is invalid; the cache authority treats all of these failures as failed candidates rather than icons.
 _Avoid_: login page, redirect loop
 
 **Kernel plugin**:
@@ -85,8 +85,32 @@ A user-selected cache entry that survives ordinary refresh and cache cleanup unt
 _Avoid_: permanent icon, protected file
 
 **Share-pin domain**:
-The registrable domain, after dropping the `www.` label, that an includeSubdomains pin applies to across the parent chain.
+The eTLD+1 derived from the ICANN and Private sections of the Public Suffix List, after dropping the `www.` label; it bounds an includeSubdomains pin and is never itself a public suffix.
 _Avoid_: parent domain, effective domain
+
+**Public Suffix List (PSL) snapshot**:
+The release-bundled ICANN and Private Public Suffix List data that Linkmark uses locally to derive eTLD+1 boundaries; it is refreshed through normal dependency updates and releases, never downloaded at runtime.
+_Avoid_: live suffix list, runtime suffix update
+
+**Invalid shared pin**:
+A legacy includeSubdomains pin whose share scope is a public suffix or otherwise no longer a valid eTLD+1; it is deleted with its private icon payload during migration rather than retained as a compatible cache record.
+_Avoid_: legacy shared pin, downgraded shared pin
+
+**Shared-pin exclusion**:
+A reviewed, provenance-documented multi-tenant platform boundary that forbids an includeSubdomains pin even when the hostname has a valid PSL-derived eTLD+1.
+_Avoid_: optional platform rule, user bypass
+
+**Recognized multi-tenant boundary**:
+The eTLD+1 boundary containing a Linkmark-recognized platform host: `docs.qq.com`, `docs.google.com`, `*.feishu.cn`, `*.larksuite.com`, or `nocode.host`; it is initially excluded from shared pins and each entry must carry provenance and regression coverage.
+_Avoid_: general platform blacklist, inferred hosting platform
+
+**Registrable parent**:
+The one eTLD+1 returned by PSL for a hostname when it differs from that hostname; it is the only parent Linkmark may probe or target with a shared pin.
+_Avoid_: immediate parent, parent chain
+
+**Share eligibility**:
+The condition under which Linkmark may create an includeSubdomains pin: the target is a non-public-suffix eTLD+1, is outside every PSL Private-suffix family, and is outside every Shared-pin exclusion; ineligible historical pins are removed during cache-authority initialization.
+_Avoid_: best-effort pin safety, frontend-only validation
 
 **Cache entry**:
 The authoritative record associating a link scope with its resolved or pinned private icon and resolution metadata.
@@ -97,8 +121,20 @@ The cache entry that applies to a link scope after pinned, subdomain-shared, and
 _Avoid_: cache hit, lookup result
 
 **Cache snapshot**:
-An isolated view of the authoritative cache that an RPC caller or state-change subscriber may read without changing the cache authority.
+An isolated view of the authoritative cache that an RPC caller or state-change subscriber may read without changing the cache authority, carrying the Cache revision and Cache epoch current when the view was taken; a Frontend client adopts them as its baseline at startup, when a Cache revision gap is detected, and when the Cache epoch changes.
 _Avoid_: live cache object, mutable cache reference
+
+**Cache change event**:
+A cache-authority broadcast that reports which Cache entries changed and which Link scopes were removed since the previous event, tagged with a Cache revision and the Cache epoch.
+_Avoid_: full cache broadcast, cache snapshot push
+
+**Cache revision**:
+The strictly increasing per-process number attached to each Cache change event and Cache snapshot; a gap between the last revision a Frontend client saw and the next event's revision means its local cache is out of date, and the number is discarded when the Cache epoch changes.
+_Avoid_: version number, cache generation
+
+**Cache epoch**:
+The per-process marker identifying a Cache authority instance, changing whenever the kernel plugin starts or reloads; a Frontend client uses it to detect that the per-process Cache revision was reset and resynchronize.
+_Avoid_: version number, cache generation
 
 **Cache persistence batch**:
 One durable cache-index write that commits all compatible cache-entry changes collected during a short scheduling window. Each committed resolution publishes state only after that write succeeds; its earlier Queue acknowledgement does not represent a commit.
@@ -129,7 +165,7 @@ The frontend behavior that renders Linkmark's selected icon according to its own
 _Avoid_: Link Icon compatibility, cooperative rendering
 
 **Icon rule**:
-The frontend-generated runtime stylesheet fragment that maps a link scope to the icon URL chosen for it, sized by the display preference.
+The frontend-generated runtime stylesheet fragment that maps a Present scope to the icon URL chosen for it, sized by the display preference.
 _Avoid_: style rule, selector string
 
 **Specific-page discovery**:
@@ -139,6 +175,10 @@ _Avoid_: ordinary favicon retrieval, automatic page visit
 **Link scope**:
 The cache identity for a link: a domain or a domain-plus-route key when the site needs route-specific icons.
 _Avoid_: bare domain, page URL
+
+**Present scope**:
+A Link scope whose link elements currently exist in a mounted editor or static container in a Frontend client's document; Icon rules are generated for Present scopes, so the stylesheet stays bounded by document content rather than cache size.
+_Avoid_: active scope key, visible scope
 
 **Parent-domain probing**:
 The resolution fallback that retrieves the registrable parent domain's candidates after the exact-domain candidates fail.
@@ -161,7 +201,7 @@ A kernel-resident favicon resolution task that may continue after a frontend clo
 _Avoid_: durable job, resumable task
 
 **Resolution outcome notification**:
-A cache-authority broadcast marking an In-flight task as committed or exhausted. A committed task sends the authoritative cache snapshot; an exhausted task sends only its Link scope and a sanitized failure category. Automatic failures remain silent, while a manual refresh may present one actionable message.
+A cache-authority broadcast marking an In-flight task as committed or exhausted. A committed task's entry arrives through a Cache change event; an exhausted task sends only its Link scope and a sanitized failure category.
 _Avoid_: RPC error, remote response payload, retry loop
 
 **Resolution concurrency**:
