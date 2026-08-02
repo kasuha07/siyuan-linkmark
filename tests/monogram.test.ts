@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { monogramSvg, type MonogramSource } from "../src/monogram";
+import type { MonogramOverride } from "../src/resolver-contract";
 
 const defaultSource: MonogramSource = {
   domain: "example.com",
@@ -91,6 +92,31 @@ describe("monogramSvg", () => {
     });
     expect(overridden).toContain('stop-color="#123456"');
     expect(overridden).not.toContain("hsl(");
+  });
+
+  it("preserves legacy fallback output for malformed persisted override fields", () => {
+    const legacyOverride = {
+      letter: "E",
+      primary: null,
+      secondary: null,
+      text: null,
+      shape: null,
+    } as unknown as MonogramOverride;
+
+    expect(monogramSvg({
+      ...defaultSource,
+      colorMode: "custom",
+      primary: "#111111",
+      secondary: "#222222",
+      text: "#333333",
+      shape: "circle",
+      overrides: { "example.com": legacyOverride },
+    })).toBe(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">'
+      + '<defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#4F7CFF"/><stop offset="1" stop-color="#745CFF"/></linearGradient></defs>'
+      + '<rect width="64" height="64" rx="14" fill="url(#g)"/>'
+      + '<text x="32" y="43" text-anchor="middle" font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="#FFFFFF">E</text></svg>',
+    );
   });
 
   it.each([
