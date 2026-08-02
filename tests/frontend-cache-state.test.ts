@@ -151,6 +151,7 @@ describe("planScanDecision", () => {
 });
 
 describe("applyCacheChangeEvent", () => {
+  const epoch = "test-epoch";
   const base = () => ({
     "example.com": entry(),
     "docs.qq.com::doc": entry({ url: "route-icon.png", domain: "docs.qq.com" }),
@@ -160,6 +161,7 @@ describe("applyCacheChangeEvent", () => {
     const cache = base();
     const upserted = entry({ url: "new-icon.png" });
     const application = applyCacheChangeEvent(cache, {
+      epoch,
       revision: 7,
       upserts: { "new.example.com": upserted },
       removed: ["docs.qq.com::doc"],
@@ -178,6 +180,7 @@ describe("applyCacheChangeEvent", () => {
 
   it("treats the first event as valid without a prior revision", () => {
     const application = applyCacheChangeEvent({}, {
+      epoch,
       revision: 12,
       upserts: { "example.com": entry() },
       removed: [],
@@ -190,6 +193,7 @@ describe("applyCacheChangeEvent", () => {
 
   it("detects a revision gap and requests a snapshot refetch", () => {
     const application = applyCacheChangeEvent(base(), {
+      epoch,
       revision: 9,
       upserts: { "new.example.com": entry() },
       removed: ["example.com"],
@@ -200,6 +204,7 @@ describe("applyCacheChangeEvent", () => {
   it("ignores stale events at or below the last seen revision", () => {
     for (const revision of [5, 4]) {
       const application = applyCacheChangeEvent(base(), {
+        epoch,
         revision,
         upserts: { "new.example.com": entry() },
         removed: ["example.com"],
@@ -221,6 +226,8 @@ describe("applyCacheChangeEvent", () => {
       { revision: 1, upserts: [], removed: [] },
       { revision: 1, upserts: {}, removed: "x" },
       { revision: Number.NaN, upserts: {}, removed: [] },
+      { revision: 1, upserts: {}, removed: [], epoch: 7 },
+      { revision: 1, upserts: {}, removed: [], epoch: undefined },
     ]) {
       expect(applyCacheChangeEvent(base(), event, 0)).toEqual({ status: "ignored" });
     }
@@ -229,6 +236,7 @@ describe("applyCacheChangeEvent", () => {
   it("keeps existing entries when an upserted entry is malformed", () => {
     const cache = base();
     const application = applyCacheChangeEvent(cache, {
+      epoch,
       revision: 8,
       upserts: { "example.com": { fetchedAt: 1 }, "new.example.com": entry({ url: "ok.png" }) },
       removed: [],
@@ -241,7 +249,37 @@ describe("applyCacheChangeEvent", () => {
   });
 
   it("advances the tracked revision even for an empty event", () => {
-    const application = applyCacheChangeEvent(base(), { revision: 3, upserts: {}, removed: [] }, 2);
+    const application = applyCacheChangeEvent(base(), { epoch, revision: 3, upserts: {}, removed: [] }, 2);
     expect(application).toMatchObject({ status: "applied", revision: 3 });
+  });
+
+  it("requests a refetch when an event arrives from a different epoch", () => {
+    const application = applyCacheChangeEvent(base(), {
+      epoch: "other-epoch",
+      revision: 1,
+      upserts: { "new.example.com": entry() },
+      removed: ["example.com"],
+    }, 42, epoch);
+    expect(application).toEqual({ status: "epoch-changed", revision: 1 });
+  });
+
+  it("applies an event whose epoch matches the expected epoch", () => {
+    const application = applyCacheChangeEvent(base(), {
+      epoch,
+      revision: 43,
+      upserts: { "new.example.com": entry() },
+      removed: [],
+    }, 42, epoch);
+    expect(application.status).toBe("applied");
+  });
+
+  it("does not compare epochs when no expected epoch has been adopted yet", () => {
+    const application = applyCacheChangeEvent({}, {
+      epoch,
+      revision: 3,
+      upserts: { "example.com": entry() },
+      removed: [],
+    }, undefined);
+    expect(application.status).toBe("applied");
   });
 });

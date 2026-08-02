@@ -23,35 +23,56 @@ export type CacheMatch = { cacheKey: string; entry: CacheEntry };
 /**
  * A revisioned incremental change event broadcast by the Cache authority.
  * `upserts` maps Link scope keys to their new Cache entries and `removed`
- * lists the keys that left the cache since the previous event.
+ * lists the keys that left the cache since the previous event. The epoch
+ * identifies the authority's kernel process: an epoch different from the
+ * one a client last synced means the per-process revision was reset.
  */
 export type CacheChangeEvent = {
+  epoch: string;
   revision: number;
   upserts: Record<string, CacheEntry>;
   removed: string[];
 };
 
+/**
+ * The authoritative cache together with the revision and epoch current at
+ * the moment the snapshot was taken. A client adopts these as its baseline.
+ */
+export type CacheSnapshot = {
+  cache: Record<string, CacheEntry>;
+  revision: number;
+  epoch: string;
+};
+
 export type CacheEventApplication =
   | { status: "applied"; cache: Record<string, CacheEntry>; revision: number }
   | { status: "refetch"; revision: number }
+  | { status: "epoch-changed"; revision: number }
   | { status: "ignored" };
 
 /**
- * Applies a Cache change event to a local cache copy. The first event is
- * valid without a prior revision; later events must follow the previous
- * revision by exactly one, and a gap requests a snapshot refetch instead of
- * an application. Stale, malformed, and missing-revision events leave the
- * cache untouched.
+ * Applies a Cache change event to a local cache copy against the baseline
+ * last seen: the last applied revision and the epoch the snapshot adopted.
+ * An event from another epoch requests a snapshot refetch and rebaseline,
+ * since the local revision cannot be compared across processes. The first
+ * event is valid without a prior revision; later events must follow the
+ * previous revision by exactly one, and a gap requests a snapshot refetch
+ * instead of an application. Stale, malformed, and missing-revision events
+ * leave the cache untouched.
  */
 export function applyCacheChangeEvent(
   cache: Record<string, CacheEntry>,
   event: unknown,
   lastRevision: number | undefined,
+  expectedEpoch?: string,
 ): CacheEventApplication {
   if (!isRecord(event)) return { status: "ignored" };
   const revision = event.revision;
   if (typeof revision !== "number" || !Number.isFinite(revision)) return { status: "ignored" };
   if (!isRecord(event.upserts) || !Array.isArray(event.removed)) return { status: "ignored" };
+  const epoch = event.epoch;
+  if (typeof epoch !== "string") return { status: "ignored" };
+  if (expectedEpoch !== undefined && epoch !== expectedEpoch) return { status: "epoch-changed", revision };
   if (lastRevision !== undefined) {
     if (revision <= lastRevision) return { status: "ignored" };
     if (revision !== lastRevision + 1) return { status: "refetch", revision };

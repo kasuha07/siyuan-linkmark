@@ -70,7 +70,7 @@ class LinkmarkKernel {
         traceSink: this.traceSink,
       });
       await this.authority.initialize();
-      await siyuan.rpc.bind("cache.snapshot", async () => this.requireAuthority().snapshot(), "Returns the authoritative favicon cache.");
+      await siyuan.rpc.bind("cache.snapshot", async () => this.requireAuthority().snapshot(), "Returns the authoritative favicon cache with its revision and epoch.");
       await siyuan.rpc.bind("cache.get-or-queue", async (scope: LinkScope, force = false, automatic = false) => {
         if (!this.authority) return { status: "unavailable" as const };
         return this.requireAuthority().getOrQueue(normalizeScope(scope), force, automatic);

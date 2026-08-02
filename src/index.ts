@@ -33,6 +33,7 @@ import {
   isCacheEntryFresh,
   planScanDecision,
   type CacheEntry,
+  type CacheSnapshot,
 } from "./frontend-cache-state";
 import { shareDomainFor } from "./parent-domain";
 import {
@@ -92,6 +93,7 @@ export default class LinkmarkPlugin extends Plugin {
   private automaticFetchGeneration = 0;
   private cacheGeneration = 0;
   private lastCacheRevision: number | undefined;
+  private lastCacheEpoch: string | undefined;
   private traceEnabled = false;
   private readonly inputListener = (event: Event) => this.scheduleInputScan(event.target);
 
@@ -132,11 +134,11 @@ export default class LinkmarkPlugin extends Plugin {
 
   private async loadKernelState() {
     try {
-      const [cache, policy] = await Promise.all([
-        this.callKernel<Record<string, CacheEntry>>("cache.snapshot"),
+      const [snapshot, policy] = await Promise.all([
+        this.callKernel<CacheSnapshot>("cache.snapshot"),
         this.callKernel<Partial<Settings>>("cache.policy.get"),
       ]);
-      this.cache = cache && typeof cache === "object" ? cache : {};
+      this.adoptSnapshot(snapshot);
       this.applyCachePolicy(policy);
     } catch (error) {
       this.cache = {};
@@ -145,13 +147,26 @@ export default class LinkmarkPlugin extends Plugin {
   }
 
   /**
-   * Recovers from a Cache revision gap by refetching the authoritative
-   * snapshot. The tracked revision only advances when the refetch succeeds,
-   * so a suspended window keeps retrying the snapshot on the next event.
+   * Adopts a kernel Cache snapshot as the local baseline: the cache contents
+   * plus the revision and epoch captured at snapshot time. Revision and epoch
+   * are adopted only when the snapshot carries them, so an event stream from
+   * another epoch still triggers a rebaseline instead of being misapplied.
+   */
+  private adoptSnapshot(snapshot: CacheSnapshot | null | undefined) {
+    this.cache = snapshot && typeof snapshot.cache === "object" ? snapshot.cache : {};
+    if (typeof snapshot?.revision === "number") this.lastCacheRevision = snapshot.revision;
+    if (typeof snapshot?.epoch === "string") this.lastCacheEpoch = snapshot.epoch;
+  }
+
+  /**
+   * Recovers from a Cache revision gap or an epoch change by refetching the
+   * authoritative snapshot and adopting its revision and epoch as the new
+   * baseline. The baseline only advances when the refetch succeeds, so a
+   * suspended window keeps retrying the snapshot on the next event.
    */
   private async refetchCacheSnapshot() {
     try {
-      this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+      this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
       this.updateCacheCount();
       this.requestRuleRebuild();
       this.scheduleScan();
@@ -167,12 +182,10 @@ export default class LinkmarkPlugin extends Plugin {
     if (!bind) return;
     await bind("cache.changed", (params) => {
       const payload = params?.params && typeof params.params === "object" ? params.params : params;
-      const application = applyCacheChangeEvent(this.cache, payload, this.lastCacheRevision);
+      const application = applyCacheChangeEvent(this.cache, payload, this.lastCacheRevision, this.lastCacheEpoch);
       if (application.status === "ignored") return;
-      if (application.status === "refetch") {
-        void this.refetchCacheSnapshot().then((refetched) => {
-          if (refetched) this.lastCacheRevision = application.revision;
-        });
+      if (application.status === "refetch" || application.status === "epoch-changed") {
+        void this.refetchCacheSnapshot();
         return;
       }
       this.lastCacheRevision = application.revision;
@@ -808,7 +821,7 @@ export default class LinkmarkPlugin extends Plugin {
 
   private async removeCachedDomain(key: string) {
     await this.callKernel("cache.remove", key);
-    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.delete(key);
     this.manualRefreshKeys.delete(key);
     this.requestRuleRebuild();
@@ -1010,7 +1023,7 @@ export default class LinkmarkPlugin extends Plugin {
     const entry = this.cache[key];
     if (!entry?.pinned) return;
     await this.callKernel("cache.remove", key);
-    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.delete(key);
     this.manualRefreshKeys.delete(key);
     this.requestRuleRebuild();
@@ -1199,7 +1212,7 @@ export default class LinkmarkPlugin extends Plugin {
 
   private async invalidateGeneratedMonograms() {
     await this.callKernel("cache.clear-generated");
-    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.clear();
     this.manualRefreshKeys.clear();
     this.requestRuleRebuild();
@@ -1209,7 +1222,7 @@ export default class LinkmarkPlugin extends Plugin {
   private async clearCache() {
     this.cacheGeneration += 1;
     await this.callKernel("cache.clear");
-    this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.clear();
     this.manualRefreshKeys.clear();
     this.requestRuleRebuild();
@@ -1222,6 +1235,9 @@ export default class LinkmarkPlugin extends Plugin {
         this.scheduleScanForNode(record.target);
         if (record.type === "childList") {
           for (const node of record.addedNodes) this.scheduleAddedNodeScan(node);
+          if (this.removedNodesContainLink(record.removedNodes)) this.scheduleScan();
+        } else if (record.type === "attributes" && this.linkAttributeRemovedOrRewritten(record)) {
+          this.scheduleScan();
         }
       }
     });
@@ -1233,6 +1249,33 @@ export default class LinkmarkPlugin extends Plugin {
       attributeFilter: ["data-href", "href", "data-type"],
     });
     document.addEventListener("input", this.inputListener, true);
+  }
+
+  /**
+   * A link scope can leave the document without any added node to scan, so a
+   * removed link subtree escalates to a full discovery: the full scan evicts
+   * Icon rules for scopes that are no longer Present, which a local scan
+   * never does. The render-work debounce coalesces the removals protyle
+   * performs while re-creating elements during editing.
+   */
+  private removedNodesContainLink(nodes: NodeList): boolean {
+    for (const node of nodes) {
+      if (node instanceof Element && (node.matches(LINK_SELECTOR) || node.querySelector(LINK_SELECTOR))) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Rewriting a link's href or data-href replaces the scope it represents,
+   * and dropping data-type or the href attributes un-links an element, so
+   * the previously Present scope may have left the document. Both escalate
+   * to a full discovery for the same eviction reason as a removed subtree.
+   */
+  private linkAttributeRemovedOrRewritten(record: MutationRecord): boolean {
+    const target = record.target instanceof Element ? record.target : null;
+    if (!target) return false;
+    if (record.attributeName === "href" || record.attributeName === "data-href") return true;
+    return record.attributeName === "data-type" && !target.matches(LINK_SELECTOR);
   }
 
   private scheduleScan(root?: Element | null) {
@@ -1406,7 +1449,7 @@ export default class LinkmarkPlugin extends Plugin {
     try {
       if (this.cache[key] !== expected) return;
       await this.callKernel("cache.remove", key);
-      this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
+      this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
       this.requestRuleRebuild();
       this.updateCacheCount();
     } finally {

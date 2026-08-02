@@ -110,6 +110,10 @@ const resolved = (source = "test resolver"): { bytes: ArrayBuffer; contentType: 
 
 const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+function snapshotCache(authority: KernelCacheAuthority): Record<string, CacheEntry> {
+  return authority.snapshot().cache;
+}
+
 class RecordingTrace {
   readonly records: ResolutionTraceRecord[] = [];
   readonly sink: ResolutionTraceSink = (record) => { this.records.push(record); };
@@ -203,11 +207,11 @@ describe("KernelCacheAuthority", () => {
     await authority.initialize();
 
     await authority.getOrQueue(scope());
-    await vi.waitFor(() => expect(authority.snapshot()["example.com"]).toBeDefined());
+    await vi.waitFor(() => expect(snapshotCache(authority)["example.com"]).toBeDefined());
     now += 31 * 86400000;
 
     const result = await authority.getOrQueue(scope());
-    await vi.waitFor(() => expect(authority.snapshot()["example.com"]?.fetchedAt).toBe(now));
+    await vi.waitFor(() => expect(snapshotCache(authority)["example.com"]?.fetchedAt).toBe(now));
 
     expect(result).toEqual({ status: "queued" });
     expect(resolve).toHaveBeenCalledTimes(2);
@@ -222,7 +226,7 @@ describe("KernelCacheAuthority", () => {
     await authority.initialize();
 
     await authority.getOrQueue(scope());
-    await vi.waitFor(() => expect(authority.snapshot()["example.com"]).toBeDefined());
+    await vi.waitFor(() => expect(snapshotCache(authority)["example.com"]).toBeDefined());
     now += 3650 * 86400000;
 
     await expect(authority.getOrQueue(scope())).resolves.toEqual({
@@ -239,9 +243,9 @@ describe("KernelCacheAuthority", () => {
 
     await authority.getOrQueue(scope("example.com"));
     await authority.getOrQueue({ key: "example.com::doc", domain: "example.com", targetUrl: "https://example.com/doc" });
-    await vi.waitFor(() => expect(Object.keys(authority.snapshot())).toHaveLength(2));
+    await vi.waitFor(() => expect(Object.keys(snapshotCache(authority))).toHaveLength(2));
 
-    const [first, second] = Object.values(authority.snapshot()).map((entry) => entry.iconId!);
+    const [first, second] = Object.values(snapshotCache(authority)).map((entry) => entry.iconId!);
     expect(first).not.toBe(second);
     for (const iconId of [first, second]) {
       expect(iconId).toMatch(/^[A-Za-z0-9._-]+$/);
@@ -275,9 +279,9 @@ describe("KernelCacheAuthority", () => {
     const result = await authority.getOrQueue(scope());
 
     expect(result).toEqual({ status: "queued" });
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
   });
 
   it("returns queued while the cache-index persistence of an earlier task is still in flight", async () => {
@@ -295,7 +299,7 @@ describe("KernelCacheAuthority", () => {
     storage.releaseCacheIndexWrite();
 
     await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
-    expect(authority.snapshot()["example.com"]).toMatchObject({ source: "test resolver" });
+    expect(snapshotCache(authority)["example.com"]).toMatchObject({ source: "test resolver" });
   });
 
   it("coalesces concurrent requests for the same Link scope", async () => {
@@ -457,10 +461,10 @@ describe("KernelCacheAuthority", () => {
       await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
       await vi.waitFor(() => expect(received).toHaveLength(1));
       received[0].upserts["example.com"].source = "subscriber mutation";
-      const snapshot = authority.snapshot();
+      const snapshot = snapshotCache(authority);
       snapshot["example.com"].source = "caller mutation";
 
-      expect(authority.snapshot()["example.com"]).toMatchObject({ source: "test resolver" });
+      expect(snapshotCache(authority)["example.com"]).toMatchObject({ source: "test resolver" });
     } finally {
       vi.unstubAllGlobals();
     }
@@ -480,7 +484,7 @@ describe("KernelCacheAuthority", () => {
     resolveDownload?.(resolved());
 
     await settle();
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     expect(storage.files.has("icons/example.com.base64")).toBe(false);
   });
 
@@ -502,7 +506,7 @@ describe("KernelCacheAuthority", () => {
 
     await settle();
     expect(failures).toEqual([]);
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
   });
 
   it("starts a replacement task after an invalidated scope finishes", async () => {
@@ -530,7 +534,7 @@ describe("KernelCacheAuthority", () => {
     releases[1]?.();
 
     await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the replacement commit broadcast");
-    expect(authority.snapshot()).toEqual({
+    expect(snapshotCache(authority)).toEqual({
       "example.com": expect.objectContaining({ source: "resolver 2" }),
     });
   });
@@ -560,6 +564,7 @@ describe("KernelCacheAuthority", () => {
     expect(storage.cacheIndexWrites).toBe(1);
     expect(received).toEqual([
       {
+        epoch: expect.any(String),
         revision: 1,
         upserts: {
           "first.example.com": expect.objectContaining({ source: "first.example.com" }),
@@ -568,10 +573,55 @@ describe("KernelCacheAuthority", () => {
         removed: [],
       },
     ]);
-    expect(authority.snapshot()).toEqual({
+    expect(snapshotCache(authority)).toEqual({
       "first.example.com": expect.objectContaining({ source: "first.example.com" }),
       "second.example.com": expect.objectContaining({ source: "second.example.com" }),
     });
+  });
+
+  it("returns the cache with its revision and epoch from the snapshot", async () => {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => resolved(),
+    }, () => 100);
+    await authority.initialize();
+
+    expect(authority.snapshot()).toEqual({
+      cache: {},
+      revision: 0,
+      epoch: expect.any(String),
+    });
+  });
+
+  it("tags every change event with the epoch and advances the snapshot revision", async () => {
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => resolved(),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope("first.example.com"))).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    await authority.remove("first.example.com");
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+
+    expect(received[0].epoch).toBe(received[1].epoch);
+    expect(received.map((event) => event.revision)).toEqual([1, 2]);
+    expect(authority.snapshot()).toEqual({
+      cache: {},
+      revision: 2,
+      epoch: received[0].epoch,
+    });
+  });
+
+  it("uses a fresh epoch for a new authority instance", async () => {
+    const first = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => resolved() }, () => 100);
+    const second = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => resolved() }, () => 100);
+    await first.initialize();
+    await second.initialize();
+
+    expect(first.snapshot().epoch).not.toBe(second.snapshot().epoch);
   });
 
   it("does not publish any resolved scope when its cache-index batch fails", async () => {
@@ -595,7 +645,7 @@ describe("KernelCacheAuthority", () => {
     expect(storage.cacheIndexWrites).toBe(1);
     expect(received).toEqual([]);
     expect(failures).toEqual([]);
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     expect([...storage.files.keys()].filter((path) => path.startsWith("icons/"))).toEqual([]);
   });
 
@@ -614,7 +664,7 @@ describe("KernelCacheAuthority", () => {
 
     await removal;
     await settle();
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     expect(storage.files.has("icons/example.com.base64")).toBe(false);
   });
 
@@ -632,7 +682,7 @@ describe("KernelCacheAuthority", () => {
     resolveDownload?.(resolved());
 
     await settle();
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
   });
 
   it("retains pinned entries when clearing the workspace cache", async () => {
@@ -650,7 +700,7 @@ describe("KernelCacheAuthority", () => {
 
     await authority.clear();
 
-    expect(authority.snapshot()).toEqual({
+    expect(snapshotCache(authority)).toEqual({
       "pinned.example.com": expect.objectContaining({ pinned: true }),
     });
   });
@@ -665,7 +715,7 @@ describe("KernelCacheAuthority", () => {
 
     await expect(authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([2]).buffer)).rejects.toThrow("simulated storage failure");
 
-    expect(authority.snapshot()["example.com"]).toMatchObject({ iconId: first.iconId, pinned: true });
+    expect(snapshotCache(authority)["example.com"]).toMatchObject({ iconId: first.iconId, pinned: true });
     await expect(authority.icon(first.iconId!)).resolves.toMatchObject({ contentType: "image/png" });
     const result = await authority.getOrQueue(scope());
     expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: first.iconId, pinned: true }) });
@@ -718,7 +768,7 @@ describe("KernelCacheAuthority", () => {
 
     await authority.initialize();
 
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     expect(storage.files.has("favicon-cache-v2.json")).toBe(false);
     expect(storage.files.get("favicon-cache.json")).toContain("pinned.example.com");
   });
@@ -739,7 +789,7 @@ describe("KernelCacheAuthority", () => {
 
     await authority.initialize();
 
-    expect(authority.snapshot()["pinned.example.com"]).toMatchObject({
+    expect(snapshotCache(authority)["pinned.example.com"]).toMatchObject({
       pinned: true,
       url: "/plugin/private/siyuan-linkmark/icon/pinned-1",
       iconId: "pinned-1",
@@ -762,7 +812,7 @@ describe("KernelCacheAuthority", () => {
     ]);
 
     await vi.waitFor(() => expect(received).toHaveLength(1));
-    expect(authority.snapshot()).toEqual({
+    expect(snapshotCache(authority)).toEqual({
       "docs.example.com::doc": expect.objectContaining({ source: "docs.example.com::doc" }),
       "docs.example.com::sheet": expect.objectContaining({ source: "docs.example.com::sheet" }),
     });
@@ -805,7 +855,7 @@ describe("KernelCacheAuthority", () => {
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(failures).toHaveLength(1));
     expect(failures[0]).toEqual({ key: "example.com", category: "network" });
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
     expect([...storage.files.keys()].filter((path) => path.startsWith("icons/"))).toEqual([]);
   });
 
@@ -821,7 +871,7 @@ describe("KernelCacheAuthority", () => {
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(failures).toHaveLength(1));
     expect(failures[0]).toEqual({ key: "example.com", category: "exhausted" });
-    expect(authority.snapshot()).toEqual({});
+    expect(snapshotCache(authority)).toEqual({});
   });
 
   it("traces a cache miss from acceptance through resolve, persist, and commit", async () => {
@@ -1110,7 +1160,7 @@ describe("KernelCacheAuthority", () => {
     await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
 
     expect(resolve).toHaveBeenCalledTimes(1);
-    expect(authority.snapshot()).toEqual({ "example.com": expect.objectContaining({ source: "test resolver" }) });
+    expect(snapshotCache(authority)).toEqual({ "example.com": expect.objectContaining({ source: "test resolver" }) });
     expect(failures).toEqual([]);
   });
 
@@ -1126,7 +1176,7 @@ describe("KernelCacheAuthority", () => {
     await authority.putPinned(scope("first.example.com"), entry({ domain: "first.example.com", pinned: true }), "image/png", new Uint8Array([1]).buffer);
     await authority.putPinned(scope("second.example.com"), entry({ domain: "second.example.com", pinned: true }), "image/png", new Uint8Array([2]).buffer);
     await expect(authority.getOrQueue(scope("third.example.com"))).resolves.toEqual({ status: "queued" });
-    await vi.waitFor(() => expect(authority.snapshot()["third.example.com"]).toBeDefined());
+    await vi.waitFor(() => expect(snapshotCache(authority)["third.example.com"]).toBeDefined());
     await authority.remove("third.example.com");
 
     expect(received.map((event) => event.revision)).toEqual([1, 2, 3, 4]);
@@ -1145,32 +1195,33 @@ describe("KernelCacheAuthority", () => {
     await authority.putPinned(scope("generated.example.com"), entry({ domain: "generated.example.com", pinned: true, source: "generated monogram" }), "image/svg+xml", new Uint8Array([1]).buffer);
     await authority.putPinned(scope("pinned.example.com"), entry({ domain: "pinned.example.com", pinned: true }), "image/png", new Uint8Array([2]).buffer);
     await expect(authority.getOrQueue(scope("plain.example.com"))).resolves.toEqual({ status: "queued" });
-    await vi.waitFor(() => expect(authority.snapshot()["plain.example.com"]).toBeDefined());
+    await vi.waitFor(() => expect(snapshotCache(authority)["plain.example.com"]).toBeDefined());
     nextEvent = received.length;
 
     await authority.remove("plain.example.com");
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[nextEvent]).toEqual({ revision: expect.any(Number), upserts: {}, removed: ["plain.example.com"] });
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), upserts: {}, removed: ["plain.example.com"] });
     nextEvent = received.length;
 
     await authority.clearGenerated();
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[nextEvent]).toEqual({ revision: expect.any(Number), upserts: {}, removed: ["generated.example.com"] });
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), upserts: {}, removed: ["generated.example.com"] });
     nextEvent = received.length;
 
     await expect(authority.getOrQueue(scope("plain-2.example.com"))).resolves.toEqual({ status: "queued" });
-    await vi.waitFor(() => expect(authority.snapshot()["plain-2.example.com"]).toBeDefined());
+    await vi.waitFor(() => expect(snapshotCache(authority)["plain-2.example.com"]).toBeDefined());
     nextEvent = received.length;
 
     await authority.clear();
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[nextEvent]).toEqual({ revision: expect.any(Number), upserts: {}, removed: ["plain-2.example.com"] });
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), upserts: {}, removed: ["plain-2.example.com"] });
     nextEvent = received.length;
 
     await authority.putPinned(scope("second.example.com"), entry({ domain: "second.example.com", pinned: true }), "image/png", new Uint8Array([3]).buffer);
     await authority.putPinned(scope("first.example.com"), entry({ domain: "first.example.com", pinned: true }), "image/png", new Uint8Array([4]).buffer, "second.example.com");
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
     expect(received[received.length - 1]).toEqual({
+      epoch: expect.any(String),
       revision: expect.any(Number),
       upserts: { "first.example.com": expect.objectContaining({ pinned: true }) },
       removed: ["second.example.com"],
@@ -1182,8 +1233,8 @@ describe("KernelCacheAuthority", () => {
     const authority = new KernelCacheAuthority(storage, { resolve: async () => resolved() }, () => 100);
     await authority.initialize();
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
-    await vi.waitFor(() => expect(authority.snapshot()["example.com"]).toBeDefined());
-    const iconId = authority.snapshot()["example.com"].iconId!;
+    await vi.waitFor(() => expect(snapshotCache(authority)["example.com"]).toBeDefined());
+    const iconId = snapshotCache(authority)["example.com"].iconId!;
 
     await expect(authority.icon(iconId)).resolves.toMatchObject({ contentType: "image/png" });
     const mismatch = `${iconId.slice(0, iconId.lastIndexOf("-"))}-9`;
@@ -1236,7 +1287,7 @@ describe("KernelCacheAuthority", () => {
     await expect(authority.icon(stale)).resolves.toBeUndefined();
 
     await authority.remove(scope().key);
-    await vi.waitFor(() => expect(authority.snapshot()).toEqual({}));
+    await vi.waitFor(() => expect(snapshotCache(authority)).toEqual({}));
     await expect(authority.icon(current)).resolves.toBeUndefined();
   });
 

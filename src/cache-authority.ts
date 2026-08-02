@@ -80,12 +80,27 @@ export interface IconResolver {
  * A revisioned incremental broadcast describing one committed Cache
  * persistence batch: the entries that were added or replaced and the Link
  * scope keys that left the cache. The revision is a strictly increasing
- * per-process counter, so a Frontend client can detect a missed batch.
+ * per-process counter, so a Frontend client can detect a missed batch; the
+ * epoch identifies the kernel process that produced the batch, so a client
+ * can detect that a restart reset the revision.
  */
 export type CacheChangeEvent = {
+  epoch: string;
   revision: number;
   upserts: Record<string, CacheEntry>;
   removed: string[];
+};
+
+/**
+ * An isolated view of the authoritative Cache together with the revision
+ * and epoch current at the moment the view was taken. A Frontend client
+ * adopts these as its baseline so events at or below the snapshot revision
+ * are known to be already contained.
+ */
+export type CacheSnapshot = {
+  cache: Record<string, CacheEntry>;
+  revision: number;
+  epoch: string;
 };
 
 export type CacheAuthorityOptions = {
@@ -135,6 +150,7 @@ export class KernelCacheAuthority {
   private policy: CachePolicy;
   private iconSequence = 0;
   private cacheRevision = 0;
+  private readonly cacheEpoch = newCacheEpoch();
   private traceSequence = 0;
   private readonly traceTerminals = new Set<string>();
   private traceSink?: ResolutionTraceSink;
@@ -160,8 +176,8 @@ export class KernelCacheAuthority {
     return this.initializing;
   }
 
-  snapshot() {
-    return copyCache(this.cache);
+  snapshot(): CacheSnapshot {
+    return { cache: copyCache(this.cache), revision: this.cacheRevision, epoch: this.cacheEpoch };
   }
 
   setPolicy(policy: CachePolicy) {
@@ -593,7 +609,7 @@ export class KernelCacheAuthority {
     for (const key of Object.keys(previous)) {
       if (!(key in next)) removed.push(key);
     }
-    await this.options.onCacheChanged?.({ revision: this.cacheRevision, upserts, removed });
+    await this.options.onCacheChanged?.({ epoch: this.cacheEpoch, revision: this.cacheRevision, upserts, removed });
   }
 
   private async notifyResolutionFailure(scope: LinkScope, category: ResolutionFailureCategory) {
@@ -716,6 +732,15 @@ function copyCache(cache: Record<string, CacheEntry>): Record<string, CacheEntry
 
 function copyEntry(entry: CacheEntry): CacheEntry {
   return { ...entry };
+}
+
+/**
+ * Generates the per-process Cache epoch identifying this kernel authority
+ * instance. A timestamp plus a random suffix makes two consecutive authority
+ * constructions distinguishable while remaining cheap and local.
+ */
+function newCacheEpoch(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /**
