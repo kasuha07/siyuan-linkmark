@@ -3,7 +3,6 @@ import "./style.css";
 import type { CacheRequestResult } from "./cache-authority";
 import {
   isDecodableImage,
-  parentDomainOf,
   type FallbackMode,
   type MonogramColorMode,
   type MonogramShape,
@@ -27,21 +26,15 @@ import {
   FrontendRenderWorkQueue,
   localDiscoveryRegionFor,
 } from "./frontend-render-work";
+import {
+  cachedIconForScope,
+  isCacheEntryFresh,
+  planScanDecision,
+  shareDomainFor,
+  type CacheEntry,
+} from "./frontend-cache-state";
 import { fetchOutcomeFor, type FetchOutcome } from "./refresh-outcome";
-import { scopeForUrl, scopeFromCacheKey, scopeMatchTarget, type LinkScope } from "./url-scope";
-
-type CacheEntry = {
-  url: string;
-  fetchedAt: number;
-  resolverVersion?: number;
-  source?: string;
-  targetUrl?: string;
-  domain?: string;
-  routeKey?: string;
-  pathPrefix?: string;
-  pinned?: boolean;
-  includeSubdomains?: boolean;
-};
+import { scopeForUrl, scopeFromCacheKey, type LinkScope } from "./url-scope";
 
 type FetchTrigger = "automatic" | "manual";
 
@@ -49,7 +42,6 @@ const DISPLAY_SETTINGS_FILE = "display-settings-v2.json";
 const RUNTIME_STYLE_ID = "siyuan-linkmark-runtime-style";
 const FEEDBACK_URL = "https://github.com/kasuha07/siyuan-linkmark/issues";
 const RESOLVER_VERSION = 6;
-const FAILURE_COOLDOWN = 10 * 60 * 1000;
 const MANUAL_FAILURE_WINDOW = 60 * 1000;
 const RULE_RENDER_BATCH_DELAY = 16;
 const LINK_SELECTOR = [
@@ -750,7 +742,7 @@ export default class LinkmarkPlugin extends Plugin {
     let failed = 0;
     const failures: string[] = [];
     await Promise.all(items.map(async ([key, { scope, targetUrl }]) => {
-      if (this.cachedIconForScope(scope)?.entry.pinned) skipped += 1;
+      if (cachedIconForScope(this.cache, scope)?.entry.pinned) skipped += 1;
       else {
         const outcome = await this.fetchAndCache(scope, targetUrl, true, "manual");
         if (outcome === "queued" || outcome === "success" || outcome === "fallback") queued += 1;
@@ -860,7 +852,7 @@ export default class LinkmarkPlugin extends Plugin {
           const source = this.cacheSourceLabel(entry.source);
           const status = entry.pinned
             ? this.t(entry.includeSubdomains ? "cachePinnedSubdomains" : "cachePinned")
-            : this.isCacheEntryFresh(entry) ? this.t("cacheFresh") : this.t("cacheExpired");
+            : isCacheEntryFresh(entry, this.settings.cacheDays) ? this.t("cacheFresh") : this.t("cacheExpired");
           meta.textContent = `${source} · ${new Date(entry.fetchedAt).toLocaleString()} · ${status}`;
           info.append(name, meta);
           const rowActions = document.createElement("div");
@@ -1015,7 +1007,7 @@ export default class LinkmarkPlugin extends Plugin {
     const root = dialog.element.querySelector<HTMLElement>(".siyuan-linkmark-picker");
     if (!root) return;
 
-    const sharedDomain = this.shareDomainFor(domain);
+    const sharedDomain = shareDomainFor(domain);
 
     const controls = document.createElement("div");
     controls.className = "siyuan-linkmark-picker-controls";
@@ -1211,13 +1203,6 @@ export default class LinkmarkPlugin extends Plugin {
     }
   }
 
-  private shareDomainFor(domain: string) {
-    if (domain.includes(":") || /^\d+(?:\.\d+){3}$/.test(domain)) return null;
-    const labels = domain.split(".");
-    if (labels.length < 2 || labels.some((label) => !label)) return null;
-    return parentDomainOf(domain) ?? domain;
-  }
-
   private async invalidateGeneratedMonograms() {
     await this.callKernel("cache.clear-generated");
     this.cache = await this.callKernel<Record<string, CacheEntry>>("cache.snapshot");
@@ -1303,44 +1288,30 @@ export default class LinkmarkPlugin extends Plugin {
 
     let rulesChanged = false;
     domains.forEach(({ scope, targetUrl }, key) => {
-      const cachedMatch = this.cachedIconForScope(scope);
-      if (cachedMatch) {
-        const { cacheKey, entry: cached } = cachedMatch;
-        if (!this.settings.pauseAutomaticFetch && !this.isCacheEntryFresh(cached)) {
-          void this.expireCachedDomain(cacheKey, cached);
-          return;
-        }
-        const rule = createIconRule(scope, cached.url, this.settings.iconSize);
+      const decision = planScanDecision({
+        scopeKey: key,
+        scope,
+        cache: this.cache,
+        pauseAutomaticFetch: this.settings.pauseAutomaticFetch,
+        cacheDays: this.settings.cacheDays,
+        failedAt: this.failedDomains.get(key),
+      });
+      if (decision.action === "expire") {
+        void this.expireCachedDomain(decision.cacheKey, decision.entry);
+        return;
+      }
+      if (decision.action === "keep") {
+        const rule = createIconRule(scope, decision.entry.url, this.settings.iconSize);
         if (this.iconRules.get(key) !== rule) {
           this.iconRules.set(key, rule);
           rulesChanged = true;
         }
-        if (cacheKey === key || cached.pinned || this.settings.pauseAutomaticFetch) return;
+        if (decision.fetch) void this.fetchAndCache(scope, targetUrl);
+        return;
       }
-      if (this.settings.pauseAutomaticFetch) return;
-      const failedAt = this.failedDomains.get(key);
-      if (failedAt && Date.now() - failedAt < FAILURE_COOLDOWN) return;
-      void this.fetchAndCache(scope, targetUrl);
+      if (decision.action === "fetch") void this.fetchAndCache(scope, targetUrl);
     });
     return rulesChanged;
-  }
-
-  private cachedIconForScope(scope: LinkScope) {
-    const exact = this.cache[scope.key];
-    if (exact?.pinned) return { cacheKey: scope.key, entry: exact };
-    const domainPinned = scope.routeKey ? this.cache[scope.domain] : undefined;
-    if (domainPinned?.pinned) return { cacheKey: scope.domain, entry: domainPinned };
-    let parent = this.shareDomainFor(scope.domain);
-    while (parent && parent !== scope.domain) {
-      const shared = this.cache[parent];
-      if (shared?.pinned && shared.includeSubdomains) return { cacheKey: parent, entry: shared };
-      const next = this.shareDomainFor(parent);
-      if (next === parent) break;
-      parent = next;
-    }
-    if (exact) return { cacheKey: scope.key, entry: exact };
-    const domainFallback = scope.routeKey ? this.cache[scope.domain] : undefined;
-    return domainFallback ? { cacheKey: scope.domain, entry: domainFallback } : null;
   }
 
   private fetchAndCache(
@@ -1444,12 +1415,6 @@ export default class LinkmarkPlugin extends Plugin {
     }
   }
 
-  private isCacheEntryFresh(entry: CacheEntry) {
-    if (entry.pinned) return true;
-    const maxAge = this.settings.cacheDays > 0 ? this.settings.cacheDays * 86400000 : Infinity;
-    return Date.now() - entry.fetchedAt <= maxAge;
-  }
-
   private async expireCachedDomain(key: string, expected: CacheEntry) {
     if (this.settings.pauseAutomaticFetch) return;
     if (this.pendingDomains.has(key)) return;
@@ -1478,7 +1443,7 @@ export default class LinkmarkPlugin extends Plugin {
           && entry.source === "generated monogram"
           && entry.resolverVersion !== RESOLVER_VERSION;
         const current = entry.pinned || entry.resolverVersion === RESOLVER_VERSION || pausedLegacyMonogram;
-        const fresh = this.settings.pauseAutomaticFetch || this.isCacheEntryFresh(entry);
+        const fresh = this.settings.pauseAutomaticFetch || isCacheEntryFresh(entry, this.settings.cacheDays);
         if (current && fresh) {
           const scope = scopeFromCacheKey(key, entry.domain, entry.pathPrefix);
           this.iconRules.set(key, createIconRule(scope, entry.url, this.settings.iconSize));
