@@ -132,9 +132,5 @@
   "openSettings": "Open plugin settings",
   "feedback": "GitHub Issues",
   "pluginEnabled": "Linkmark enabled",
-  "pluginDisabled": "Linkmark disabled",
-  "traceTitle": "Resolution trace (development only)",
-  "traceDescription": "Development diagnostic that writes one sanitized JSON lifecycle record per task to the SiYuan kernel log. Off by default, never persisted, and reset whenever the kernel reloads.",
-  "frontendTraceTitle": "Frontend performance trace (development only)",
-  "frontendTraceDescription": "Development diagnostic that times link discovery, icon-rule reconciliation, and stylesheet publication while editing. Off by default, process-local, never persisted, and reset on reload. Enabling also supplies a read-only 10,000-entry fixture cache view for the generated large-document scenario; disabling prints one console summary and restores rendering from the real cache."
+  "pluginDisabled": "Linkmark disabled"
 }

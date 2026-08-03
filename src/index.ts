@@ -52,7 +52,6 @@ import {
   normalizeDomainInput,
 } from "./frontend-format";
 import { fetchOutcomeFor, type FetchOutcome } from "./refresh-outcome";
-import { FrontendPerformanceTrace, type FrontendTraceStageName } from "./frontend-performance-trace";
 import { LINKMARK_BINDING_ATTRIBUTE, RuntimeIconBindingPublisher } from "./runtime-icon-bindings";
 import { scopeForUrl, scopeFromCacheKey, type LinkScope } from "./url-scope";
 
@@ -107,10 +106,6 @@ export default class LinkmarkPlugin extends Plugin {
   private cacheGeneration = 0;
   private lastCacheRevision: number | undefined;
   private lastCacheEpoch: string | undefined;
-  private traceEnabled = false;
-  private readonly performanceTrace = import.meta.env.MODE === "development"
-    ? new FrontendPerformanceTrace(() => performance.now())
-    : null;
   private readonly inputListener = (event: Event) => this.scheduleInputScan(event.target);
 
   async onload() {
@@ -602,68 +597,6 @@ export default class LinkmarkPlugin extends Plugin {
       description: t("cacheDescription"),
       createActionElement: () => cacheActions,
     });
-    if (import.meta.env.MODE === "development") {
-      // Development-only switches apply immediately and never participate in
-      // the settings confirmation flow. They are process local, off by
-      // default, and reset whenever the frontend plugin reloads.
-      const setting = this.setting;
-      const addDevelopmentSwitch = (item: {
-        checked: boolean;
-        title: string;
-        description: string;
-        onChange: (checked: boolean, input: HTMLInputElement) => void;
-      }) => {
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.className = "b3-switch fn__flex-center";
-        input.checked = item.checked;
-        input.addEventListener("change", () => item.onChange(input.checked, input));
-        setting.addItem({
-          title: item.title,
-          description: item.description,
-          createActionElement: () => input,
-        });
-        return input;
-      };
-      // The development-only Resolution trace switch communicates only with
-      // the development Kernel plugin and resets whenever the kernel reloads.
-      addDevelopmentSwitch({
-        checked: this.traceEnabled,
-        title: t("traceTitle"),
-        description: t("traceDescription"),
-        onChange: (checked, input) => {
-          this.traceEnabled = checked;
-          void this.callKernel<{ enabled: boolean }>("cache.trace.set", this.traceEnabled).then((state) => {
-            this.traceEnabled = state?.enabled ?? false;
-            input.checked = this.traceEnabled;
-          }).catch(() => {
-            this.traceEnabled = false;
-            input.checked = false;
-          });
-        },
-      });
-      // The development-only Frontend performance trace switch enables the
-      // read-only fixture cache overlay for the generated large-document
-      // scenario; disabling it prints one console summary and restores
-      // rendering from the real cache state.
-      addDevelopmentSwitch({
-        checked: Boolean(this.performanceTrace?.active),
-        title: t("frontendTraceTitle"),
-        description: t("frontendTraceDescription"),
-        onChange: (checked) => {
-          const trace = this.performanceTrace;
-          if (!trace) return;
-          if (checked) {
-            trace.enable();
-            console.info("[siyuan-linkmark] Frontend performance trace session started");
-          } else {
-            const summary = trace.disable();
-            if (summary) console.info("[siyuan-linkmark] Frontend performance trace summary", summary);
-          }
-          this.scheduleScan();
-        },
-      });
-    }
   }
 
   private addToolbar() {
@@ -799,9 +732,6 @@ export default class LinkmarkPlugin extends Plugin {
   }
 
   private scheduleInputScan(target: EventTarget | null) {
-    // The Frontend performance trace measures the interval from the last
-    // input to the batch that publishes the applicable rules.
-    this.performanceTrace?.input();
     const targetElement = this.elementForNode(target);
     const selectedElement = this.elementForNode(document.getSelection()?.anchorNode ?? null);
     const source = selectedElement && targetElement?.contains(selectedElement) ? selectedElement : targetElement;
@@ -1362,9 +1292,6 @@ export default class LinkmarkPlugin extends Plugin {
   private flushRenderWork() {
     this.renderWorkTimer = undefined;
     const executor: FrontendRenderWorkExecutor<Element> = {
-      // The trace measures the rebuild itself into the reconcile stage and
-      // its own batch slot, keeping a coincident rebuild out of the
-      // Full-discovery total.
       rebuildRules: () => this.rebuildBindings(),
       discover: (discovery) => {
         if (discovery.kind === "full") return this.scanLinks();
@@ -1372,34 +1299,15 @@ export default class LinkmarkPlugin extends Plugin {
         for (const root of discovery.regions) rulesChanged = this.scanLinks(root) || rulesChanged;
         return rulesChanged;
       },
-      publishRules: () => this.traceStage("publication", () => this.publishBindings()),
+      publishRules: () => this.publishBindings(),
     };
-    const trace = this.performanceTrace;
-    if (trace) trace.flush(this.renderWork, executor);
-    else flushFrontendRenderWork(this.renderWork, executor);
-  }
-
-  private traceStage<R>(name: FrontendTraceStageName, fn: () => R): R {
-    const trace = this.performanceTrace;
-    return trace ? trace.stage(name, fn) : fn();
-  }
-
-  /**
-   * The cache view the Interactive render pipeline reads. An active
-   * development performance session replaces it with the read-only fixture
-   * overlay layered with the real cache's pinned entries, so Pinned
-   * precedence and pinned-domain route suppression stay invariant; every
-   * other surface (cache counts, management UI, refresh, persistence) keeps
-   * reading the adopted snapshot cache.
-   */
-  private cacheViewForRender(cache = this.cache): Record<string, CacheEntry> {
-    return this.performanceTrace?.cacheView(cache) ?? cache;
+    flushFrontendRenderWork(this.renderWork, executor);
   }
 
   private scanLinks(root?: Element | null) {
     if (!this.settings.enabled) return false;
     const full = !root;
-    const domains = this.traceStage("discovery", () => this.collectDocumentDomains(root));
+    const domains = this.collectDocumentDomains(root);
     if (full) {
       this.presentScopes = new Map([...domains].map(([key, { scope }]) => [key, scope]));
       this.pendingMarkerBindings.clear();
@@ -1408,11 +1316,11 @@ export default class LinkmarkPlugin extends Plugin {
       for (const [key, { scope }] of domains) this.presentScopes.set(key, scope);
     }
     const context = this.presentBindingContext();
-    const reconciled = this.traceStage("reconcile", () => reconcilePresentBindings({
+    const reconciled = reconcilePresentBindings({
       discovery: this.presentScopes.values(),
       context,
       previous: this.iconBindings,
-    }));
+    });
     this.iconBindings = reconciled.bindings;
     const publisherChanged = this.bindingPublisher.replaceBindings(this.iconBindings, this.settings.iconSize);
     let markerChanged = false;
@@ -1425,17 +1333,12 @@ export default class LinkmarkPlugin extends Plugin {
       }
     }
 
-    // An active performance session renders from the read-only fixture view,
-    // so its scans must never issue Cache authority RPC. Forcing the paused
-    // decision mode keeps every decision to keep/skip: stale entries are not
-    // expired and scopes missing from the view are not queued for resolution.
-    const tracing = Boolean(this.performanceTrace?.active);
     domains.forEach(({ scope, targetUrl }, key) => {
       const decision = planScanDecision({
         scopeKey: key,
         scope,
-        cache: this.cacheViewForRender(),
-        pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch) || tracing,
+        cache: this.cache,
+        pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
         cacheDays: this.settings.cacheDays,
         failedAt: this.failedDomains.get(key),
       });
@@ -1582,7 +1485,7 @@ export default class LinkmarkPlugin extends Plugin {
     this.updateCacheCount();
   }
 
-  private presentBindingContext(cache = this.cacheViewForRender()): PresentBindingContext {
+  private presentBindingContext(cache = this.cache): PresentBindingContext {
     return {
       cache,
       cacheDays: this.settings.cacheDays,
@@ -1594,7 +1497,7 @@ export default class LinkmarkPlugin extends Plugin {
     if (!this.settings.enabled) return;
     const plan = planBindingSynchronization({
       scopes: this.presentScopes.values(),
-      before: this.presentBindingContext(this.cacheViewForRender(previousCache)),
+      before: this.presentBindingContext(previousCache),
       after: this.presentBindingContext(),
       changedKeys,
     });

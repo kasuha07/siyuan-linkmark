@@ -9,7 +9,6 @@ import { ForwardProxyIconResolver } from "./kernel-resolver";
 import { pinCustomUrl } from "./pin-url";
 import { privateIconIdFromPath } from "./private-route";
 import { DEFAULT_CACHE_POLICY, RESOLVER_VERSION, type CachePolicyFields } from "./resolver-contract";
-import type { ResolutionTraceSink } from "./resolution-trace";
 
 const POLICY_FILE = "cache-policy-v2.json";
 
@@ -41,15 +40,6 @@ class LinkmarkKernel {
   private policy: CachePolicyFields = { ...defaultPolicy };
   private authority?: KernelCacheAuthority;
   private resolver?: ForwardProxyIconResolver;
-  private traceEnabled = false;
-  // Development builds wire this sink into the Cache authority; production
-  // builds compile it away entirely, so no trace records are ever created.
-  private readonly traceSink: ResolutionTraceSink | undefined = import.meta.env.MODE === "development"
-    ? (record) => {
-        if (!this.traceEnabled) return;
-        void siyuan.logger.debug(`[resolution-trace] ${JSON.stringify(record)}`).catch(() => undefined);
-      }
-    : undefined;
 
   constructor() {
     siyuan.plugin.lifecycle.onload = this.onload.bind(this);
@@ -68,7 +58,6 @@ class LinkmarkKernel {
         privateIconUrl: (iconId) => `/plugin/private/${siyuan.plugin.name}/icon/${encodeURIComponent(iconId)}`,
         onCacheChanged: async (event) => siyuan.rpc.broadcast("cache.changed", event),
         onResolutionFailure: async (scope, category) => siyuan.rpc.broadcast("cache.resolution-failed", { key: scope.key, category }),
-        traceSink: this.traceSink,
       });
       await this.authority.initialize();
       await siyuan.rpc.bind("cache.snapshot", async () => this.requireAuthority().snapshot(), "Returns the authoritative favicon cache with its revision and epoch.");
@@ -97,12 +86,6 @@ class LinkmarkKernel {
           putPinned: (pinScope, entry, contentType, bytes, pinReplaceKey) => authority.putPinned(pinScope, entry, contentType, bytes, pinReplaceKey),
         }, normalizeScope(scope), iconUrl, includeSubdomains, replaceKey);
       }, "Downloads and pins a custom icon URL workspace-wide.");
-      if (import.meta.env.MODE === "development") {
-        await siyuan.rpc.bind("cache.trace.set", async (enabled: boolean) => {
-          this.traceEnabled = Boolean(enabled);
-          return { enabled: this.traceEnabled };
-        }, "Sets the process-local development Resolution trace switch.");
-      }
     } catch (error) {
       await siyuan.logger.error("Linkmark Kernel initialization failed", errorText(error)).catch(() => undefined);
     }
@@ -114,7 +97,6 @@ class LinkmarkKernel {
 
   private async onunload() {
     const methods = ["cache.snapshot", "cache.get-or-queue", "cache.remove", "cache.clear", "cache.clear-generated", "cache.policy.get", "cache.policy.set", "cache.pin", "cache.candidates", "cache.pin-url"];
-    if (import.meta.env.MODE === "development") methods.push("cache.trace.set");
     for (const method of methods) {
       await siyuan.rpc.unbind(method);
     }

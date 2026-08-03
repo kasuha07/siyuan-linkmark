@@ -27,22 +27,6 @@ container exposes SiYuan only at
 mounts `dist/` as the Linkmark plugin directory. Use `make dev-stop` to stop
 the container without removing its workspace data.
 
-When debugging asynchronous icon resolution, enable the default-off
-**Resolution trace** switch in the development settings. Every In-flight task
-then writes one sanitized JSON lifecycle record per event to the SiYuan kernel
-log file, for example `dev/siyuan-workspace/temp/siyuan.log`, ending in a
-terminal outcome or invalidation. After a rebuild, reload the plugin (or
-restart the container) so SiYuan loads the updated `kernel.js`; the switch is
-process-local and resets on every kernel reload. Follow the records with:
-
-```powershell
-Get-Content dev/siyuan-workspace/temp/siyuan.log -Wait | Select-String "resolution-trace"
-```
-
-The kernel log file is the source of truth for trace records. `docker logs`
-only supplements it with process output, so a quiet container does not mean the
-trace is missing.
-
 Do not commit `node_modules`, local caches, SiYuan workspace data, or API keys.
 
 Pull requests and pushes to `main` are checked automatically by
@@ -80,19 +64,6 @@ Vite 监听构建。首次构建可确保思源在启动扫描时识别插件。
 `http://127.0.0.1:6806` 提供服务，工作区保存在 `dev/siyuan-workspace/`，并将
 `dist/` 挂载为 Linkmark（链接印记）插件目录。使用 `make dev-stop` 可停止容器而不删除
 工作区数据。
-
-调试异步图标解析时，请在开发版设置中开启默认关闭的“解析追踪”开关。此后每个
-In-flight 任务都会把一条脱敏的 JSON 生命周期记录写入思源内核日志文件（例如
-`dev/siyuan-workspace/temp/siyuan.log`），并以终态结果或失效记录结束。重新构建后请
-重载插件（或重启容器），让思源加载新的 `kernel.js`；该开关是进程级状态，每次内核
-重载都会重置。跟踪记录：
-
-```powershell
-Get-Content dev/siyuan-workspace/temp/siyuan.log -Wait | Select-String "resolution-trace"
-```
-
-内核日志文件才是追踪记录的来源。`docker logs` 只是进程输出的补充，容器没有输出并
-不代表追踪记录缺失。
 
 请不要提交 `node_modules`、本地缓存、思源工作空间数据或任何 API 密钥。
 

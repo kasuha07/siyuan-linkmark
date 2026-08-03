@@ -2,7 +2,6 @@ import { ResolutionError, type IconResolver, type LinkScope, type ResolvedIcon, 
 import { monogramSvg } from "./monogram";
 import { parentDomainOf } from "./parent-domain";
 import { MAX_ICON_BYTES, type CachePolicyFields } from "./resolver-contract";
-import type { CandidateAttemptInfo } from "./resolution-trace";
 import { isAuthenticationRedirect, isAuthenticationTarget, isSafePublicTarget } from "./url-safety";
 
 export type KernelResolverPolicy = Pick<CachePolicyFields,
@@ -39,7 +38,6 @@ export class ForwardProxyIconResolver implements IconResolver {
   async resolve(
     scope: LinkScope,
     _trigger: ResolutionTrigger = "automatic",
-    onCandidate?: (info: CandidateAttemptInfo) => void,
   ): Promise<ResolvedIcon | null> {
     let target: URL;
     try {
@@ -53,8 +51,8 @@ export class ForwardProxyIconResolver implements IconResolver {
     const attempts = candidates.slice(0, MAX_RESOLUTION_CANDIDATE_ATTEMPTS);
     let networkFailure = false;
     let invalidData = false;
-    for (const [index, candidate] of attempts.entries()) {
-      const outcome = await this.tryDownload(candidate, deadline, index + 1, onCandidate);
+    for (const candidate of attempts) {
+      const outcome = await this.tryDownload(candidate, deadline);
       if (outcome.kind === "resolved") return outcome.resolved;
       if (outcome.kind === "network") networkFailure = true;
       if (outcome.kind === "invalid") invalidData = true;
@@ -74,7 +72,7 @@ export class ForwardProxyIconResolver implements IconResolver {
     if (!isSafePublicTarget(target)) return [];
     const results: ResolvedIcon[] = [];
     for (const candidate of await this.candidateUrls(target, scope, allowFullPageDiscovery, Infinity)) {
-      const outcome = await this.tryDownload(candidate, Infinity, 0);
+      const outcome = await this.tryDownload(candidate, Infinity);
       if (outcome.kind === "resolved") results.push(outcome.resolved);
       if (results.length >= 8) break;
     }
@@ -185,8 +183,6 @@ export class ForwardProxyIconResolver implements IconResolver {
   private async tryDownload(
     candidate: Candidate,
     deadline: number,
-    ordinal: number,
-    onCandidate?: (info: CandidateAttemptInfo) => void,
   ): Promise<DownloadOutcome> {
     let response: ForwardResponse | null;
     try {
@@ -196,11 +192,9 @@ export class ForwardProxyIconResolver implements IconResolver {
         error instanceof ResolutionError && error.category === "timeout"
           ? { kind: "timeout" }
           : { kind: "network" };
-      this.reportCandidate(onCandidate, candidate, ordinal, outcome, deadline);
       return outcome;
     }
     let outcome: DownloadOutcome;
-    let bytes: number | undefined;
     if (!response || response.status < 200 || response.status >= 300 || !response.body || isAuthenticationRedirect(new URL(candidate.url), response.url)) {
       outcome = { kind: "failed" };
     } else if (!isWellFormedBase64(response.body)) {
@@ -210,7 +204,6 @@ export class ForwardProxyIconResolver implements IconResolver {
       if (!decoded.length || decoded.length > MAX_ICON_BYTES || !isImagePayload(decoded, response.contentType)) {
         outcome = { kind: "failed" };
       } else {
-        bytes = decoded.length;
         outcome = {
           kind: "resolved",
           resolved: {
@@ -221,35 +214,7 @@ export class ForwardProxyIconResolver implements IconResolver {
         };
       }
     }
-    this.reportCandidate(onCandidate, candidate, ordinal, outcome, deadline, response, bytes);
     return outcome;
-  }
-
-  /**
-   * Reports one sanitized candidate attempt to the Resolution trace sink.
-   * Only the reviewed source label, attempt ordinal, HTTP status, normalized
-   * content type, validated byte count, and sanitized outcome leave the
-   * resolver; the candidate URL and response payload never do.
-   */
-  private reportCandidate(
-    onCandidate: ((info: CandidateAttemptInfo) => void) | undefined,
-    candidate: Candidate,
-    ordinal: number,
-    outcome: DownloadOutcome,
-    deadline: number,
-    response?: ForwardResponse | null,
-    bytes?: number,
-  ) {
-    if (!onCandidate) return;
-    onCandidate({
-      ordinal,
-      source: candidate.source,
-      outcome: outcome.kind,
-      status: response?.status,
-      contentType: response?.contentType ? response.contentType.split(";", 1)[0].toLowerCase() : undefined,
-      bytes,
-      remainingBudgetMs: Number.isFinite(deadline) ? Math.max(0, deadline - Date.now()) : undefined,
-    });
   }
 
   /**

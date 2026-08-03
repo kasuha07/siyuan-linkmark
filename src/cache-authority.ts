@@ -1,6 +1,5 @@
 import { InvalidShareDomainError, isEligibleShareTarget, shareEligibilityOf } from "./parent-domain";
 import type { CachePolicyFields } from "./resolver-contract";
-import type { CandidateAttemptInfo, ResolutionTraceRecord, ResolutionTraceSink } from "./resolution-trace";
 
 export type CacheEntry = {
   url: string;
@@ -73,7 +72,6 @@ export interface IconResolver {
   resolve(
     scope: LinkScope,
     trigger?: ResolutionTrigger,
-    onCandidate?: (info: CandidateAttemptInfo) => void,
   ): Promise<ResolvedIcon | null>;
 }
 
@@ -110,7 +108,6 @@ export type CacheAuthorityOptions = {
   privateIconUrl?: (iconId: string) => string;
   onCacheChanged?: (event: CacheChangeEvent) => Promise<void> | void;
   onResolutionFailure?: (scope: LinkScope, category: ResolutionFailureCategory) => Promise<void> | void;
-  traceSink?: ResolutionTraceSink;
 };
 
 const CACHE_INDEX_FILE = "favicon-cache-v2.json";
@@ -119,8 +116,6 @@ const MAX_RESOLUTION_CONCURRENCY = 4;
 
 type InFlightTask = {
   generation: number;
-  taskId: string;
-  acceptedAt: number;
   promise: Promise<void>;
 };
 
@@ -128,8 +123,6 @@ type ResolvedCommit = {
   scope: LinkScope;
   resolved: ResolvedIcon;
   generation: number;
-  taskId: string;
-  acceptedAt: number;
 };
 
 export class KernelCacheAuthority {
@@ -152,9 +145,6 @@ export class KernelCacheAuthority {
   private iconSequence = 0;
   private cacheRevision = 0;
   private readonly cacheEpoch = newCacheEpoch();
-  private traceSequence = 0;
-  private readonly traceTerminals = new Set<string>();
-  private traceSink?: ResolutionTraceSink;
 
   constructor(
     private readonly storage: CacheStorage,
@@ -163,7 +153,6 @@ export class KernelCacheAuthority {
     private readonly options: CacheAuthorityOptions = {},
   ) {
     this.policy = options.cachePolicy ?? { cacheDays: 30 };
-    this.traceSink = options.traceSink;
   }
 
   async initialize() {
@@ -219,65 +208,31 @@ export class KernelCacheAuthority {
     const trigger: ResolutionTrigger = automatic ? "automatic" : "manual";
     const generation = this.generationFor(scope.key);
     const pending = this.inFlight.get(scope.key);
-    if (pending?.generation === generation) {
-      this.emitTrace(() => ({
-        schema: 1, event: "coalesced", task: pending.taskId,
-        scope: traceScope(scope), trigger, elapsedMs: this.now() - pending.acceptedAt,
-      }));
-      return { status: "queued" };
-    }
-
-    const taskId = `t-${++this.traceSequence}`;
-    const acceptedAt = this.now();
-    this.emitTrace(() => ({
-      schema: 1, event: "accepted", task: taskId,
-      scope: traceScope(scope), trigger, elapsedMs: 0,
-    }));
+    if (pending?.generation === generation) return { status: "queued" };
 
     const resolve = async () => {
       const outcome = await this.enqueueResolution(async () => {
-        if (!this.isCurrentGeneration(scope.key, generation)) {
-          this.emitInvalidated(taskId, scope, acceptedAt);
-          return null;
-        }
+        if (!this.isCurrentGeneration(scope.key, generation)) return null;
         try {
-          return await this.resolver.resolve(scope, trigger, (info) => {
-            this.emitTrace(() => ({
-              schema: 1, event: "candidate-finished", task: taskId,
-              scope: traceScope(scope), elapsedMs: this.now() - acceptedAt,
-              ordinal: info.ordinal, source: info.source, outcome: info.outcome,
-              status: info.status, contentType: info.contentType, bytes: info.bytes,
-              remainingBudgetMs: info.remainingBudgetMs,
-            }));
-          });
+          return await this.resolver.resolve(scope, trigger);
         } catch (error) {
           return new ResolutionError(this.resolutionCategoryOf(error));
         }
-      }, { taskId, scope, acceptedAt, trigger });
-      if (!this.isCurrentGeneration(scope.key, generation)) {
-        this.emitInvalidated(taskId, scope, acceptedAt);
-        return;
-      }
+      });
+      if (!this.isCurrentGeneration(scope.key, generation)) return;
       if (outcome instanceof ResolutionError) {
         await this.notifyResolutionFailure(scope, outcome.category);
-        this.emitFailed(taskId, scope, acceptedAt, outcome.category);
       } else if (outcome) {
-        this.emitTrace(() => ({
-          schema: 1, event: "resolved", task: taskId,
-          scope: traceScope(scope), elapsedMs: this.now() - acceptedAt,
-          source: outcome.source, contentType: outcome.contentType, bytes: outcome.bytes.byteLength,
-        }));
-        await this.commitResolved(scope, outcome, generation, taskId, acceptedAt);
+        await this.commitResolved(scope, outcome, generation);
       } else {
         await this.notifyResolutionFailure(scope, "exhausted");
-        this.emitFailed(taskId, scope, acceptedAt, "exhausted");
       }
     };
     // An invalidated task cannot supply a replacement result. Keep the newer
     // task distinct, but wait for the obsolete one so a Link scope cannot use
     // two resolution slots at once while its old network request winds down.
     const task = pending ? pending.promise.catch(() => undefined).then(resolve) : resolve();
-    this.inFlight.set(scope.key, { generation, taskId, acceptedAt, promise: task });
+    this.inFlight.set(scope.key, { generation, promise: task });
     void task.finally(() => {
       if (this.inFlight.get(scope.key)?.promise === task) this.inFlight.delete(scope.key);
     }).catch(() => undefined);
@@ -453,11 +408,9 @@ export class KernelCacheAuthority {
     scope: LinkScope,
     resolved: ResolvedIcon,
     generation: number,
-    taskId: string,
-    acceptedAt: number,
   ) {
     return new Promise<CacheEntry | null>((resolve, reject) => {
-      this.resolvedCommitBatch.push({ commit: { scope, resolved, generation, taskId, acceptedAt }, resolve, reject });
+      this.resolvedCommitBatch.push({ commit: { scope, resolved, generation }, resolve, reject });
       if (this.resolvedCommitBatchScheduled) return;
       this.resolvedCommitBatchScheduled = true;
       void Promise.resolve().then(() => this.flushResolvedCommitBatch());
@@ -479,19 +432,13 @@ export class KernelCacheAuthority {
       index: number;
       generation: number;
       key: string;
-      scope: LinkScope;
-      taskId: string;
-      acceptedAt: number;
       previous: CacheEntry | undefined;
       entry: CacheEntry;
     }> = [];
     try {
       for (const [index, { commit }] of batch.entries()) {
-        const { scope, resolved, generation, taskId, acceptedAt } = commit;
-        if (!this.isCurrentGeneration(scope.key, generation)) {
-          this.emitInvalidated(taskId, scope, acceptedAt);
-          continue;
-        }
+        const { scope, resolved, generation } = commit;
+        if (!this.isCurrentGeneration(scope.key, generation)) continue;
         const previous = this.cache[scope.key];
         if (previous?.pinned) {
           entries[index] = copyEntry(previous);
@@ -501,16 +448,12 @@ export class KernelCacheAuthority {
         await this.storage.put(this.iconPath(iconId), bytesToBase64(resolved.bytes));
         if (!this.isCurrentGeneration(scope.key, generation)) {
           await this.storage.remove(this.iconPath(iconId));
-          this.emitInvalidated(taskId, scope, acceptedAt);
           continue;
         }
         prepared.push({
           index,
           generation,
           key: scope.key,
-          scope,
-          taskId,
-          acceptedAt,
           previous,
           entry: {
             url: this.privateIconUrl(iconId), iconId, fetchedAt: this.now(), source: resolved.source,
@@ -528,7 +471,6 @@ export class KernelCacheAuthority {
     for (const pending of prepared) {
       if (!current.includes(pending)) {
         await this.storage.remove(this.iconPath(pending.entry.iconId!));
-        this.emitInvalidated(pending.taskId, pending.scope, pending.acceptedAt);
       }
     }
     if (current.length === 0) return entries;
@@ -541,8 +483,6 @@ export class KernelCacheAuthority {
       await Promise.all(current.map(({ entry }) => this.storage.remove(this.iconPath(entry.iconId!))));
       throw error;
     }
-    for (const pending of current) this.emitPersisted(pending.taskId, pending.scope, pending.acceptedAt);
-
     const committed = current.filter(({ key, generation }) => this.isCurrentGeneration(key, generation));
     if (committed.length !== current.length) {
       const finalCache = { ...this.cache };
@@ -551,7 +491,6 @@ export class KernelCacheAuthority {
       for (const pending of current) {
         if (!committed.includes(pending)) {
           await this.storage.remove(this.iconPath(pending.entry.iconId!));
-          this.emitInvalidated(pending.taskId, pending.scope, pending.acceptedAt);
         }
       }
       this.cache = finalCache;
@@ -566,7 +505,6 @@ export class KernelCacheAuthority {
       for (const pending of committed) {
         entries[pending.index] = copyEntry(pending.entry);
         await this.removePayload(pending.previous, pending.entry.iconId);
-        this.emitCommitted(pending.taskId, pending.scope, pending.acceptedAt);
       }
     }
     return entries;
@@ -577,18 +515,9 @@ export class KernelCacheAuthority {
     if (entry.iconId) await this.storage.remove(this.iconPath(entry.iconId));
   }
 
-  private enqueueResolution<T>(
-    operation: () => Promise<T>,
-    trace?: { taskId: string; scope: LinkScope; acceptedAt: number; trigger: ResolutionTrigger },
-  ) {
+  private enqueueResolution<T>(operation: () => Promise<T>) {
     return new Promise<T>((resolve, reject) => {
       const start = () => {
-        if (trace) {
-          this.emitTrace(() => ({
-            schema: 1, event: "started", task: trace.taskId, scope: traceScope(trace.scope),
-            trigger: trace.trigger, elapsedMs: this.now() - trace.acceptedAt,
-          }));
-        }
         this.activeResolutions += 1;
         void Promise.resolve()
           .then(operation)
@@ -599,15 +528,7 @@ export class KernelCacheAuthority {
           });
       };
       if (this.activeResolutions < MAX_RESOLUTION_CONCURRENCY) start();
-      else {
-        if (trace) {
-          this.emitTrace(() => ({
-            schema: 1, event: "waiting-slot", task: trace.taskId, scope: traceScope(trace.scope),
-            elapsedMs: this.now() - trace.acceptedAt,
-          }));
-        }
-        this.resolutionQueue.push(start);
-      }
+      else this.resolutionQueue.push(start);
     });
   }
 
@@ -639,55 +560,6 @@ export class KernelCacheAuthority {
 
   private async notifyResolutionFailure(scope: LinkScope, category: ResolutionFailureCategory) {
     await this.options.onResolutionFailure?.(scope, category);
-  }
-
-  /**
-   * Emits one Resolution trace record through the optional sink. Record
-   * creation is deferred until the sink exists so tracing off stays free, and
-   * a throwing sink can never interrupt cache work.
-   */
-  private emitTrace(create: () => ResolutionTraceRecord) {
-    const sink = this.traceSink;
-    if (!sink) return;
-    try {
-      sink(create());
-    } catch {
-      // Diagnostic output must never break cache work.
-    }
-  }
-
-  private emitInvalidated(taskId: string, scope: LinkScope, acceptedAt: number) {
-    if (this.traceTerminals.has(taskId)) return;
-    this.traceTerminals.add(taskId);
-    this.emitTrace(() => ({
-      schema: 1, event: "invalidated", task: taskId, scope: traceScope(scope),
-      elapsedMs: this.now() - acceptedAt,
-    }));
-  }
-
-  private emitFailed(taskId: string, scope: LinkScope, acceptedAt: number, category: ResolutionFailureCategory) {
-    if (this.traceTerminals.has(taskId)) return;
-    this.traceTerminals.add(taskId);
-    this.emitTrace(() => ({
-      schema: 1, event: "failed", task: taskId, scope: traceScope(scope),
-      elapsedMs: this.now() - acceptedAt, category,
-    }));
-  }
-
-  private emitPersisted(taskId: string, scope: LinkScope, acceptedAt: number) {
-    this.emitTrace(() => ({
-      schema: 1, event: "persisted", task: taskId, scope: traceScope(scope),
-      elapsedMs: this.now() - acceptedAt,
-    }));
-  }
-
-  private emitCommitted(taskId: string, scope: LinkScope, acceptedAt: number) {
-    if (this.traceTerminals.has(taskId)) return;
-    this.traceTerminals.add(taskId);
-    this.emitTrace(() => ({
-      schema: 1, event: "committed", task: taskId, scope: traceScope(scope),
-      elapsedMs: this.now() - acceptedAt,
-    }));
   }
 
   private resolutionCategoryOf(error: unknown): ResolutionFailureCategory {
@@ -809,16 +681,6 @@ function scopeKeyFromIconId(iconId: string): string | undefined {
   if (keyDash <= 0) return undefined;
   return Buffer.from(iconId.slice(0, keyDash), "base64url").toString("utf8");
 }
-
-/**
- * The sanitized Link scope identity written to trace records: the cache key,
- * its domain, and the reviewed route type when present. The target URL, path
- * prefix, and platform icon URL are never included.
- */
-function traceScope(scope: LinkScope) {
-  return { key: scope.key, domain: scope.domain, routeKey: scope.routeKey };
-}
-
 
 function bytesToBase64(bytes: ArrayBuffer) {
   return Buffer.from(bytes).toString("base64");

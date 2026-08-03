@@ -72,14 +72,6 @@ _Avoid_: direct cache-file access, frontend persistence API
 The immediate Kernel RPC response for a cache miss. It confirms that a new or coalesced In-flight task owns the Link scope, without representing an icon result or a failed resolution.
 _Avoid_: cache miss, icon result, resolution failure
 
-**Resolution trace**:
-An opt-in, development-build-only structured kernel-log record sequence for one In-flight task. Its default-off, process-local runtime switch exposes lifecycle milestones and sanitized diagnostics without changing the Kernel RPC result, persisting a cache policy, or broadcasting external request data to Frontend clients.
-_Avoid_: queue result, frontend debug event, persisted audit log, workspace cache policy
-
-**Frontend performance trace**:
-An opt-in, development-build-only timing summary for Linkmark discovery, rule reconciliation, and rule publication during a repeatable manual profile. An Incremental interaction is one render batch with local discovery work; batches that only rebuild or publish rules are not interactions. The summary reports session sample counts with a bounded P95 window. It is process-local, contains no document or URL content, and is neither persisted nor exposed as a production setting or interface.
-_Avoid_: Resolution trace, telemetry, benchmark gate, user-facing diagnostics
-
 **Interactive render pipeline**:
 The Frontend path from an editor DOM change through link discovery and Icon rule reconciliation to runtime stylesheet publication. It excludes plugin startup, Cache snapshot transport, favicon resolution, network retrieval, and cache persistence.
 _Avoid_: favicon resolution pipeline, plugin lifecycle, frontend performance in general
@@ -93,7 +85,7 @@ The user-visible ability to type, paste, and add or remove external links in a m
 _Avoid_: favicon download speed, resolver throughput, general frontend performance
 
 **Large-document performance scenario**:
-The standard Linkmark responsiveness workload containing 2,000 external-link nodes, 500 distinct Link scopes, and a Frontend cache view of 10,000 entries. In development profiles, the cache view may be a process-local fixture that never mutates the Cache authority and that layers the real cache's pinned entries over the fixture so Pinned precedence stays invariant.
+The standard Linkmark responsiveness workload containing 2,000 external-link nodes, 500 distinct Link scopes, and a Frontend cache view of 10,000 entries.
 _Avoid_: large document, stress test, production maximum
 
 **Incremental interaction target**:

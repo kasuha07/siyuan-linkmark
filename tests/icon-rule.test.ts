@@ -7,8 +7,10 @@ import {
   type PresentBindingContext,
 } from "../src/icon-rule";
 import { RESOLVER_VERSION } from "../src/resolver-contract";
-import { perfCacheOverlay, perfScenarioScopes, PERF_CACHE_VIEW_ENTRIES, PERF_SCOPE_COUNT } from "../src/perf-scenario";
+import { perfScenarioScopes, PERF_SCOPE_COUNT } from "../src/perf-scenario";
+import { PERF_CACHE_VIEW_ENTRIES } from "../src/perf-scenario-definition.js";
 import { scopeForUrl } from "../src/url-scope";
+import { largeCacheFixture } from "./perf-cache-fixture";
 
 describe("createScopeQuery", () => {
   const domainScope = { key: "example.com", domain: "example.com" };
@@ -188,13 +190,13 @@ describe("Present icon bindings", () => {
   });
 
   it("produces exactly 500 bindings for the standard scenario", () => {
-    const overlay = perfCacheOverlay(now);
+    const cache = largeCacheFixture(now);
     const result = reconcilePresentBindings({
       discovery: perfScenarioScopes(),
-      context: context({ cache: overlay }),
+      context: context({ cache }),
       previous: new Map(),
     });
-    expect(Object.keys(overlay)).toHaveLength(PERF_CACHE_VIEW_ENTRIES);
+    expect(Object.keys(cache)).toHaveLength(PERF_CACHE_VIEW_ENTRIES);
     expect(result.bindings.size).toBe(PERF_SCOPE_COUNT);
   });
 });

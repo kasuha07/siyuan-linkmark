@@ -5,18 +5,18 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
-  PERF_CACHE_VIEW_ENTRIES,
   PERF_DOMAIN_SCOPE_COUNT,
   PERF_LINK_COUNT,
   PERF_ROUTE_SCOPE_COUNT,
   PERF_SCOPE_COUNT,
-  perfCacheOverlay,
   perfScenarioLinkUrls,
   perfScenarioScopes,
 } from "../src/perf-scenario";
+import { PERF_CACHE_VIEW_ENTRIES } from "../src/perf-scenario-definition.js";
 import { isCacheEntryFresh } from "../src/frontend-cache-state";
 import { RESOLVER_VERSION } from "../src/resolver-contract";
 import { scopeForUrl } from "../src/url-scope";
+import { largeCacheFixture } from "./perf-cache-fixture";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -54,21 +54,21 @@ describe("perfScenarioLinkUrls", () => {
   });
 });
 
-describe("perfCacheOverlay", () => {
+describe("largeCacheFixture", () => {
   const now = 5_000_000;
 
   it("builds a 10,000-entry view containing the 500 scenario scopes", () => {
-    const overlay = perfCacheOverlay(now);
-    expect(Object.keys(overlay)).toHaveLength(PERF_CACHE_VIEW_ENTRIES);
+    const cache = largeCacheFixture(now);
+    expect(Object.keys(cache)).toHaveLength(PERF_CACHE_VIEW_ENTRIES);
     for (const url of perfScenarioLinkUrls()) {
       const scope = scopeForUrl(url);
-      expect(overlay[scope!.key]).toBeDefined();
+      expect(cache[scope!.key]).toBeDefined();
     }
   });
 
   it("provides only fresh current entries for the render pipeline", () => {
-    const overlay = perfCacheOverlay(now);
-    for (const entry of Object.values(overlay)) {
+    const cache = largeCacheFixture(now);
+    for (const entry of Object.values(cache)) {
       expect(isCacheEntryFresh(entry, 30, now)).toBe(true);
       expect(entry.resolverVersion).toBe(RESOLVER_VERSION);
       expect(entry.url).toMatch(/^https:\/\/cdn\.perf\.example\.dev\//);
@@ -76,15 +76,15 @@ describe("perfCacheOverlay", () => {
   });
 
   it("is deterministic for a fixed clock", () => {
-    expect(perfCacheOverlay(now)).toEqual(perfCacheOverlay(now));
+    expect(largeCacheFixture(now)).toEqual(largeCacheFixture(now));
   });
 
   it("resolves the route scopes through their own cache keys", () => {
-    const overlay = perfCacheOverlay(now);
+    const cache = largeCacheFixture(now);
     const scope = scopeForUrl("https://nocode.host/p00019/ref-3")!;
-    expect(overlay[scope.key].domain).toBe("nocode.host");
-    expect(overlay[scope.key].routeKey).toBe("site-p00019");
-    expect(overlay[scope.key].pathPrefix).toBe("/p00019");
+    expect(cache[scope.key].domain).toBe("nocode.host");
+    expect(cache[scope.key].routeKey).toBe("site-p00019");
+    expect(cache[scope.key].pathPrefix).toBe("/p00019");
   });
 });
 

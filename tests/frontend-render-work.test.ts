@@ -7,9 +7,10 @@ import {
   type DiscoveryWork,
 } from "../src/frontend-render-work";
 import { reconcilePresentBindings, type PresentBindingContext } from "../src/icon-rule";
-import { perfCacheOverlay, perfScenarioLinkUrls } from "../src/perf-scenario";
+import { perfScenarioLinkUrls } from "../src/perf-scenario";
 import { RESOLVER_VERSION } from "../src/resolver-contract";
 import { scopeForUrl } from "../src/url-scope";
+import { largeCacheFixture } from "./perf-cache-fixture";
 
 type FakeElement = {
   isConnected: boolean;
@@ -159,7 +160,7 @@ describe("FrontendRenderWorkQueue", () => {
 
   it("coalesces the 2,000-link / 500-scope scenario into one 500-rule publication", () => {
     const links = perfScenarioLinkUrls().map((url, id) => ({ id, url }));
-    const overlay = perfCacheOverlay(Date.now());
+    const cache = largeCacheFixture(Date.now());
     const rules = new Map<string, string>();
     const publications: string[][] = [];
     const work = new FrontendRenderWorkQueue<{ id: number; url: string }>();
@@ -174,7 +175,7 @@ describe("FrontendRenderWorkQueue", () => {
       let changed = false;
       for (const link of regions) {
         const scope = scopeForUrl(link.url);
-        const entry = scope ? overlay[scope.key] : undefined;
+        const entry = scope ? cache[scope.key] : undefined;
         if (scope && entry && rules.get(scope.key) !== entry.url) {
           rules.set(scope.key, entry.url);
           changed = true;

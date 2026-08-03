@@ -78,9 +78,7 @@ if (JSON.stringify(plugin.frontends) !== JSON.stringify(expectedFrontends)) {
 if (/link-icon|linkIconMode|preferDynamic/i.test(frontendBundle)) {
   throw new Error("Marketplace payload must not include retired Link Icon compatibility behavior");
 }
-if (/cache\.trace\.set|traceTitle/i.test(frontendBundle) || /cache\.trace\.set|resolution-trace/i.test(kernelBundle)) {
-  throw new Error("Marketplace payload must not include the development-only resolution trace surface");
-}
-if (/frontendTraceTitle|frontendTraceDescription|perf-site-|cdn\.perf\.example\.dev/i.test(frontendBundle)) {
-  throw new Error("Marketplace payload must not include the development-only frontend performance trace and fixture surface");
+if (/cache\.trace\.set|traceTitle|frontendTraceTitle|perf-site-|cdn\.perf\.example\.dev/i.test(frontendBundle)
+  || /cache\.trace\.set|resolution-trace/i.test(kernelBundle)) {
+  throw new Error("Marketplace payload must not include retired trace or runtime fixture surfaces");
 }
