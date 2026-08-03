@@ -1381,11 +1381,13 @@ export default class LinkmarkPlugin extends Plugin {
   /**
    * The cache view the Interactive render pipeline reads. An active
    * development performance session replaces it with the read-only fixture
-   * overlay; every other surface (cache counts, management UI, refresh,
-   * persistence) keeps reading the adopted snapshot cache.
+   * overlay layered with the real cache's pinned entries, so Pinned
+   * precedence and pinned-domain route suppression stay invariant; every
+   * other surface (cache counts, management UI, refresh, persistence) keeps
+   * reading the adopted snapshot cache.
    */
   private cacheViewForRender(): Record<string, CacheEntry> {
-    return this.performanceTrace?.cacheView() ?? this.cache;
+    return this.performanceTrace?.cacheView(this.cache) ?? this.cache;
   }
 
   private scanLinks(root?: Element | null) {
@@ -1400,12 +1402,17 @@ export default class LinkmarkPlugin extends Plugin {
     }));
     this.iconRules = reconciled.rules;
 
+    // An active performance session renders from the read-only fixture view,
+    // so its scans must never issue Cache authority RPC. Forcing the paused
+    // decision mode keeps every decision to keep/skip: stale entries are not
+    // expired and scopes missing from the view are not queued for resolution.
+    const tracing = Boolean(this.performanceTrace?.active);
     domains.forEach(({ scope, targetUrl }, key) => {
       const decision = planScanDecision({
         scopeKey: key,
         scope,
         cache: this.cacheViewForRender(),
-        pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
+        pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch) || tracing,
         cacheDays: this.settings.cacheDays,
         failedAt: this.failedDomains.get(key),
       });

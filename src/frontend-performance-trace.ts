@@ -19,9 +19,12 @@ import {
  * publication around the existing render-work flush seam, measures the
  * interval from stable editor input to rule publication, and supplies the
  * process-local 10,000-entry fixture cache overlay while a session is
- * active. Samples and aggregates are bounded, records contain only stage
- * names, durations, counts, and fixture metadata, and disabling the trace
- * clears every sample and the overlay.
+ * active. The overlay is layered with the real cache's pinned entries so
+ * Pinned precedence stays invariant. Incremental interaction samples cover
+ * batches with local discovery work only; their count is the full session
+ * count while P95 uses a bounded retained window. Samples and aggregates are
+ * bounded, records contain only stage names, durations, counts, and fixture
+ * metadata, and disabling the trace clears every sample and the overlay.
  */
 export const FRONTEND_TRACE_SCHEMA = 1;
 export const INCREMENTAL_SAMPLE_CAP = 512;
@@ -53,6 +56,7 @@ export type FrontendTraceSummary = {
 export class FrontendPerformanceTrace {
   private enabled = false;
   private overlay: Record<string, CacheEntry> | null = null;
+  private composite: { realCache: Record<string, CacheEntry> | null; view: Record<string, CacheEntry> } | null = null;
   private lastInputAt: number | undefined;
   private openBatch: {
     discovery: number;
@@ -61,6 +65,7 @@ export class FrontendPerformanceTrace {
     publication: number;
   } | null = null;
   private incrementalTotals: number[] = [];
+  private incrementalInteractionCount = 0;
   private batchCount = 0;
   private fullDiscoveryCount = 0;
   private slowestFullDiscoveryMs = 0;
@@ -136,11 +141,33 @@ export class FrontendPerformanceTrace {
   }
 
   /**
-   * The read-only fixture cache view for the Interactive render pipeline, or
-   * null outside an active session.
+   * The read-only cache view for the Interactive render pipeline, or null
+   * outside an active session. The view layers the real cache's pinned
+   * entries over the 10,000-entry fixture overlay so Pinned precedence and
+   * pinned-domain route suppression remain invariant while profiling;
+   * unpinned real entries stay invisible and never reach the pipeline. Pinned
+   * entries are cloned and frozen so the view never aliases the adopted Cache
+   * authority's objects. The composite is rebuilt only when the supplied real
+   * cache object identity changes, so repeated reads during one batch are
+   * constant-time.
    */
-  cacheView(): Record<string, CacheEntry> | null {
-    return this.enabled ? this.overlay : null;
+  cacheView(realCache: Record<string, CacheEntry> | null = null): Record<string, CacheEntry> | null {
+    if (!this.enabled) return null;
+    if (this.composite && this.composite.realCache === realCache) return this.composite.view;
+    const view = this.composeView(realCache);
+    if (view) this.composite = { realCache, view };
+    return view;
+  }
+
+  private composeView(realCache: Record<string, CacheEntry> | null): Record<string, CacheEntry> | null {
+    if (!this.overlay) return null;
+    if (!realCache) return this.overlay;
+    const pinned: Record<string, CacheEntry> = {};
+    for (const [key, entry] of Object.entries(realCache)) {
+      if (entry.pinned) pinned[key] = Object.freeze({ ...entry });
+    }
+    if (Object.keys(pinned).length === 0) return this.overlay;
+    return Object.freeze({ ...this.overlay, ...pinned });
   }
 
   /**
@@ -199,7 +226,12 @@ export class FrontendPerformanceTrace {
       this.fullDiscoveryCount += 1;
       const fullMs = batch.discovery + batch.reconcile;
       if (fullMs > this.slowestFullDiscoveryMs) this.slowestFullDiscoveryMs = fullMs;
-    } else {
+    } else if (work.discovery?.kind === "local") {
+      // An incremental interaction is one batch with local discovery work
+      // only; a rule rebuild or publication without discovery (for example
+      // the reconciliation scheduled when the trace is enabled) is not an
+      // interaction and is excluded from the sample set.
+      this.incrementalInteractionCount += 1;
       this.incrementalTotals.push(totalMs);
       if (this.incrementalTotals.length > INCREMENTAL_SAMPLE_CAP) this.incrementalTotals.shift();
     }
@@ -217,7 +249,9 @@ export class FrontendPerformanceTrace {
     this.lastInputAt = undefined;
     this.openBatch = null;
     this.incrementalTotals = [];
+    this.incrementalInteractionCount = 0;
     this.batchCount = 0;
+    this.composite = null;
     this.fullDiscoveryCount = 0;
     this.slowestFullDiscoveryMs = 0;
     this.ruleFreshnessSamples = 0;
@@ -236,7 +270,7 @@ export class FrontendPerformanceTrace {
       schema: FRONTEND_TRACE_SCHEMA,
       build: "development",
       batches: this.batchCount,
-      incrementalInteractions: sorted.length,
+      incrementalInteractions: this.incrementalInteractionCount,
       incrementalP95Ms: p95,
       fullDiscoveries: this.fullDiscoveryCount,
       slowestFullDiscoveryMs: this.slowestFullDiscoveryMs,

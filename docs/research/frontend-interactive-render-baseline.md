@@ -1,13 +1,14 @@
 # Interactive render performance: baseline-first research record
 
-Status: diagnostic delivered, structural evidence green, manual baseline
-session pending.
+Status: diagnostic delivered, structural evidence green, review fixes for the
+trace isolation, Pinned-preserving cache view, and interaction-sample
+semantics retained; manual baseline session pending.
 
 ## Recorded environment
 
 | Field | Value |
 | --- | --- |
-| Source revision | See the commit that introduces this record and the accompanying diagnostic. |
+| Source revision | 70f118b (delivers the diagnostic, scenario, and the review fixes described under Retained in this pass). |
 | Linkmark version | 0.1.2 (siyuan-linkmark) |
 | SiYuan version | Manual sessions run against the local development workspace (`b3log/siyuan:latest`; prior exploratory profiling recorded 3.7.3). |
 | Chromium version | Manual sessions record the desktop Chromium used by the SiYuan client; prior exploratory profiling recorded Chromium 151. |
@@ -70,6 +71,19 @@ Retained in this pass:
   `src/perf-scenario.ts` and `scripts/generate-perf-scenario.mjs`.
 - Structural coverage for local discovery, coalescing, single publication per
   batch, and Present-scope-bounded reconciliation.
+- Trace-session scans never issue Cache authority RPC: while the trace is
+  active the scan decision loop runs in the automatic-fetch-paused mode, so
+  scopes missing from the fixture view are skipped and stale entries are not
+  expired instead of queuing `cache.get-or-queue` or `cache.remove` calls.
+- The render cache view layers the real cache's pinned entries over the
+  10,000-entry fixture overlay (cloned and frozen), so Pinned precedence and
+  pinned-domain route suppression stay invariant while profiling and unpinned
+  real entries remain invisible to the pipeline.
+- Incremental interaction samples cover batches with local discovery work
+  only; rule rebuilds and publications without discovery (for example the
+  reconciliation scheduled when the trace is enabled) are excluded, and the
+  summary reports the full session interaction count alongside the P95
+  computed from a bounded retained window.
 - Glossary entries in `CONTEXT.md` and the SPEC `docs/specs/0006-interactive-render-performance.md`.
 
 Rejected in this pass: every runtime optimization, any persistent DOM index,

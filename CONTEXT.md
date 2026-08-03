@@ -77,7 +77,7 @@ An opt-in, development-build-only structured kernel-log record sequence for one 
 _Avoid_: queue result, frontend debug event, persisted audit log, workspace cache policy
 
 **Frontend performance trace**:
-An opt-in, development-build-only timing summary for Linkmark discovery, rule reconciliation, and rule publication during a repeatable manual profile. It is process-local, contains no document or URL content, and is neither persisted nor exposed as a production setting or interface.
+An opt-in, development-build-only timing summary for Linkmark discovery, rule reconciliation, and rule publication during a repeatable manual profile. An Incremental interaction is one render batch with local discovery work; batches that only rebuild or publish rules are not interactions. The summary reports session sample counts with a bounded P95 window. It is process-local, contains no document or URL content, and is neither persisted nor exposed as a production setting or interface.
 _Avoid_: Resolution trace, telemetry, benchmark gate, user-facing diagnostics
 
 **Interactive render pipeline**:
@@ -93,7 +93,7 @@ The user-visible ability to type, paste, and add or remove external links in a m
 _Avoid_: favicon download speed, resolver throughput, general frontend performance
 
 **Large-document performance scenario**:
-The standard Linkmark responsiveness workload containing 2,000 external-link nodes, 500 distinct Link scopes, and a Frontend cache view of 10,000 entries. In development profiles, the cache view may be a process-local fixture that never mutates the Cache authority.
+The standard Linkmark responsiveness workload containing 2,000 external-link nodes, 500 distinct Link scopes, and a Frontend cache view of 10,000 entries. In development profiles, the cache view may be a process-local fixture that never mutates the Cache authority and that layers the real cache's pinned entries over the fixture so Pinned precedence stays invariant.
 _Avoid_: large document, stress test, production maximum
 
 **Incremental interaction target**:

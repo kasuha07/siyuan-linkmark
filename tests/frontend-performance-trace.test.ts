@@ -9,7 +9,9 @@ import {
   FrontendRenderWorkQueue,
   type FrontendRenderWorkExecutor,
 } from "../src/frontend-render-work";
+import { createIconRule, reconcilePresentRules } from "../src/icon-rule";
 import { PERF_CACHE_VIEW_ENTRIES, PERF_SCOPE_COUNT } from "../src/perf-scenario";
+import { scopeForUrl } from "../src/url-scope";
 
 function fakeClock() {
   let now = 0;
@@ -143,7 +145,7 @@ describe("FrontendPerformanceTrace", () => {
     expect(summary?.slowestRuleFreshnessMs).toBe(250 + 1 + 1 + 2);
   });
 
-  it("bounds incremental samples while stage aggregates keep counting", () => {
+  it("bounds the retained P95 window while the interaction count covers the session", () => {
     const { clock, advance } = fakeClock();
     const trace = new FrontendPerformanceTrace(clock, clock);
     trace.enable();
@@ -158,9 +160,60 @@ describe("FrontendPerformanceTrace", () => {
 
     const summary = trace.disable();
     expect(summary?.batches).toBe(INCREMENTAL_SAMPLE_CAP + 100);
-    expect(summary?.incrementalInteractions).toBe(INCREMENTAL_SAMPLE_CAP);
+    expect(summary?.incrementalInteractions).toBe(INCREMENTAL_SAMPLE_CAP + 100);
     expect(summary?.stages.discovery.samples).toBe(INCREMENTAL_SAMPLE_CAP + 100);
     expect(summary?.incrementalP95Ms).toBe(1);
+  });
+
+  it("does not count a rebuild-only batch as an incremental interaction", () => {
+    const { clock, advance } = fakeClock();
+    const trace = new FrontendPerformanceTrace(clock, clock);
+    trace.enable();
+    const queue = new FrontendRenderWorkQueue<number>();
+    advanceWithin = advance;
+
+    queue.requestRuleRebuild();
+    trace.flush(queue, batchExecutor(trace, { rebuild: 5, publication: 1 }));
+
+    const summary = trace.disable();
+    expect(summary?.batches).toBe(1);
+    expect(summary?.incrementalInteractions).toBe(0);
+    expect(summary?.stages.reconcile.samples).toBe(1);
+    expect(summary?.stages.reconcile.totalMs).toBe(5);
+  });
+
+  it("does not count a publication-only batch as an incremental interaction", () => {
+    const { clock, advance } = fakeClock();
+    const trace = new FrontendPerformanceTrace(clock, clock);
+    trace.enable();
+    const queue = new FrontendRenderWorkQueue<number>();
+    advanceWithin = advance;
+
+    queue.requestRulePublication();
+    trace.flush(queue, batchExecutor(trace, { publication: 2 }));
+
+    const summary = trace.disable();
+    expect(summary?.batches).toBe(1);
+    expect(summary?.incrementalInteractions).toBe(0);
+    expect(summary?.stages.publication.samples).toBe(1);
+  });
+
+  it("counts a local-discovery batch with a coincident rebuild once", () => {
+    const { clock, advance } = fakeClock();
+    const trace = new FrontendPerformanceTrace(clock, clock);
+    trace.enable();
+    const queue = new FrontendRenderWorkQueue<number>();
+    advanceWithin = advance;
+
+    queue.requestLocalDiscovery(1);
+    queue.flushDiscovery();
+    queue.requestRuleRebuild();
+    trace.flush(queue, batchExecutor(trace, { discovery: 2, reconcile: 1, rebuild: 3, publication: 1 }));
+
+    const summary = trace.disable();
+    expect(summary?.batches).toBe(1);
+    expect(summary?.incrementalInteractions).toBe(1);
+    expect(summary?.incrementalP95Ms).toBe(7);
   });
 
   it("clears every sample and fixture before a later session", () => {
@@ -268,6 +321,65 @@ describe("FrontendPerformanceTrace", () => {
     trace.disable();
     expect(renderView()).toBe(authority.cache);
     expect(authority).toEqual(before);
+  });
+
+  it("lays the real cache's pinned entries over the fixture overlay", () => {
+    const { clock } = fakeClock();
+    const trace = new FrontendPerformanceTrace(clock, clock);
+    const realCache = {
+      "nocode.host": { url: "pinned-nocode.png", fetchedAt: 0, pinned: true },
+      "unpinned.example.dev": { url: "unpinned.png", fetchedAt: 1_000 },
+      "nocode.host::site-p00000": { url: "pinned-route.png", fetchedAt: 0, pinned: true },
+    };
+    trace.enable();
+    const view = trace.cacheView(realCache)!;
+    expect(Object.keys(view)).toHaveLength(PERF_CACHE_VIEW_ENTRIES + 1);
+    expect(view["nocode.host"]).toEqual({ url: "pinned-nocode.png", fetchedAt: 0, pinned: true });
+    expect(view["unpinned.example.dev"]).toBeUndefined();
+    expect(view["nocode.host::site-p00000"]?.url).toBe("pinned-route.png");
+    expect(view["perf-site-0.example.dev"]).toBeDefined();
+    expect(Object.isFrozen(view)).toBe(true);
+    expect(Object.isFrozen(view["nocode.host"])).toBe(true);
+    expect(view["nocode.host"]).not.toBe(realCache["nocode.host"]);
+  });
+
+  it("rebuilds the composite view only when the real cache identity changes", () => {
+    const { clock } = fakeClock();
+    const trace = new FrontendPerformanceTrace(clock, clock);
+    const first = { "nocode.host": { url: "pin-a.png", fetchedAt: 0, pinned: true } };
+    const second = { "nocode.host": { url: "pin-b.png", fetchedAt: 0, pinned: true } };
+    trace.enable();
+    const viewA = trace.cacheView(first)!;
+    expect(trace.cacheView(first)).toBe(viewA);
+    expect(viewA["nocode.host"]?.url).toBe("pin-a.png");
+    const viewB = trace.cacheView(second)!;
+    expect(viewB).not.toBe(viewA);
+    expect(viewB["nocode.host"]?.url).toBe("pin-b.png");
+    trace.disable();
+    expect(trace.cacheView(first)).toBeNull();
+  });
+
+  it("preserves pinned-domain route suppression through the composite view", () => {
+    const { clock } = fakeClock();
+    const trace = new FrontendPerformanceTrace(clock, clock);
+    trace.enable();
+    const realCache = {
+      "nocode.host": { url: "pinned-nocode.png", fetchedAt: 0, domain: "nocode.host", pinned: true },
+    };
+    const view = trace.cacheView(realCache)!;
+    const routeScope = scopeForUrl("https://nocode.host/p00000/ref-1")!;
+    const result = reconcilePresentRules({
+      discovery: [routeScope],
+      context: { cache: view, iconSize: 1, cacheDays: 30, pauseAutomaticFetch: false },
+      previous: new Map(),
+      full: true,
+    });
+    expect(result.rules.has(routeScope.key)).toBe(false);
+    expect(result.rules.get("nocode.host")).toBe(createIconRule(
+      { key: "nocode.host", domain: "nocode.host" },
+      "pinned-nocode.png",
+      1,
+    ));
   });
 
   it("supplies the five hundred scenario scopes through the overlay", () => {
