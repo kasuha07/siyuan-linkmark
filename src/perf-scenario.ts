@@ -1,6 +1,24 @@
 import type { CacheEntry } from "./frontend-cache-state";
+import {
+  PERF_CACHE_VIEW_ENTRIES,
+  PERF_DOMAIN_SCOPE_COUNT,
+  PERF_ROUTE_HOST,
+  PERF_ROUTE_SCOPE_COUNT,
+  PERF_SCOPE_COUNT,
+  perfScenarioDomain,
+  perfScenarioRouteCode,
+} from "./perf-scenario-definition.js";
 import { RESOLVER_VERSION } from "./resolver-contract";
 import type { LinkScope } from "./url-scope";
+
+export {
+  PERF_CACHE_VIEW_ENTRIES,
+  PERF_DOMAIN_SCOPE_COUNT,
+  PERF_LINK_COUNT,
+  PERF_ROUTE_SCOPE_COUNT,
+  PERF_SCOPE_COUNT,
+  perfScenarioLinkUrls,
+} from "./perf-scenario-definition.js";
 
 /**
  * The deterministic Large-document performance scenario shared by the
@@ -9,55 +27,25 @@ import type { LinkScope } from "./url-scope";
  * distinct Link scopes, with a 10,000-entry process-local cache view.
  * Nothing here participates in production behavior.
  */
-export const PERF_LINK_COUNT = 2000;
-export const PERF_SCOPE_COUNT = 500;
-export const PERF_DOMAIN_SCOPE_COUNT = 480;
-export const PERF_ROUTE_SCOPE_COUNT = 20;
-export const PERF_CACHE_VIEW_ENTRIES = 10_000;
-const PERF_LINKS_PER_SCOPE = 4;
-const ROUTE_HOST = "nocode.host";
 const ICON_ORIGIN = "https://cdn.perf.example.dev/";
-
-function perfDomain(index: number) {
-  return `perf-site-${index}.example.dev`;
-}
-
-function perfRouteCode(index: number) {
-  return `p${String(index).padStart(5, "0")}`;
-}
 
 export function perfScenarioScopes(): LinkScope[] {
   const scopes: LinkScope[] = [];
   for (let index = 0; index < PERF_DOMAIN_SCOPE_COUNT; index += 1) {
-    const domain = perfDomain(index);
+    const domain = perfScenarioDomain(index);
     scopes.push({ key: domain, domain });
   }
   for (let index = 0; index < PERF_ROUTE_SCOPE_COUNT; index += 1) {
-    const code = perfRouteCode(index);
+    const code = perfScenarioRouteCode(index);
     scopes.push({
-      key: `${ROUTE_HOST}::site-${code}`,
-      domain: ROUTE_HOST,
+      key: `${PERF_ROUTE_HOST}::site-${code}`,
+      domain: PERF_ROUTE_HOST,
       routeKey: `site-${code}`,
       pathPrefix: `/${code}`,
       discoverPage: true,
     });
   }
   return scopes;
-}
-
-export function perfScenarioLinkUrls(): string[] {
-  const urls: string[] = [];
-  for (let index = 0; index < PERF_DOMAIN_SCOPE_COUNT; index += 1) {
-    for (let copy = 0; copy < PERF_LINKS_PER_SCOPE; copy += 1) {
-      urls.push(`https://${perfDomain(index)}/ref-${copy}`);
-    }
-  }
-  for (let index = 0; index < PERF_ROUTE_SCOPE_COUNT; index += 1) {
-    for (let copy = 0; copy < PERF_LINKS_PER_SCOPE; copy += 1) {
-      urls.push(`https://${ROUTE_HOST}/${perfRouteCode(index)}/ref-${copy}`);
-    }
-  }
-  return urls;
 }
 
 /**
@@ -73,15 +61,15 @@ export function perfCacheOverlay(fetchedAt: number): Record<string, CacheEntry> 
   const overlay: Record<string, CacheEntry> = {};
   const fresh = { fetchedAt: fetchedAt - 1_000, resolverVersion: RESOLVER_VERSION };
   for (let index = 0; index < PERF_DOMAIN_SCOPE_COUNT; index += 1) {
-    const domain = perfDomain(index);
+    const domain = perfScenarioDomain(index);
     overlay[domain] = { ...fresh, url: `${ICON_ORIGIN}${domain}.png`, domain };
   }
   for (let index = 0; index < PERF_ROUTE_SCOPE_COUNT; index += 1) {
-    const code = perfRouteCode(index);
-    overlay[`${ROUTE_HOST}::site-${code}`] = {
+    const code = perfScenarioRouteCode(index);
+    overlay[`${PERF_ROUTE_HOST}::site-${code}`] = {
       ...fresh,
       url: `${ICON_ORIGIN}nocode-site-${code}.png`,
-      domain: ROUTE_HOST,
+      domain: PERF_ROUTE_HOST,
       routeKey: `site-${code}`,
       pathPrefix: `/${code}`,
     };

@@ -1,38 +1,15 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  PERF_LINK_COUNT,
+  PERF_SCOPE_COUNT,
+  perfScenarioLinkUrls,
+} from "../src/perf-scenario-definition.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-const LINKS = 2000;
-const DOMAIN_SCOPES = 480;
-const ROUTE_SCOPES = 20;
-const LINKS_PER_SCOPE = 4;
 const LINKS_PER_SECTION = 100;
-const ROUTE_HOST = "nocode.host";
-
-function perfDomain(index) {
-  return `perf-site-${index}.example.dev`;
-}
-
-function perfRouteCode(index) {
-  return `p${String(index).padStart(5, "0")}`;
-}
-
-function linkUrls() {
-  const urls = [];
-  for (let index = 0; index < DOMAIN_SCOPES; index += 1) {
-    for (let copy = 0; copy < LINKS_PER_SCOPE; copy += 1) {
-      urls.push(`https://${perfDomain(index)}/ref-${copy}`);
-    }
-  }
-  for (let index = 0; index < ROUTE_SCOPES; index += 1) {
-    for (let copy = 0; copy < LINKS_PER_SCOPE; copy += 1) {
-      urls.push(`https://${ROUTE_HOST}/${perfRouteCode(index)}/ref-${copy}`);
-    }
-  }
-  return urls;
-}
 
 function renderMarkdown(urls) {
   const lines = [
@@ -60,10 +37,12 @@ function renderMarkdown(urls) {
 const outArg = process.argv.findIndex((argument) => argument === "--out");
 const out = outArg >= 0 ? resolve(process.argv[outArg + 1]) : resolve(root, ".scratch", "perf-scenario.md");
 
-const urls = linkUrls();
-if (urls.length !== LINKS) {
-  throw new Error(`Expected ${LINKS} links, generated ${urls.length}`);
+const urls = perfScenarioLinkUrls();
+if (urls.length !== PERF_LINK_COUNT) {
+  throw new Error(`Expected ${PERF_LINK_COUNT} links, generated ${urls.length}`);
 }
 await mkdir(dirname(out), { recursive: true });
 await writeFile(out, renderMarkdown(urls), "utf8");
-console.log(`Wrote ${LINKS} links across ${DOMAIN_SCOPES + ROUTE_SCOPES} scopes to ${out}`);
+console.log(
+  `Wrote ${PERF_LINK_COUNT} links across ${PERF_SCOPE_COUNT} scopes to ${out}`,
+);
