@@ -1,4 +1,4 @@
-import { confirm, Dialog, Menu, Plugin, Setting, showMessage } from "siyuan";
+import { confirm, Dialog, Menu, Plugin, Setting, showMessage, type IProtyle } from "siyuan";
 import "./style.css";
 import type { CacheMutationReceipt, CacheRequestResult } from "./cache-authority";
 import { isDecodableImage } from "./image-decode";
@@ -28,12 +28,20 @@ import {
   type Settings,
 } from "./frontend-settings";
 import {
-  addedLinkDiscoveryRegionFor,
   flushFrontendRenderWork,
   FrontendRenderWorkQueue,
-  localDiscoveryRegionFor,
   type FrontendRenderWorkExecutor,
 } from "./frontend-render-work";
+import {
+  LINK_CONTENT_OBSERVER_OPTIONS,
+  LINK_IDENTITY_ATTRIBUTES,
+  planMutationDiscovery,
+  type MutationDiscoveryRecord,
+} from "./frontend-mutation-discovery";
+import {
+  LinkContentObserverRegistry,
+  protyleContentContainers,
+} from "./frontend-observer-registry";
 import {
   applyCacheChangeEvent,
   cacheBeforeChange,
@@ -69,11 +77,17 @@ const LINK_SELECTOR = [
   ".protyle-wysiwyg a[href]",
   ".b3-typography a[href]",
 ].join(",");
+const DETACHED_LINK_SELECTOR = [
+  "span[data-type~='a'][data-href]",
+  "span[data-type~='url'][data-href]",
+  "a[href]",
+].join(",");
 const EDITOR_SELECTOR = ".protyle-wysiwyg";
 const EDITOR_BLOCK_SELECTOR = "[data-node-id]";
-const STATIC_CONTAINER_SELECTOR = ".b3-typography";
+const STATIC_CONTAINER_SELECTOR = ".protyle-preview > .b3-typography";
 const LOCAL_DISCOVERY_SELECTORS = {
   link: LINK_SELECTOR,
+  detachedLink: DETACHED_LINK_SELECTOR,
   editor: EDITOR_SELECTOR,
   block: EDITOR_BLOCK_SELECTOR,
   staticContainer: STATIC_CONTAINER_SELECTOR,
@@ -95,7 +109,9 @@ export default class LinkmarkPlugin extends Plugin {
   private pendingMarkerBindings = new Map<HTMLElement, string | undefined>();
   private pendingFullMarkerReconcile = false;
   private readonly bindingPublisher = new RuntimeIconBindingPublisher(document, RUNTIME_STYLE_ID);
-  private observer?: MutationObserver;
+  private readonly contentObservers = new LinkContentObserverRegistry<Element, MutationObserver>(
+    (container) => this.createContentObserver(container),
+  );
   private scanTimer?: number;
   private renderWorkTimer?: number;
   private readonly renderWork = new FrontendRenderWorkQueue<Element>((outer, inner) => outer.contains(inner));
@@ -108,7 +124,13 @@ export default class LinkmarkPlugin extends Plugin {
   private cacheGeneration = 0;
   private lastCacheRevision: number | undefined;
   private lastCacheEpoch: string | undefined;
-  private readonly inputListener = (event: Event) => this.scheduleInputScan(event.target);
+  private readonly protyleRegisterListener = (event: CustomEvent<{ protyle: IProtyle }>) => {
+    this.registerProtyleContent(event.detail.protyle);
+  };
+  private readonly protyleDestroyListener = (event: CustomEvent<{ protyle: IProtyle }>) => {
+    this.unregisterProtyleContent(event.detail.protyle);
+    this.scheduleScan();
+  };
 
   async onload() {
     this.addToolbar();
@@ -127,8 +149,8 @@ export default class LinkmarkPlugin extends Plugin {
   }
 
   onunload() {
-    this.observer?.disconnect();
-    document.removeEventListener("input", this.inputListener, true);
+    this.removeProtyleEventListeners();
+    this.contentObservers.destroy();
     if (this.scanTimer !== undefined) window.clearTimeout(this.scanTimer);
     if (this.renderWorkTimer !== undefined) window.clearTimeout(this.renderWorkTimer);
     this.topBarElement?.remove();
@@ -747,10 +769,13 @@ export default class LinkmarkPlugin extends Plugin {
 
   private collectDocumentDomains(root?: Element | null) {
     const domains = new Map<string, { scope: LinkScope; targetUrl: string; elements: HTMLElement[] }>();
-    const elements = [
-      ...(root?.matches(LINK_SELECTOR) ? [root as HTMLElement] : []),
-      ...(root ?? document).querySelectorAll<HTMLElement>(LINK_SELECTOR),
-    ];
+    const roots = root
+      ? [root]
+      : [...this.contentObservers.containers()].filter((container) => container.isConnected);
+    const elements = roots.flatMap((container) => [
+      ...(container.matches(LINK_SELECTOR) ? [container as HTMLElement] : []),
+      ...container.querySelectorAll<HTMLElement>(LINK_SELECTOR),
+    ]);
     for (const element of elements) {
       const href = element.dataset.href ?? element.getAttribute("href") ?? "";
       const scope = scopeForUrl(href);
@@ -760,33 +785,6 @@ export default class LinkmarkPlugin extends Plugin {
       else domains.set(scope.key, { scope, targetUrl: href, elements: [element] });
     }
     return domains;
-  }
-
-  private scheduleScanForNode(target: EventTarget | null) {
-    const root = this.localScanRootFor(target);
-    if (root) this.scheduleScan(root);
-  }
-
-  private scheduleAddedNodeScan(node: Node) {
-    const root = addedLinkDiscoveryRegionFor(this.elementForNode(node), LOCAL_DISCOVERY_SELECTORS);
-    if (root) this.scheduleScan(root);
-  }
-
-  private scheduleInputScan(target: EventTarget | null) {
-    const targetElement = this.elementForNode(target);
-    const selectedElement = this.elementForNode(document.getSelection()?.anchorNode ?? null);
-    const source = selectedElement && targetElement?.contains(selectedElement) ? selectedElement : targetElement;
-    const root = this.localScanRootFor(source);
-    if (root) this.scheduleScan(root);
-  }
-
-  private localScanRootFor(node: EventTarget | null) {
-    return localDiscoveryRegionFor(this.elementForNode(node), LOCAL_DISCOVERY_SELECTORS);
-  }
-
-  private elementForNode(node: EventTarget | null) {
-    if (node instanceof Element) return node;
-    return node instanceof Node ? node.parentElement : null;
   }
 
   private async refreshCurrentDocument() {
@@ -1258,63 +1256,82 @@ export default class LinkmarkPlugin extends Plugin {
   }
 
   private startObserver() {
-    this.observer = new MutationObserver((records) => {
+    this.addProtyleEventListeners();
+    for (const container of document.querySelectorAll<HTMLElement>(`${EDITOR_SELECTOR}, ${STATIC_CONTAINER_SELECTOR}`)) {
+      this.registerContentContainer(container);
+    }
+  }
+
+  private createContentObserver(container: Element) {
+    const observer = new MutationObserver((records) => {
+      const normalized: MutationDiscoveryRecord<Element>[] = [];
       for (const record of records) {
-        this.scheduleScanForNode(record.target);
         if (record.type === "childList") {
-          for (const node of record.addedNodes) this.scheduleAddedNodeScan(node);
-          if (this.removedNodesContainLink(record.removedNodes)) this.scheduleScan();
-        } else if (record.type === "attributes" && this.linkAttributeRemovedOrRewritten(record)) {
-          this.scheduleScan();
+          normalized.push({
+            type: "childList",
+            addedElements: [...record.addedNodes].filter((node): node is Element => node instanceof Element),
+            removedElements: [...record.removedNodes].filter((node): node is Element => node instanceof Element),
+          });
+          continue;
+        }
+        const target = record.target instanceof Element ? record.target : null;
+        const attributeName = LINK_IDENTITY_ATTRIBUTES.find((name) => name === record.attributeName);
+        if (target && attributeName) {
+          normalized.push({ type: "attributes", target, attributeName, oldValue: record.oldValue });
         }
       }
+      const discovery = planMutationDiscovery(normalized, LOCAL_DISCOVERY_SELECTORS);
+      if (!discovery) return;
+      if (discovery.kind === "full") this.renderWork.requestFullDiscovery();
+      else for (const region of discovery.regions) this.renderWork.requestLocalDiscovery(region);
+      this.scheduleDiscoveryTimer();
     });
-    this.observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      characterData: true,
-      attributes: true,
-      attributeFilter: ["data-href", "href", "data-type"],
-    });
-    document.addEventListener("input", this.inputListener, true);
+    observer.observe(container, LINK_CONTENT_OBSERVER_OPTIONS);
+    return observer;
   }
 
-  /**
-   * A link scope can leave the document without any added node to scan, so a
-   * removed link subtree escalates to a full discovery: the full scan evicts
-   * Runtime icon bindings for scopes that are no longer Present, which a local scan
-   * never does. The render-work debounce coalesces the removals protyle
-   * performs while re-creating elements during editing.
-   */
-  private removedNodesContainLink(nodes: NodeList): boolean {
-    for (const node of nodes) {
-      if (node instanceof Element && (node.matches(LINK_SELECTOR) || node.querySelector(LINK_SELECTOR))) return true;
-    }
-    return false;
+  private registerContentContainer(container: Element) {
+    if (!container.isConnected) return;
+    if (this.contentObservers.register(container)) this.scheduleScan(container);
   }
 
-  /**
-   * Rewriting a link's href or data-href replaces the scope it represents,
-   * and dropping data-type or the href attributes un-links an element, so
-   * the previously Present scope may have left the document. Both escalate
-   * to a full discovery for the same eviction reason as a removed subtree.
-   */
-  private linkAttributeRemovedOrRewritten(record: MutationRecord): boolean {
-    const target = record.target instanceof Element ? record.target : null;
-    if (!target) return false;
-    if (record.attributeName === "href" || record.attributeName === "data-href") return true;
-    return record.attributeName === "data-type" && !target.matches(LINK_SELECTOR);
+  private registerProtyleContent(protyle: IProtyle) {
+    for (const container of protyleContentContainers(protyle)) this.registerContentContainer(container);
   }
 
-  private scheduleScan(root?: Element | null) {
-    if (root) this.renderWork.requestLocalDiscovery(root);
-    else this.renderWork.requestFullDiscovery();
+  private unregisterProtyleContent(protyle: IProtyle) {
+    for (const container of protyleContentContainers(protyle)) this.contentObservers.unregister(container);
+  }
+
+  private addProtyleEventListeners() {
+    this.eventBus.on("loaded-protyle-static", this.protyleRegisterListener);
+    this.eventBus.on("loaded-protyle-dynamic", this.protyleRegisterListener);
+    this.eventBus.on("switch-protyle", this.protyleRegisterListener);
+    this.eventBus.on("switch-protyle-mode", this.protyleRegisterListener);
+    this.eventBus.on("destroy-protyle", this.protyleDestroyListener);
+  }
+
+  private removeProtyleEventListeners() {
+    this.eventBus.off("loaded-protyle-static", this.protyleRegisterListener);
+    this.eventBus.off("loaded-protyle-dynamic", this.protyleRegisterListener);
+    this.eventBus.off("switch-protyle", this.protyleRegisterListener);
+    this.eventBus.off("switch-protyle-mode", this.protyleRegisterListener);
+    this.eventBus.off("destroy-protyle", this.protyleDestroyListener);
+  }
+
+  private scheduleDiscoveryTimer() {
     if (this.scanTimer !== undefined) window.clearTimeout(this.scanTimer);
     this.scanTimer = window.setTimeout(() => {
       this.scanTimer = undefined;
       this.renderWork.flushDiscovery();
       this.scheduleRenderWork();
     }, 250);
+  }
+
+  private scheduleScan(root?: Element | null) {
+    if (root) this.renderWork.requestLocalDiscovery(root);
+    else this.renderWork.requestFullDiscovery();
+    this.scheduleDiscoveryTimer();
   }
 
   private requestRuleRebuild() {
@@ -1551,9 +1568,13 @@ export default class LinkmarkPlugin extends Plugin {
   private scheduleTargetedDiscovery(scopes: Iterable<LinkScope>) {
     let matched = false;
     for (const scope of scopes) {
-      for (const element of document.querySelectorAll<HTMLElement>(createScopeQuery(scope))) {
-        matched = true;
-        this.scheduleScan(element);
+      const query = createScopeQuery(scope);
+      for (const container of this.contentObservers.containers()) {
+        if (!container.isConnected) continue;
+        for (const element of container.querySelectorAll<HTMLElement>(query)) {
+          matched = true;
+          this.scheduleScan(element);
+        }
       }
     }
     return matched;

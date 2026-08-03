@@ -76,6 +76,10 @@ _Avoid_: cache miss, icon result, resolution failure
 The Frontend path from an editor DOM change through link discovery and Icon rule reconciliation to runtime stylesheet publication. It excludes plugin startup, Cache snapshot transport, favicon resolution, network retrieval, and cache persistence.
 _Avoid_: favicon resolution pipeline, plugin lifecycle, frontend performance in general
 
+**Link content container**:
+A mounted SiYuan editor or static-preview container whose external links contribute to Linkmark's Present scopes. Link changes outside these containers belong to SiYuan's surrounding UI and do not enter Linkmark's Interactive render pipeline.
+_Avoid_: editor area, document body, SiYuan UI
+
 **Frontend client**:
 A desktop, mobile, or browser plugin instance that renders icons and requests cache operations from the cache authority through RPC.
 _Avoid_: cache writer, cache owner

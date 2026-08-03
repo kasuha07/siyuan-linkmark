@@ -44,6 +44,7 @@ function fakeElement(...roles: string[]): FakeElement {
 
 const localSelectors = {
   link: "link",
+  detachedLink: "link",
   editor: "editor",
   block: "block",
   staticContainer: "static",
@@ -111,6 +112,17 @@ describe("FrontendRenderWorkQueue", () => {
     work.requestLocalDiscovery("block-c");
     work.flushDiscovery();
     expect(work.take().discovery).toEqual({ kind: "local", regions: ["block-c"] });
+  });
+
+  it("escalates the ninth independent region in one discovery window to full", () => {
+    const work = new FrontendRenderWorkQueue<string>();
+
+    for (let index = 0; index < 8; index += 1) work.requestLocalDiscovery(`block-${index}`);
+    work.requestLocalDiscovery("block-8");
+    work.requestLocalDiscovery("block-9");
+    work.flushDiscovery();
+
+    expect(work.take().discovery).toEqual({ kind: "full" });
   });
 
   it("coalesces the 1,000-link / 250-scope warm-cache fixture into one rule publication", () => {

@@ -3,6 +3,8 @@ export type DiscoveryWork<Region> =
   | { kind: "local"; regions: Region[] }
   | null;
 
+const MAX_LOCAL_DISCOVERY_REGIONS = 8;
+
 export type FrontendRenderWork<Region> = {
   discovery: DiscoveryWork<Region>;
   rebuildRules: boolean;
@@ -27,6 +29,7 @@ type AddedLinkDiscoveryElement = LocalDiscoveryElement & {
 
 export type LocalDiscoverySelectors = {
   link: string;
+  detachedLink: string;
   editor: string;
   block: string;
   staticContainer: string;
@@ -81,7 +84,9 @@ export class FrontendRenderWorkQueue<Region> {
   }
 
   requestLocalDiscovery(region: Region) {
-    if (!this.pendingFullDiscovery && !this.fullDiscovery) this.addRegion(this.pendingLocalRegions, region);
+    if (this.pendingFullDiscovery || this.fullDiscovery) return;
+    this.addRegion(this.pendingLocalRegions, region);
+    if (this.pendingLocalRegions.size > MAX_LOCAL_DISCOVERY_REGIONS) this.requestFullDiscovery();
   }
 
   flushDiscovery() {

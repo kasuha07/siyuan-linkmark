@@ -39,7 +39,32 @@ declare module "siyuan" {
     }): void;
   }
 
+  export interface IProtyle {
+    preview?: { previewElement: HTMLElement };
+    wysiwyg?: { element: HTMLDivElement };
+  }
+
+  type ProtyleEventMap = {
+    "destroy-protyle": { protyle: IProtyle };
+    "loaded-protyle-dynamic": { protyle: IProtyle; position: "afterend" | "beforebegin" };
+    "loaded-protyle-static": { protyle: IProtyle };
+    "switch-protyle": { protyle: IProtyle };
+    "switch-protyle-mode": { protyle: IProtyle };
+  };
+
+  export class EventBus {
+    on<K extends keyof ProtyleEventMap>(
+      type: K,
+      listener: (event: CustomEvent<ProtyleEventMap[K]>) => unknown,
+    ): void;
+    off<K extends keyof ProtyleEventMap>(
+      type: K,
+      listener: (event: CustomEvent<ProtyleEventMap[K]>) => unknown,
+    ): void;
+  }
+
   export class Plugin {
+    eventBus: EventBus;
     setting?: Setting;
     i18n: Record<string, any>;
     kernel?: {
