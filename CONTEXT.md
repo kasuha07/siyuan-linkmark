@@ -76,9 +76,41 @@ _Avoid_: cache miss, icon result, resolution failure
 An opt-in, development-build-only structured kernel-log record sequence for one In-flight task. Its default-off, process-local runtime switch exposes lifecycle milestones and sanitized diagnostics without changing the Kernel RPC result, persisting a cache policy, or broadcasting external request data to Frontend clients.
 _Avoid_: queue result, frontend debug event, persisted audit log, workspace cache policy
 
+**Frontend performance trace**:
+An opt-in, development-build-only timing summary for Linkmark discovery, rule reconciliation, and rule publication during a repeatable manual profile. It is process-local, contains no document or URL content, and is neither persisted nor exposed as a production setting or interface.
+_Avoid_: Resolution trace, telemetry, benchmark gate, user-facing diagnostics
+
+**Interactive render pipeline**:
+The Frontend path from an editor DOM change through link discovery and Icon rule reconciliation to runtime stylesheet publication. It excludes plugin startup, Cache snapshot transport, favicon resolution, network retrieval, and cache persistence.
+_Avoid_: favicon resolution pipeline, plugin lifecycle, frontend performance in general
+
 **Frontend client**:
 A desktop, mobile, or browser plugin instance that renders icons and requests cache operations from the cache authority through RPC.
 _Avoid_: cache writer, cache owner
+
+**Editor responsiveness**:
+The user-visible ability to type, paste, and add or remove external links in a mounted SiYuan document without Linkmark causing perceptible delay. It is Linkmark's primary performance outcome for large documents.
+_Avoid_: favicon download speed, resolver throughput, general frontend performance
+
+**Large-document performance scenario**:
+The standard Linkmark responsiveness workload containing 2,000 external-link nodes, 500 distinct Link scopes, and a Frontend cache view of 10,000 entries. In development profiles, the cache view may be a process-local fixture that never mutates the Cache authority.
+_Avoid_: large document, stress test, production maximum
+
+**Incremental interaction target**:
+In a manual profile of the Large-document performance scenario, the target 95th-percentile Linkmark main-thread execution time caused by one ordinary input or single-link change is at most 8 milliseconds, excluding deliberate scheduling delay. It is not a CI gate.
+_Avoid_: total input latency, debounce delay, automated acceptance budget
+
+**Full-discovery target**:
+In a manual profile of the Large-document performance scenario, one complete Linkmark discovery and rule-reconciliation pass targets at most 50 milliseconds of main-thread execution time. It is not a CI gate.
+_Avoid_: incremental interaction target, scheduling delay, automated acceptance budget
+
+**Rule freshness target**:
+In a manual profile, Linkmark targets publication of the applicable icon-rule update within 300 milliseconds after editor input becomes stable, including its deliberate scheduling delay. It is not a CI gate.
+_Avoid_: network resolution time, icon download latency, automated acceptance budget
+
+**Frontend memory target**:
+In a manual profile of the Large-document performance scenario, Linkmark may use at most 5 MiB of additional Frontend memory for performance-derived state, which must scale with Present scopes rather than duplicate the authoritative cache.
+_Avoid_: total plugin memory, browser heap limit, automated acceptance budget
 
 **Pinned icon**:
 A user-selected cache entry that survives ordinary refresh and cache cleanup until the user restores automatic resolution or removes it.

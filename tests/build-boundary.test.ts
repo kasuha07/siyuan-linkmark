@@ -18,7 +18,7 @@ function buildBothArtifacts(mode: string, outDir: string) {
 }
 
 describe("development build boundary", () => {
-  it("includes the trace switch and toggle endpoint in development artifacts and omits both from production artifacts", async () => {
+  it("includes the trace switches and fixture surface in development artifacts and omits them from production artifacts", async () => {
     const tmp = await mkdtemp(join(tmpdir(), "linkmark-boundary-"));
     try {
       const dev = join(tmp, "dev");
@@ -32,13 +32,20 @@ describe("development build boundary", () => {
       const prodKernel = await readFile(join(prod, "kernel.js"), "utf8");
 
       expect(devFrontend).toContain("traceTitle");
+      expect(devFrontend).toContain("frontendTraceTitle");
       expect(devFrontend).toContain("cache.trace.set");
+      expect(devFrontend).toContain("perf-site-");
+      expect(devFrontend).toContain("cdn.perf.example.dev");
       expect(devKernel).toContain("cache.trace.set");
       expect(devKernel).toContain("resolution-trace");
 
       expect(prodFrontend).not.toContain("traceTitle");
       expect(prodFrontend).not.toContain("traceDescription");
+      expect(prodFrontend).not.toContain("frontendTraceTitle");
+      expect(prodFrontend).not.toContain("frontendTraceDescription");
       expect(prodFrontend).not.toContain("cache.trace.set");
+      expect(prodFrontend).not.toContain("perf-site-");
+      expect(prodFrontend).not.toContain("cdn.perf.example.dev");
       expect(prodKernel).not.toContain("cache.trace.set");
       expect(prodKernel).not.toContain("resolution-trace");
     } finally {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createIconRule, reconcilePresentRules, type PresentRuleContext } from "../src/icon-rule";
 import { RESOLVER_VERSION } from "../src/resolver-contract";
+import { perfCacheOverlay, perfScenarioScopes, PERF_CACHE_VIEW_ENTRIES, PERF_SCOPE_COUNT } from "../src/perf-scenario";
 import { scopeForUrl } from "../src/url-scope";
 
 describe("createIconRule", () => {
@@ -209,5 +210,29 @@ describe("reconcilePresentRules", () => {
       "domain-9999.example.com",
     ]);
     expect(result.rules.get("domain-0.example.com")).toBe(createIconRule(discovery[0], "icon-0.png", 1));
+  });
+
+  it("reconciles only the 500 scenario scopes against the 10,000-entry fixture cache", () => {
+    const overlay = perfCacheOverlay(now);
+    const scopes = perfScenarioScopes();
+    const result = reconcilePresentRules({
+      discovery: scopes,
+      context: context({ cache: overlay }),
+      previous: new Map(),
+      full: true,
+    });
+    expect(Object.keys(overlay)).toHaveLength(PERF_CACHE_VIEW_ENTRIES);
+    expect(result.rules.size).toBe(PERF_SCOPE_COUNT);
+    const domainScope = scopes[0];
+    expect(result.rules.get(domainScope.key)).toBe(createIconRule(
+      domainScope,
+      overlay[domainScope.key].url,
+      1,
+    ));
+    const routeScope = scopeForUrl("https://nocode.host/p00019/ref-3")!;
+    expect(result.rules.has(routeScope.key)).toBe(true);
+    for (const key of result.rules.keys()) {
+      expect(overlay[key]).toBeDefined();
+    }
   });
 });

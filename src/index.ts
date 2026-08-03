@@ -26,6 +26,7 @@ import {
   flushFrontendRenderWork,
   FrontendRenderWorkQueue,
   localDiscoveryRegionFor,
+  type FrontendRenderWorkExecutor,
 } from "./frontend-render-work";
 import {
   applyCacheChangeEvent,
@@ -45,6 +46,7 @@ import {
   normalizeDomainInput,
 } from "./frontend-format";
 import { fetchOutcomeFor, type FetchOutcome } from "./refresh-outcome";
+import { FrontendPerformanceTrace, type FrontendTraceStageName } from "./frontend-performance-trace";
 import { scopeForUrl, scopeFromCacheKey, type LinkScope } from "./url-scope";
 
 type FetchTrigger = "automatic" | "manual";
@@ -95,6 +97,9 @@ export default class LinkmarkPlugin extends Plugin {
   private lastCacheRevision: number | undefined;
   private lastCacheEpoch: string | undefined;
   private traceEnabled = false;
+  private readonly performanceTrace = import.meta.env.MODE === "development"
+    ? new FrontendPerformanceTrace(() => performance.now())
+    : null;
   private readonly inputListener = (event: Event) => this.scheduleInputScan(event.target);
 
   async onload() {
@@ -582,27 +587,66 @@ export default class LinkmarkPlugin extends Plugin {
       createActionElement: () => cacheActions,
     });
     if (import.meta.env.MODE === "development") {
-      // The development-only Resolution trace switch applies immediately and
-      // never participates in the settings confirmation flow. It is process
-      // local, off by default, and reset whenever the kernel reloads.
-      const resolutionTrace = document.createElement("input");
-      resolutionTrace.type = "checkbox";
-      resolutionTrace.className = "b3-switch fn__flex-center";
-      resolutionTrace.checked = this.traceEnabled;
-      resolutionTrace.addEventListener("change", () => {
-        this.traceEnabled = resolutionTrace.checked;
-        void this.callKernel<{ enabled: boolean }>("cache.trace.set", this.traceEnabled).then((state) => {
-          this.traceEnabled = state?.enabled ?? false;
-          resolutionTrace.checked = this.traceEnabled;
-        }).catch(() => {
-          this.traceEnabled = false;
-          resolutionTrace.checked = false;
+      // Development-only switches apply immediately and never participate in
+      // the settings confirmation flow. They are process local, off by
+      // default, and reset whenever the frontend plugin reloads.
+      const setting = this.setting;
+      const addDevelopmentSwitch = (item: {
+        checked: boolean;
+        title: string;
+        description: string;
+        onChange: (checked: boolean, input: HTMLInputElement) => void;
+      }) => {
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.className = "b3-switch fn__flex-center";
+        input.checked = item.checked;
+        input.addEventListener("change", () => item.onChange(input.checked, input));
+        setting.addItem({
+          title: item.title,
+          description: item.description,
+          createActionElement: () => input,
         });
-      });
-      this.setting.addItem({
+        return input;
+      };
+      // The development-only Resolution trace switch communicates only with
+      // the development Kernel plugin and resets whenever the kernel reloads.
+      addDevelopmentSwitch({
+        checked: this.traceEnabled,
         title: t("traceTitle"),
         description: t("traceDescription"),
-        createActionElement: () => resolutionTrace,
+        onChange: (checked, input) => {
+          this.traceEnabled = checked;
+          void this.callKernel<{ enabled: boolean }>("cache.trace.set", this.traceEnabled).then((state) => {
+            this.traceEnabled = state?.enabled ?? false;
+            input.checked = this.traceEnabled;
+          }).catch(() => {
+            this.traceEnabled = false;
+            input.checked = false;
+          });
+        },
+      });
+      // The development-only Frontend performance trace switch enables the
+      // read-only fixture cache overlay for the generated large-document
+      // scenario; disabling it prints one console summary and restores
+      // rendering from the real cache state.
+      addDevelopmentSwitch({
+        checked: Boolean(this.performanceTrace?.active),
+        title: t("frontendTraceTitle"),
+        description: t("frontendTraceDescription"),
+        onChange: (checked) => {
+          const trace = this.performanceTrace;
+          if (!trace) return;
+          if (checked) {
+            trace.enable();
+            console.info("[siyuan-linkmark] Frontend performance trace session started");
+          } else {
+            const summary = trace.disable();
+            if (summary) console.info("[siyuan-linkmark] Frontend performance trace summary", summary);
+          }
+          this.requestRuleRebuild();
+          this.scheduleScan();
+        },
       });
     }
   }
@@ -740,6 +784,9 @@ export default class LinkmarkPlugin extends Plugin {
   }
 
   private scheduleInputScan(target: EventTarget | null) {
+    // The Frontend performance trace measures the interval from the last
+    // input to the batch that publishes the applicable rules.
+    this.performanceTrace?.input();
     const targetElement = this.elementForNode(target);
     const selectedElement = this.elementForNode(document.getSelection()?.anchorNode ?? null);
     const source = selectedElement && targetElement?.contains(selectedElement) ? selectedElement : targetElement;
@@ -1308,7 +1355,10 @@ export default class LinkmarkPlugin extends Plugin {
 
   private flushRenderWork() {
     this.renderWorkTimer = undefined;
-    flushFrontendRenderWork(this.renderWork, {
+    const executor: FrontendRenderWorkExecutor<Element> = {
+      // The trace measures the rebuild itself into the reconcile stage and
+      // its own batch slot, keeping a coincident rebuild out of the
+      // Full-discovery total.
       rebuildRules: () => this.rebuildRules(),
       discover: (discovery) => {
         if (discovery.kind === "full") return this.scanLinks();
@@ -1316,27 +1366,45 @@ export default class LinkmarkPlugin extends Plugin {
         for (const root of discovery.regions) rulesChanged = this.scanLinks(root) || rulesChanged;
         return rulesChanged;
       },
-      publishRules: () => this.renderRules(),
-    });
+      publishRules: () => this.traceStage("publication", () => this.renderRules()),
+    };
+    const trace = this.performanceTrace;
+    if (trace) trace.flush(this.renderWork, executor);
+    else flushFrontendRenderWork(this.renderWork, executor);
+  }
+
+  private traceStage<R>(name: FrontendTraceStageName, fn: () => R): R {
+    const trace = this.performanceTrace;
+    return trace ? trace.stage(name, fn) : fn();
+  }
+
+  /**
+   * The cache view the Interactive render pipeline reads. An active
+   * development performance session replaces it with the read-only fixture
+   * overlay; every other surface (cache counts, management UI, refresh,
+   * persistence) keeps reading the adopted snapshot cache.
+   */
+  private cacheViewForRender(): Record<string, CacheEntry> {
+    return this.performanceTrace?.cacheView() ?? this.cache;
   }
 
   private scanLinks(root?: Element | null) {
     if (!this.settings.enabled) return false;
-    const domains = this.collectDocumentDomains(root);
+    const domains = this.traceStage("discovery", () => this.collectDocumentDomains(root));
 
-    const reconciled = reconcilePresentRules({
+    const reconciled = this.traceStage("reconcile", () => reconcilePresentRules({
       discovery: [...domains.values()].map(({ scope }) => scope),
       context: this.presentRuleContext(),
       previous: this.iconRules,
       full: !root,
-    });
+    }));
     this.iconRules = reconciled.rules;
 
     domains.forEach(({ scope, targetUrl }, key) => {
       const decision = planScanDecision({
         scopeKey: key,
         scope,
-        cache: this.cache,
+        cache: this.cacheViewForRender(),
         pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
         cacheDays: this.settings.cacheDays,
         failedAt: this.failedDomains.get(key),
@@ -1469,9 +1537,10 @@ export default class LinkmarkPlugin extends Plugin {
     // their rules against the current cache. Scopes whose entry left the
     // cache produce no rule and are evicted; adding rules for scopes that
     // were never present is the full scan's job.
+    const view = this.cacheViewForRender();
     const scopes: LinkScope[] = [];
     for (const key of this.iconRules.keys()) {
-      const entry = this.cache[key];
+      const entry = view[key];
       if (entry) scopes.push(scopeFromCacheKey(key, entry.domain, entry.pathPrefix));
     }
     const reconciled = reconcilePresentRules({
@@ -1486,7 +1555,7 @@ export default class LinkmarkPlugin extends Plugin {
 
   private presentRuleContext(): PresentRuleContext {
     return {
-      cache: this.cache,
+      cache: this.cacheViewForRender(),
       iconSize: this.settings.iconSize,
       cacheDays: this.settings.cacheDays,
       pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
