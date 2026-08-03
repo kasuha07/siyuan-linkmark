@@ -1,9 +1,9 @@
-import type { CacheEntry, LinkScope, ResolvedIcon } from "./cache-authority";
+import type { CacheEntry, CacheMutationReceipt, LinkScope, ResolvedIcon } from "./cache-authority";
 import { InvalidShareDomainError, isEligibleShareTarget } from "./parent-domain";
 
 export type PinUrlDependencies = {
   resolveUrl: (url: string) => Promise<ResolvedIcon | null>;
-  putPinned: (scope: LinkScope, entry: CacheEntry, contentType: string, bytes: ArrayBuffer, replaceKey?: string) => Promise<CacheEntry>;
+  putPinned: (scope: LinkScope, entry: CacheEntry, contentType: string, bytes: ArrayBuffer, replaceKey?: string) => Promise<CacheMutationReceipt>;
 };
 
 /**
@@ -17,7 +17,7 @@ export async function pinCustomUrl(
   iconUrl: string,
   includeSubdomains: boolean,
   replaceKey?: string,
-): Promise<CacheEntry> {
+): Promise<CacheMutationReceipt> {
   if (includeSubdomains && !isEligibleShareTarget(scope.domain)) {
     throw new InvalidShareDomainError();
   }

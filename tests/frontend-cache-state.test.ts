@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { shareDomainFor } from "../src/parent-domain";
 import {
   applyCacheChangeEvent,
+  cacheBeforeChange,
   cachedIconForScope,
   FAILURE_COOLDOWN,
   isCacheEntryFresh,
@@ -190,8 +191,8 @@ describe("applyCacheChangeEvent", () => {
     "docs.qq.com::doc": entry({ url: "route-icon.png", domain: "docs.qq.com" }),
   });
 
-  it("applies upserts and removed keys to an isolated copy", () => {
-    const cache = base();
+  it("applies upserts and removed keys in place while preserving sparse prior values", () => {
+    const cache: Record<string, CacheEntry> = base();
     const upserted = entry({ url: "new-icon.png" });
     const application = applyCacheChangeEvent(cache, {
       epoch,
@@ -202,12 +203,21 @@ describe("applyCacheChangeEvent", () => {
 
     expect(application).toMatchObject({ status: "applied", revision: 7 });
     if (application.status === "applied") {
-      expect(application.cache).toEqual({
-        "example.com": cache["example.com"],
+      expect(application.cache).toBe(cache);
+      expect(cache).toEqual({
+        "example.com": expect.any(Object),
         "new.example.com": upserted,
       });
-      expect(application.cache["new.example.com"]).not.toBe(upserted);
-      expect(cache).toEqual(base());
+      expect(cache["new.example.com"]).not.toBe(upserted);
+      expect(application.changedKeys).toEqual(["new.example.com", "docs.qq.com::doc"]);
+      expect(application.entryCountDelta).toBe(0);
+      expect(application.previous).toEqual({
+        "new.example.com": undefined,
+        "docs.qq.com::doc": expect.objectContaining({ url: "route-icon.png" }),
+      });
+      const before = cacheBeforeChange(cache, application.previous);
+      expect(before["new.example.com"]).toBeUndefined();
+      expect(before["docs.qq.com::doc"]).toMatchObject({ url: "route-icon.png" });
     }
   });
 
@@ -266,7 +276,7 @@ describe("applyCacheChangeEvent", () => {
     }
   });
 
-  it("keeps existing entries when an upserted entry is malformed", () => {
+  it("rejects a malformed upsert without partially mutating the cache", () => {
     const cache = base();
     const application = applyCacheChangeEvent(cache, {
       epoch,
@@ -274,11 +284,8 @@ describe("applyCacheChangeEvent", () => {
       upserts: { "example.com": { fetchedAt: 1 }, "new.example.com": entry({ url: "ok.png" }) },
       removed: [],
     }, 7);
-    expect(application.status).toBe("applied");
-    if (application.status === "applied") {
-      expect(application.cache["example.com"]).toBe(cache["example.com"]);
-      expect(application.cache["new.example.com"]).toMatchObject({ url: "ok.png" });
-    }
+    expect(application).toEqual({ status: "ignored" });
+    expect(cache).toEqual(base());
   });
 
   it("advances the tracked revision even for an empty event", () => {

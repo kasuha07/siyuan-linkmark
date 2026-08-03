@@ -57,6 +57,9 @@ class LinkmarkKernel {
         resolverVersion: RESOLVER_VERSION,
         privateIconUrl: (iconId) => `/plugin/private/${siyuan.plugin.name}/icon/${encodeURIComponent(iconId)}`,
         onCacheChanged: async (event) => siyuan.rpc.broadcast("cache.changed", event),
+        onCacheChangedError: async (error) => {
+          await siyuan.logger.error("Linkmark cache change broadcast failed", errorText(error)).catch(() => undefined);
+        },
         onResolutionFailure: async (scope, category) => siyuan.rpc.broadcast("cache.resolution-failed", { key: scope.key, category }),
       });
       await this.authority.initialize();
@@ -65,15 +68,15 @@ class LinkmarkKernel {
         if (!this.authority) return { status: "unavailable" as const };
         return this.requireAuthority().getOrQueue(normalizeScope(scope), force, automatic);
       }, "Returns a cached icon, a queue acknowledgement, or an explicit unavailable result.");
-      await siyuan.rpc.bind("cache.remove", async (key: string) => this.requireAuthority().remove(key), "Removes one cache entry workspace-wide.");
-      await siyuan.rpc.bind("cache.clear", async () => this.requireAuthority().clear(), "Clears non-pinned cache entries workspace-wide.");
-      await siyuan.rpc.bind("cache.clear-generated", async () => this.requireAuthority().clearGenerated(), "Clears generated monograms after policy changes.");
+      await siyuan.rpc.bind("cache.remove", async (key: string) => this.requireAuthority().remove(key), "Removes one cache entry workspace-wide and returns its mutation receipt.");
+      await siyuan.rpc.bind("cache.clear", async () => this.requireAuthority().clear(), "Clears non-pinned cache entries workspace-wide and returns its mutation receipt.");
+      await siyuan.rpc.bind("cache.clear-generated", async () => this.requireAuthority().clearGenerated(), "Clears generated monograms after policy changes and returns its mutation receipt.");
       await siyuan.rpc.bind("cache.policy.get", async () => this.policy, "Returns workspace cache policy.");
       await siyuan.rpc.bind("cache.policy.set", async (policy: Partial<CachePolicyFields>) => this.setPolicy(policy), "Updates workspace cache policy.");
       await siyuan.rpc.bind("cache.pin", async (scope: LinkScope, entry: CacheEntry, contentType: string, base64: string, replaceKey?: string) => {
         const bytes = Buffer.from(base64, "base64");
         return this.requireAuthority().putPinned(normalizeScope(scope), entry, contentType, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength), replaceKey);
-      }, "Pins a user-selected icon workspace-wide.");
+      }, "Pins a user-selected icon workspace-wide and returns its mutation receipt.");
       await siyuan.rpc.bind("cache.candidates", async (scope: LinkScope, discoverPage = false) => {
         const candidates = await this.requireResolver().candidates(normalizeScope(scope), discoverPage || this.policy.allowFullPageDiscovery);
         return candidates.map((candidate) => ({ ...candidate, base64: Buffer.from(candidate.bytes).toString("base64") }));
@@ -85,7 +88,7 @@ class LinkmarkKernel {
           resolveUrl: (url) => resolver.resolveUrl(url),
           putPinned: (pinScope, entry, contentType, bytes, pinReplaceKey) => authority.putPinned(pinScope, entry, contentType, bytes, pinReplaceKey),
         }, normalizeScope(scope), iconUrl, includeSubdomains, replaceKey);
-      }, "Downloads and pins a custom icon URL workspace-wide.");
+      }, "Downloads and pins a custom icon URL workspace-wide and returns its mutation receipt.");
     } catch (error) {
       await siyuan.logger.error("Linkmark Kernel initialization failed", errorText(error)).catch(() => undefined);
     }

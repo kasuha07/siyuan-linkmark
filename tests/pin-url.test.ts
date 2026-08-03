@@ -13,7 +13,10 @@ function resolvedIcon(): ResolvedIcon {
 
 function makeDeps(overrides: Partial<PinUrlDependencies> = {}) {
   const resolveUrl = vi.fn(async () => null);
-  const putPinned = vi.fn<PinUrlDependencies["putPinned"]>(async (_scope: LinkScope, entry: CacheEntry) => entry);
+  const putPinned = vi.fn<PinUrlDependencies["putPinned"]>(async (pinScope: LinkScope, entry: CacheEntry) => ({
+    status: "committed",
+    change: { epoch: "test", revision: 1, upserts: { [pinScope.key]: entry }, removed: [] },
+  }));
   return {
     deps: { resolveUrl, putPinned, ...overrides } as PinUrlDependencies,
     resolveUrl,
@@ -71,6 +74,9 @@ describe("cache.pin-url error order", () => {
     expect(putPinned.mock.calls[0][2]).toBe("image/png");
     expect(new Uint8Array(putPinned.mock.calls[0][3])).toEqual(new Uint8Array([1, 2, 3]));
     expect(putPinned.mock.calls[0][4]).toBe("replaced.example.dev");
-    expect(pinned).toEqual(putPinned.mock.calls[0][1]);
+    expect(pinned).toEqual({
+      status: "committed",
+      change: { epoch: "test", revision: 1, upserts: { "example.dev": putPinned.mock.calls[0][1] }, removed: [] },
+    });
   });
 });

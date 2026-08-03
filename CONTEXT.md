@@ -152,6 +152,10 @@ _Avoid_: live cache object, mutable cache reference
 A cache-authority broadcast that reports which Cache entries changed and which Link scopes were removed since the previous event, tagged with a Cache revision and the Cache epoch.
 _Avoid_: full cache broadcast, cache snapshot push
 
+**Cache mutation receipt**:
+The authoritative result of an explicit Workspace cache operation, identifying either its committed Cache change event or that no state changed at the reported Cache revision and Cache epoch. The initiating Frontend client applies a committed receipt through the same idempotent path as a broadcast.
+_Avoid_: refreshed snapshot, local optimistic result
+
 **Cache revision**:
 The strictly increasing per-process number attached to each Cache change event and Cache snapshot; a gap between the last revision a Frontend client saw and the next event's revision means its local cache is out of date, and the number is discarded when the Cache epoch changes.
 _Avoid_: version number, cache generation
@@ -163,6 +167,10 @@ _Avoid_: version number, cache generation
 **Cache persistence batch**:
 One durable cache-index write that commits all compatible cache-entry changes collected during a short scheduling window. Each committed resolution publishes state only after that write succeeds; its earlier Queue acknowledgement does not represent a commit.
 _Avoid_: deferred best-effort save, per-entry index write
+
+**Incremental cache hot path**:
+The ordinary Cache entry mutation path in which work scales with the changed entries, except for one whole-index persistence write per Cache persistence batch. Cache snapshot construction is reserved for startup and recovery from a Cache revision or Cache epoch discontinuity.
+_Avoid_: fully incremental persistence, snapshot-per-change
 
 **Legacy cache**:
 The old `auto-favicon` `favicon-cache.json` index and public icon files that Linkmark deliberately neither imports nor deletes.

@@ -45,13 +45,20 @@ export type CacheSnapshot = {
 };
 
 export type CacheEventApplication =
-  | { status: "applied"; cache: Record<string, CacheEntry>; revision: number }
+  | {
+      status: "applied";
+      cache: Record<string, CacheEntry>;
+      revision: number;
+      changedKeys: string[];
+      previous: Record<string, CacheEntry | undefined>;
+      entryCountDelta: number;
+    }
   | { status: "refetch"; revision: number }
   | { status: "epoch-changed"; revision: number }
   | { status: "ignored" };
 
 /**
- * Applies a Cache change event to a local cache copy against the baseline
+ * Applies a Cache change event to a local cache against the baseline
  * last seen: the last applied revision and the epoch the snapshot adopted.
  * An event from another epoch requests a snapshot refetch and rebaseline,
  * since the local revision cannot be compared across processes. The first
@@ -70,6 +77,8 @@ export function applyCacheChangeEvent(
   const revision = event.revision;
   if (typeof revision !== "number" || !Number.isFinite(revision)) return { status: "ignored" };
   if (!isRecord(event.upserts) || !Array.isArray(event.removed)) return { status: "ignored" };
+  const eventUpserts = event.upserts;
+  const eventRemoved = event.removed;
   const epoch = event.epoch;
   if (typeof epoch !== "string") return { status: "ignored" };
   if (expectedEpoch !== undefined && epoch !== expectedEpoch) return { status: "epoch-changed", revision };
@@ -77,14 +86,40 @@ export function applyCacheChangeEvent(
     if (revision <= lastRevision) return { status: "ignored" };
     if (revision !== lastRevision + 1) return { status: "refetch", revision };
   }
-  const next: Record<string, CacheEntry> = { ...cache };
-  for (const [key, entry] of Object.entries(event.upserts)) {
-    if (isValidCacheEntry(entry)) next[key] = { ...entry };
+  const upserts = new Map<string, CacheEntry>();
+  for (const [key, entry] of Object.entries(eventUpserts)) {
+    if (!isValidCacheEntry(entry)) return { status: "ignored" };
+    upserts.set(key, entry);
   }
-  for (const key of event.removed) {
-    if (typeof key === "string") delete next[key];
+  if (!eventRemoved.every((key): key is string => typeof key === "string")) return { status: "ignored" };
+  const removedKeys = new Set(eventRemoved);
+  const changedKeys = [...new Set([...upserts.keys(), ...removedKeys])];
+  if (changedKeys.some((key) => upserts.has(key) && removedKeys.has(key))) {
+    return { status: "ignored" };
   }
-  return { status: "applied", cache: next, revision };
+  const previous: Record<string, CacheEntry | undefined> = Object.create(null);
+  let entryCountDelta = 0;
+  for (const key of changedKeys) {
+    const before = cache[key];
+    Object.defineProperty(previous, key, { value: before, enumerable: true, configurable: true, writable: true });
+    const afterPresent = !removedKeys.has(key) && upserts.has(key);
+    if (!before && afterPresent) entryCountDelta += 1;
+    if (before && !afterPresent) entryCountDelta -= 1;
+  }
+  for (const key of removedKeys) delete cache[key];
+  for (const [key, entry] of upserts) {
+    Object.defineProperty(cache, key, { value: { ...entry }, enumerable: true, configurable: true, writable: true });
+  }
+  return { status: "applied", cache, revision, changedKeys, previous, entryCountDelta };
+}
+
+/** Creates a sparse before-view for binding comparisons without copying the cache. */
+export function cacheBeforeChange(cache: Record<string, CacheEntry>, previous: Record<string, CacheEntry | undefined>) {
+  const before = Object.create(cache) as Record<string, CacheEntry>;
+  for (const [key, entry] of Object.entries(previous)) {
+    Object.defineProperty(before, key, { value: entry, enumerable: true, configurable: true, writable: true });
+  }
+  return before;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

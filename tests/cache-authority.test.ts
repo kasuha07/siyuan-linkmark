@@ -122,7 +122,7 @@ const resolved = (source = "test resolver"): { bytes: ArrayBuffer; contentType: 
   source,
 });
 
-const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve, 40));
 
 function snapshotCache(authority: KernelCacheAuthority): Record<string, CacheEntry> {
   return authority.snapshot().cache;
@@ -164,7 +164,8 @@ describe("KernelCacheAuthority", () => {
       cachePolicy: { cacheDays: 30 },
     });
     await authority.initialize();
-    const pinned = await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([9]).buffer);
+    await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([9]).buffer);
+    const pinned = snapshotCache(authority)[scope().key];
 
     const result = await authority.getOrQueue(scope());
 
@@ -570,6 +571,38 @@ describe("KernelCacheAuthority", () => {
     });
   });
 
+  it("uses a fixed 32ms resolved batch window that later arrivals do not reset", async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = new CountingCacheIndexStorage();
+      const received: CacheChangeEvent[] = [];
+      const authority = new KernelCacheAuthority(storage, {
+        resolve: async (requested) => resolved(requested.key),
+      }, () => 100, { onCacheChanged: (event) => { received.push(event); } });
+      await authority.initialize();
+
+      await authority.getOrQueue(scope("first.example.com"));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(20);
+      await authority.getOrQueue(scope("second.example.com"));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(11);
+      expect(storage.cacheIndexWrites).toBe(0);
+      expect(received).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(storage.cacheIndexWrites).toBe(1);
+      expect(received).toHaveLength(1);
+      expect(received[0].upserts).toEqual({
+        "first.example.com": expect.any(Object),
+        "second.example.com": expect.any(Object),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("returns the cache with its revision and epoch from the snapshot", async () => {
     const authority = new KernelCacheAuthority(new MemoryStorage(), {
       resolve: async () => resolved(),
@@ -701,7 +734,8 @@ describe("KernelCacheAuthority", () => {
     const resolve = vi.fn(async () => null);
     const authority = new KernelCacheAuthority(storage, { resolve }, () => 100);
     await authority.initialize();
-    const first = await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
+    await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
+    const first = snapshotCache(authority)[scope().key];
     storage.failNextPut = true;
 
     await expect(authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([2]).buffer)).rejects.toThrow("simulated storage failure");
@@ -718,12 +752,13 @@ describe("KernelCacheAuthority", () => {
     const resolve = vi.fn(async () => null);
     const authority = new KernelCacheAuthority(storage, { resolve }, () => 100);
     await authority.initialize();
-    const original = await authority.putPinned(
+    await authority.putPinned(
       scope("first.example.com"),
       entry({ domain: "first.example.com", pinned: true }),
       "image/png",
       new Uint8Array([1]).buffer,
     );
+    const original = snapshotCache(authority)["first.example.com"];
     await authority.putPinned(
       scope("second.example.com"),
       entry({ domain: "second.example.com", pinned: true }),
@@ -881,6 +916,59 @@ describe("KernelCacheAuthority", () => {
     await authority.remove("third.example.com");
 
     expect(received.map((event) => event.revision)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("returns the committed change as an isolated mutation receipt", async () => {
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+
+    const receipt = await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
+
+    expect(receipt).toEqual({ status: "committed", change: received[0] });
+    if (receipt.status === "committed") {
+      expect(receipt.change).not.toBe(received[0]);
+      expect(receipt.change.upserts[scope().key]).not.toBe(received[0].upserts[scope().key]);
+      received[0].upserts[scope().key].source = "subscriber mutation";
+      expect(receipt.change.upserts[scope().key].source).toBe("test resolver");
+    }
+  });
+
+  it("returns unchanged receipts without writing, broadcasting, or advancing the revision", async () => {
+    const storage = new CountingCacheIndexStorage();
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+
+    const removed = await authority.remove("missing.example.com");
+    const cleared = await authority.clear();
+    const generated = await authority.clearGenerated();
+
+    expect(removed).toMatchObject({ status: "unchanged", revision: 0, epoch: expect.any(String) });
+    expect(cleared).toEqual(removed);
+    expect(generated).toEqual(removed);
+    expect(storage.cacheIndexWrites).toBe(0);
+    expect(received).toEqual([]);
+    expect(authority.snapshot().revision).toBe(0);
+  });
+
+  it("keeps a mutation committed when its broadcast fails", async () => {
+    const errors: unknown[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100, {
+      onCacheChanged: async () => { throw new Error("broadcast failed"); },
+      onCacheChangedError: (error) => { errors.push(error); },
+    });
+    await authority.initialize();
+
+    const receipt = await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
+
+    expect(receipt).toMatchObject({ status: "committed", change: { revision: 1 } });
+    expect(errors).toEqual([expect.objectContaining({ message: "broadcast failed" })]);
+    expect(snapshotCache(authority)[scope().key]).toMatchObject({ pinned: true });
   });
 
   it("reports removed keys for remove, clear, clear-generated, and pin-replace operations", async () => {
@@ -1055,13 +1143,17 @@ describe("shared-pin eligibility and legacy migration", () => {
     const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100);
     await authority.initialize();
 
-    const pinned = await authority.putPinned(
+    const receipt = await authority.putPinned(
       hostScope("example.dev"),
       hostEntry("example.dev", { includeSubdomains: true }),
       "image/png",
       new Uint8Array([1]).buffer,
     );
-    expect(pinned).toMatchObject({ domain: "example.dev", pinned: true, includeSubdomains: true });
+    expect(receipt).toMatchObject({
+      status: "committed",
+      change: { upserts: { "example.dev": { domain: "example.dev", pinned: true, includeSubdomains: true } } },
+    });
+    const pinned = snapshotCache(authority)["example.dev"];
 
     const result = await authority.getOrQueue(hostScope("example.dev"));
     expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: pinned.iconId, includeSubdomains: true }) });
@@ -1073,9 +1165,9 @@ describe("shared-pin eligibility and legacy migration", () => {
     await authority.initialize();
 
     await expect(authority.putPinned(hostScope("foo.github.io"), hostEntry("foo.github.io"), "image/png", new Uint8Array([1]).buffer))
-      .resolves.toMatchObject({ domain: "foo.github.io", pinned: true });
+      .resolves.toMatchObject({ status: "committed", change: { upserts: { "foo.github.io": { domain: "foo.github.io", pinned: true } } } });
     await expect(authority.putPinned(hostScope("docs.qq.com"), hostEntry("docs.qq.com"), "image/png", new Uint8Array([2]).buffer))
-      .resolves.toMatchObject({ domain: "docs.qq.com", pinned: true });
+      .resolves.toMatchObject({ status: "committed", change: { upserts: { "docs.qq.com": { domain: "docs.qq.com", pinned: true } } } });
   });
 
   it("retains valid shared pins and exact tenant pins during initialization", async () => {

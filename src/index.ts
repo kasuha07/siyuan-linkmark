@@ -1,6 +1,6 @@
 import { confirm, Dialog, Menu, Plugin, Setting, showMessage } from "siyuan";
 import "./style.css";
-import type { CacheRequestResult } from "./cache-authority";
+import type { CacheMutationReceipt, CacheRequestResult } from "./cache-authority";
 import { isDecodableImage } from "./image-decode";
 import {
   RESOLVER_VERSION,
@@ -36,6 +36,7 @@ import {
 } from "./frontend-render-work";
 import {
   applyCacheChangeEvent,
+  cacheBeforeChange,
   cachedIconForScope,
   isCacheEntryFresh,
   planScanDecision,
@@ -81,6 +82,7 @@ const LOCAL_DISCOVERY_SELECTORS = {
 export default class LinkmarkPlugin extends Plugin {
   private settings: Settings = { ...defaultSettings };
   private cache: Record<string, CacheEntry> = {};
+  private cacheEntryCount = 0;
   private pendingDomains = new Set<string>();
   private pendingFetches = new Map<string, {
     promise: Promise<FetchOutcome>;
@@ -153,6 +155,7 @@ export default class LinkmarkPlugin extends Plugin {
       this.applyCachePolicy(policy);
     } catch (error) {
       this.cache = {};
+      this.cacheEntryCount = 0;
       console.warn("[siyuan-linkmark] Kernel cache authority is unavailable", error);
     }
   }
@@ -165,6 +168,7 @@ export default class LinkmarkPlugin extends Plugin {
    */
   private adoptSnapshot(snapshot: CacheSnapshot | null | undefined) {
     this.cache = snapshot && typeof snapshot.cache === "object" ? snapshot.cache : {};
+    this.cacheEntryCount = Object.keys(this.cache).length;
     if (typeof snapshot?.revision === "number") this.lastCacheRevision = snapshot.revision;
     if (typeof snapshot?.epoch === "string") this.lastCacheEpoch = snapshot.epoch;
   }
@@ -187,24 +191,61 @@ export default class LinkmarkPlugin extends Plugin {
     }
   }
 
+  private applyIncomingCacheChange(payload: unknown) {
+    const application = applyCacheChangeEvent(this.cache, payload, this.lastCacheRevision, this.lastCacheEpoch);
+    if (application.status !== "applied") return application;
+    this.lastCacheRevision = application.revision;
+    this.cacheEntryCount += application.entryCountDelta;
+    for (const key of this.manualRefreshKeys.keys()) {
+      if (this.cache[key]) this.manualRefreshKeys.delete(key);
+    }
+    this.synchronizeCacheBindings(cacheBeforeChange(this.cache, application.previous), application.changedKeys);
+    this.updateCacheCount();
+    return application;
+  }
+
+  private async applyCacheMutationReceipt(receipt: CacheMutationReceipt, unchangedRemoved: string[] = []) {
+    if (receipt.status === "committed") {
+      const application = this.applyIncomingCacheChange(receipt.change);
+      if (application.status === "refetch" || application.status === "epoch-changed") {
+        await this.refetchCacheSnapshot();
+      }
+      return;
+    }
+    if (receipt.epoch !== this.lastCacheEpoch || receipt.revision !== this.lastCacheRevision) {
+      await this.refetchCacheSnapshot();
+      return;
+    }
+    this.removeLocalCacheKeys(unchangedRemoved);
+  }
+
+  private removeLocalCacheKeys(keys: string[]) {
+    const previous: Record<string, CacheEntry | undefined> = {};
+    const changed: string[] = [];
+    for (const key of keys) {
+      const entry = this.cache[key];
+      if (!entry) continue;
+      previous[key] = entry;
+      delete this.cache[key];
+      this.cacheEntryCount -= 1;
+      changed.push(key);
+    }
+    if (changed.length > 0) {
+      this.synchronizeCacheBindings(cacheBeforeChange(this.cache, previous), changed);
+      this.updateCacheCount();
+    }
+  }
+
   private async subscribeToKernelChanges() {
     const bind = this.kernel?.rpc.bind;
     if (!bind) return;
     await bind("cache.changed", (params) => {
       const payload = params?.params && typeof params.params === "object" ? params.params : params;
-      const previousCache = this.cache;
-      const application = applyCacheChangeEvent(this.cache, payload, this.lastCacheRevision, this.lastCacheEpoch);
+      const application = this.applyIncomingCacheChange(payload);
       if (application.status === "ignored") return;
       if (application.status === "refetch" || application.status === "epoch-changed") {
         void this.refetchCacheSnapshot();
-        return;
       }
-      this.lastCacheRevision = application.revision;
-      this.cache = application.cache;
-      for (const key of this.manualRefreshKeys.keys()) {
-        if (this.cache[key]) this.manualRefreshKeys.delete(key);
-      }
-      this.synchronizeCacheBindings(previousCache, changedCacheKeys(payload));
     });
     await bind("cache.resolution-failed", (params) => {
       const key = params?.key ?? params?.params?.key;
@@ -618,7 +659,7 @@ export default class LinkmarkPlugin extends Plugin {
     menu.addItem({
       type: "readonly",
       label: `${this.t("toolbarStatus")
-        .replace("{count}", String(Object.keys(this.cache).length))}${
+        .replace("{count}", String(this.cacheEntryCount))}${
         this.settings.pauseAutomaticFetch ? ` · ${this.t("automaticFetchPausedStatus")}` : ""
       }${
         this.settings.allowFullPageDiscovery ? ` · ${this.t("fullPageDiscoveryEnabledStatus")}` : ""
@@ -667,7 +708,7 @@ export default class LinkmarkPlugin extends Plugin {
 
   private updateCacheCount() {
     if (this.cacheCountElement) {
-      this.cacheCountElement.textContent = this.t("cacheCount").replace("{count}", String(Object.keys(this.cache).length));
+      this.cacheCountElement.textContent = this.t("cacheCount").replace("{count}", String(this.cacheEntryCount));
     }
   }
 
@@ -768,7 +809,7 @@ export default class LinkmarkPlugin extends Plugin {
         return [key, { scope, targetUrl }] as const;
       }));
     if (targets.size === 0) {
-      showMessage(this.t(Object.keys(this.cache).length === 0 ? "cacheEmpty" : "noRefreshableDomains"));
+      showMessage(this.t(this.cacheEntryCount === 0 ? "cacheEmpty" : "noRefreshableDomains"));
       return;
     }
     showMessage(this.t("refreshStarted").replace("{count}", String(targets.size)));
@@ -812,8 +853,8 @@ export default class LinkmarkPlugin extends Plugin {
   }
 
   private async removeCachedDomain(key: string) {
-    await this.callKernel("cache.remove", key);
-    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
+    const receipt = await this.callKernel<CacheMutationReceipt>("cache.remove", key);
+    await this.applyCacheMutationReceipt(receipt, [key]);
     this.failedDomains.delete(key);
     this.manualRefreshKeys.delete(key);
     this.updateCacheCount();
@@ -835,7 +876,7 @@ export default class LinkmarkPlugin extends Plugin {
       const summary = document.createElement("div");
       summary.className = "siyuan-linkmark-cache-summary";
       const count = document.createElement("strong");
-      count.textContent = this.t("cacheCount").replace("{count}", String(Object.keys(this.cache).length));
+      count.textContent = this.t("cacheCount").replace("{count}", String(this.cacheEntryCount));
       const path = document.createElement("code");
       path.textContent = "plugin private icon storage";
       summary.append(count, path);
@@ -869,7 +910,7 @@ export default class LinkmarkPlugin extends Plugin {
         if (entries.length === 0) {
           const empty = document.createElement("div");
           empty.className = "b3-label__text siyuan-linkmark-cache-empty";
-          empty.textContent = this.t(Object.keys(this.cache).length === 0 ? "cacheEmpty" : "cacheNoMatches");
+          empty.textContent = this.t(this.cacheEntryCount === 0 ? "cacheEmpty" : "cacheNoMatches");
           list.append(empty);
           return;
         }
@@ -974,7 +1015,7 @@ export default class LinkmarkPlugin extends Plugin {
     const pending = this.pendingFetches.get(selectedScope.key);
     if (pending) await pending.promise;
     try {
-      const selected = await this.callKernel<CacheEntry>("cache.pin", {
+      const receipt = await this.callKernel<CacheMutationReceipt>("cache.pin", {
         key: scope.key,
         domain: scope.domain,
         targetUrl: this.sanitizeTargetUrl(targetUrl, scope.domain),
@@ -992,8 +1033,7 @@ export default class LinkmarkPlugin extends Plugin {
         pinned: true,
         includeSubdomains,
       }, blob.type || "image/png", await blobToBase64(blob), selectedScope.key);
-      this.cache[scope.key] = selected;
-      if (selectedScope.key !== scope.key) delete this.cache[selectedScope.key];
+      await this.applyCacheMutationReceipt(receipt);
       this.failedDomains.delete(scope.key);
       this.failedDomains.delete(selectedScope.key);
       this.manualRefreshKeys.delete(scope.key);
@@ -1012,8 +1052,8 @@ export default class LinkmarkPlugin extends Plugin {
   private async restoreAutomaticIcon(key: string) {
     const entry = this.cache[key];
     if (!entry?.pinned) return;
-    await this.callKernel("cache.remove", key);
-    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
+    const receipt = await this.callKernel<CacheMutationReceipt>("cache.remove", key);
+    await this.applyCacheMutationReceipt(receipt, [key]);
     this.failedDomains.delete(key);
     this.manualRefreshKeys.delete(key);
     this.updateCacheCount();
@@ -1128,13 +1168,12 @@ export default class LinkmarkPlugin extends Plugin {
       status.textContent = this.t("loadingCustomUrl");
       try {
         const targetScope = targetScopeForSelection();
-        const selected = await this.callKernel<CacheEntry>("cache.pin-url", {
+        const receipt = await this.callKernel<CacheMutationReceipt>("cache.pin-url", {
           ...targetScope,
           targetUrl: this.sanitizeTargetUrl(targetUrl, targetScope.domain),
         }, value, scopeSelect.value === "subdomains", selectedScope.key);
         if (!root.isConnected) return;
-        this.cache[targetScope.key] = selected;
-        if (targetScope.key !== selectedScope.key) delete this.cache[selectedScope.key];
+        await this.applyCacheMutationReceipt(receipt);
         this.scheduleScan();
         dialog.destroy();
         afterChange();
@@ -1201,8 +1240,8 @@ export default class LinkmarkPlugin extends Plugin {
   }
 
   private async invalidateGeneratedMonograms() {
-    await this.callKernel("cache.clear-generated");
-    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
+    const receipt = await this.callKernel<CacheMutationReceipt>("cache.clear-generated");
+    await this.applyCacheMutationReceipt(receipt);
     this.failedDomains.clear();
     this.manualRefreshKeys.clear();
     this.scheduleScan();
@@ -1211,8 +1250,8 @@ export default class LinkmarkPlugin extends Plugin {
 
   private async clearCache() {
     this.cacheGeneration += 1;
-    await this.callKernel("cache.clear");
-    this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
+    const receipt = await this.callKernel<CacheMutationReceipt>("cache.clear");
+    await this.applyCacheMutationReceipt(receipt);
     this.failedDomains.clear();
     this.manualRefreshKeys.clear();
     this.scheduleScan();
@@ -1408,13 +1447,14 @@ export default class LinkmarkPlugin extends Plugin {
       if (invalidated()) return "failure";
       if (result.status === "ready") {
         const entry = result.entry;
-        const previousCache = this.cache;
-        this.cache = { ...this.cache, [scope.key]: entry };
+        const previous = this.cache[scope.key];
+        this.cache[scope.key] = { ...entry };
+        if (!previous) this.cacheEntryCount += 1;
         this.updateCacheCount();
         this.failedDomains.delete(scope.key);
         this.failureReasons.delete(scope.key);
         this.manualRefreshKeys.delete(scope.key);
-        this.synchronizeCacheBindings(previousCache, [scope.key]);
+        this.synchronizeCacheBindings(cacheBeforeChange(this.cache, { [scope.key]: previous }), [scope.key]);
         return fetchOutcomeFor(entry);
       }
       if (result.status === "queued") {
@@ -1451,8 +1491,8 @@ export default class LinkmarkPlugin extends Plugin {
     this.pendingDomains.add(key);
     try {
       if (this.cache[key] !== expected) return;
-      await this.callKernel("cache.remove", key);
-      this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
+      const receipt = await this.callKernel<CacheMutationReceipt>("cache.remove", key);
+      await this.applyCacheMutationReceipt(receipt, [key]);
       this.updateCacheCount();
     } finally {
       this.pendingDomains.delete(key);
@@ -1527,18 +1567,6 @@ export default class LinkmarkPlugin extends Plugin {
     this.bindingPublisher.publish(markers, full);
   }
 
-}
-
-function changedCacheKeys(payload: unknown) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
-  const event = payload as { upserts?: unknown; removed?: unknown };
-  const upserts = event.upserts && typeof event.upserts === "object" && !Array.isArray(event.upserts)
-    ? Object.keys(event.upserts)
-    : [];
-  const removed = Array.isArray(event.removed)
-    ? event.removed.filter((key): key is string => typeof key === "string")
-    : [];
-  return [...new Set([...upserts, ...removed])];
 }
 
 function sameMapKeys(left: ReadonlyMap<string, unknown>, right: ReadonlyMap<string, unknown>) {

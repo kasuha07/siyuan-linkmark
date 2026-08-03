@@ -90,6 +90,10 @@ export type CacheChangeEvent = {
   removed: string[];
 };
 
+export type CacheMutationReceipt =
+  | { status: "committed"; change: CacheChangeEvent }
+  | { status: "unchanged"; epoch: string; revision: number };
+
 /**
  * An isolated view of the authoritative Cache together with the revision
  * and epoch current at the moment the view was taken. A Frontend client
@@ -107,6 +111,7 @@ export type CacheAuthorityOptions = {
   resolverVersion?: number;
   privateIconUrl?: (iconId: string) => string;
   onCacheChanged?: (event: CacheChangeEvent) => Promise<void> | void;
+  onCacheChangedError?: (error: unknown) => Promise<void> | void;
   onResolutionFailure?: (scope: LinkScope, category: ResolutionFailureCategory) => Promise<void> | void;
 };
 
@@ -140,6 +145,7 @@ export class KernelCacheAuthority {
     reject: (error: unknown) => void;
   }> = [];
   private resolvedCommitBatchScheduled = false;
+  private resolvedCommitBatchTimer?: ReturnType<typeof setTimeout>;
   private initializing?: Promise<void>;
   private policy: CachePolicy;
   private iconSequence = 0;
@@ -271,10 +277,10 @@ export class KernelCacheAuthority {
         pathPrefix: scope.pathPrefix, targetUrl: scope.targetUrl, fetchedAt: this.now(), pinned: true,
         source: entry.source ?? "custom upload", resolverVersion: entry.resolverVersion, contentType,
       };
-      const nextCache = { ...this.cache, [scope.key]: nextEntry };
-      if (replaceKey && replaceKey !== scope.key) delete nextCache[replaceKey];
+      const upserts = { [scope.key]: nextEntry };
+      const removed = replaceKey && replaceKey !== scope.key ? [replaceKey] : [];
       try {
-        await this.persist(nextCache);
+        await this.persistDelta(upserts, removed);
       } catch (error) {
         completeInvalidations();
         await this.storage.remove(this.iconPath(iconId));
@@ -286,13 +292,12 @@ export class KernelCacheAuthority {
         await this.storage.remove(this.iconPath(iconId));
         throw new Error("Pinned icon operation was superseded by a newer cache change");
       }
-      const previousCache = this.cache;
-      this.cache = nextCache;
+      this.applyDelta(upserts, removed);
       completeInvalidations();
-      await this.notify(previousCache, nextCache);
+      const receipt = await this.publishChange(upserts, removed);
       await this.removePayload(previous, iconId);
       await this.removePayload(replaced, iconId);
-      return copyEntry(nextEntry);
+      return receipt;
     });
   }
 
@@ -303,21 +308,19 @@ export class KernelCacheAuthority {
       const previous = this.cache[key];
       if (!previous) {
         this.completeInvalidation(key, generation);
-        return;
+        return this.unchangedReceipt();
       }
-      const previousCache = this.cache;
-      const nextCache = { ...this.cache };
-      delete nextCache[key];
       try {
-        await this.persist(nextCache);
+        await this.persistDelta({}, [key]);
       } catch (error) {
         this.completeInvalidation(key, generation);
         throw error;
       }
-      this.cache = nextCache;
+      this.applyDelta({}, [key]);
       this.completeInvalidation(key, generation);
-      await this.notify(previousCache, nextCache);
+      const receipt = await this.publishChange({}, [key]);
       await this.removePayload(previous);
+      return receipt;
     });
   }
 
@@ -332,18 +335,22 @@ export class KernelCacheAuthority {
     }
     return this.enqueueCacheMutation(async () => {
       const removable = Object.entries(this.cache).filter(([, entry]) => !entry.pinned);
-      const previousCache = this.cache;
-      const nextCache = Object.fromEntries(Object.entries(this.cache).filter(([, entry]) => entry.pinned));
+      const removed = removable.map(([key]) => key);
+      if (removed.length === 0) {
+        for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
+        return this.unchangedReceipt();
+      }
       try {
-        await this.persist(nextCache);
+        await this.persistDelta({}, removed);
       } catch (error) {
         for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
         throw error;
       }
-      this.cache = nextCache;
+      this.applyDelta({}, removed);
       for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
-      await this.notify(previousCache, nextCache);
+      const receipt = await this.publishChange({}, removed);
       for (const [, entry] of removable) await this.removePayload(entry);
+      return receipt;
     });
   }
 
@@ -358,20 +365,20 @@ export class KernelCacheAuthority {
       const generated = Object.entries(this.cache).filter(([, entry]) => entry.source === "generated monogram");
       if (generated.length === 0) {
         for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
-        return;
+        return this.unchangedReceipt();
       }
-      const previousCache = this.cache;
-      const nextCache = Object.fromEntries(Object.entries(this.cache).filter(([, entry]) => entry.source !== "generated monogram"));
+      const removed = generated.map(([key]) => key);
       try {
-        await this.persist(nextCache);
+        await this.persistDelta({}, removed);
       } catch (error) {
         for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
         throw error;
       }
-      this.cache = nextCache;
+      this.applyDelta({}, removed);
       for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
-      await this.notify(previousCache, nextCache);
+      const receipt = await this.publishChange({}, removed);
       for (const [, entry] of generated) await this.removePayload(entry);
+      return receipt;
     });
   }
 
@@ -413,7 +420,10 @@ export class KernelCacheAuthority {
       this.resolvedCommitBatch.push({ commit: { scope, resolved, generation }, resolve, reject });
       if (this.resolvedCommitBatchScheduled) return;
       this.resolvedCommitBatchScheduled = true;
-      void Promise.resolve().then(() => this.flushResolvedCommitBatch());
+      this.resolvedCommitBatchTimer = setTimeout(() => {
+        this.resolvedCommitBatchTimer = undefined;
+        void this.flushResolvedCommitBatch();
+      }, 32);
     });
   }
 
@@ -427,7 +437,6 @@ export class KernelCacheAuthority {
 
   private async persistResolvedCommitBatch(batch: Array<{ commit: ResolvedCommit }>) {
     const entries: Array<CacheEntry | null> = Array(batch.length).fill(null);
-    const previousCache = this.cache;
     const prepared: Array<{
       index: number;
       generation: number;
@@ -475,33 +484,29 @@ export class KernelCacheAuthority {
     }
     if (current.length === 0) return entries;
 
-    const nextCache = { ...this.cache };
-    for (const pending of current) nextCache[pending.key] = pending.entry;
+    const upserts = Object.fromEntries(current.map(({ key, entry }) => [key, entry]));
     try {
-      await this.persist(nextCache);
+      await this.persistDelta(upserts, []);
     } catch (error) {
       await Promise.all(current.map(({ entry }) => this.storage.remove(this.iconPath(entry.iconId!))));
       throw error;
     }
     const committed = current.filter(({ key, generation }) => this.isCurrentGeneration(key, generation));
     if (committed.length !== current.length) {
-      const finalCache = { ...this.cache };
-      for (const pending of committed) finalCache[pending.key] = pending.entry;
-      await this.persist(finalCache);
+      const finalUpserts = Object.fromEntries(committed.map(({ key, entry }) => [key, entry]));
+      await this.persistDelta(finalUpserts, []);
       for (const pending of current) {
         if (!committed.includes(pending)) {
           await this.storage.remove(this.iconPath(pending.entry.iconId!));
         }
       }
-      this.cache = finalCache;
-    } else {
-      this.cache = nextCache;
     }
 
     if (committed.length > 0) {
       // A batch publishes one isolated event, so connected clients reconcile
       // once even when several scopes resolve together.
-      await this.notify(previousCache, this.cache);
+      this.applyDelta(Object.fromEntries(committed.map(({ key, entry }) => [key, entry])), []);
+      await this.publishChange(Object.fromEntries(committed.map(({ key, entry }) => [key, entry])), []);
       for (const pending of committed) {
         entries[pending.index] = copyEntry(pending.entry);
         await this.removePayload(pending.previous, pending.entry.iconId);
@@ -540,22 +545,53 @@ export class KernelCacheAuthority {
 
   private persist(cache = this.cache) {
     const snapshot = JSON.stringify(cache);
+    return this.persistSerialized(snapshot);
+  }
+
+  private persistDelta(upserts: Record<string, CacheEntry>, removed: string[]) {
+    const removedKeys = new Set(removed);
+    const serialized: string[] = [];
+    for (const [key, entry] of Object.entries(this.cache)) {
+      if (removedKeys.has(key)) continue;
+      const replacement = Object.prototype.hasOwnProperty.call(upserts, key) ? upserts[key] : entry;
+      serialized.push(`${JSON.stringify(key)}:${JSON.stringify(replacement)}`);
+    }
+    for (const [key, entry] of Object.entries(upserts)) {
+      if (!(key in this.cache)) serialized.push(`${JSON.stringify(key)}:${JSON.stringify(entry)}`);
+    }
+    return this.persistSerialized(`{${serialized.join(",")}}`);
+  }
+
+  private persistSerialized(snapshot: string) {
     const write = this.persistTail.catch(() => undefined).then(() => this.storage.put(CACHE_INDEX_FILE, snapshot));
     this.persistTail = write;
     return write;
   }
 
-  private async notify(previous: Record<string, CacheEntry>, next: Record<string, CacheEntry>) {
+  private applyDelta(upserts: Record<string, CacheEntry>, removed: string[]) {
+    for (const key of removed) delete this.cache[key];
+    for (const [key, entry] of Object.entries(upserts)) {
+      Object.defineProperty(this.cache, key, { value: entry, enumerable: true, configurable: true, writable: true });
+    }
+  }
+
+  private unchangedReceipt(): CacheMutationReceipt {
+    return { status: "unchanged", epoch: this.cacheEpoch, revision: this.cacheRevision };
+  }
+
+  private async publishChange(upserts: Record<string, CacheEntry>, removed: string[]): Promise<CacheMutationReceipt> {
     this.cacheRevision += 1;
-    const upserts: Record<string, CacheEntry> = {};
-    for (const [key, entry] of Object.entries(next)) {
-      if (previous[key] !== entry) upserts[key] = copyEntry(entry);
+    const change: CacheChangeEvent = { epoch: this.cacheEpoch, revision: this.cacheRevision, upserts: copyCache(upserts), removed: [...removed] };
+    try {
+      await this.options.onCacheChanged?.(copyChangeEvent(change));
+    } catch (error) {
+      try {
+        await this.options.onCacheChangedError?.(error);
+      } catch {
+        // Notification diagnostics cannot change an already committed mutation.
+      }
     }
-    const removed: string[] = [];
-    for (const key of Object.keys(previous)) {
-      if (!(key in next)) removed.push(key);
-    }
-    await this.options.onCacheChanged?.({ epoch: this.cacheEpoch, revision: this.cacheRevision, upserts, removed });
+    return { status: "committed", change };
   }
 
   private async notifyResolutionFailure(scope: LinkScope, category: ResolutionFailureCategory) {
@@ -625,6 +661,10 @@ function parseCache(value: string | undefined): Record<string, CacheEntry> {
 
 function copyCache(cache: Record<string, CacheEntry>): Record<string, CacheEntry> {
   return Object.fromEntries(Object.entries(cache).map(([key, entry]) => [key, copyEntry(entry)]));
+}
+
+function copyChangeEvent(event: CacheChangeEvent): CacheChangeEvent {
+  return { epoch: event.epoch, revision: event.revision, upserts: copyCache(event.upserts), removed: [...event.removed] };
 }
 
 function copyEntry(entry: CacheEntry): CacheEntry {
