@@ -84,6 +84,10 @@ _Avoid_: editor area, document body, SiYuan UI
 A desktop, mobile, or browser plugin instance that renders icons and requests cache operations from the cache authority through RPC.
 _Avoid_: cache writer, cache owner
 
+**Frontend cache client**:
+The frontend client's cache-facing subsystem that owns the local Cache view, the Cache revision and Cache epoch baseline, Kernel RPC calls, and fetch orchestration, and that reports cache changes and manual-refresh failures to the render pipeline through callbacks.
+_Avoid_: frontend cache, client cache, cache authority
+
 **Editor responsiveness**:
 The user-visible ability to type, paste, and add or remove external links in a mounted SiYuan document without Linkmark causing perceptible delay. It is Linkmark's primary performance outcome for large documents.
 _Avoid_: favicon download speed, resolver throughput, general frontend performance
