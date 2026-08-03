@@ -197,8 +197,20 @@ The frontend behavior that renders Linkmark's selected icon according to its own
 _Avoid_: Link Icon compatibility, cooperative rendering
 
 **Icon rule**:
-The frontend-generated runtime stylesheet fragment that maps a Present scope to the icon URL chosen for it, sized by the display preference.
+The short runtime CSS rule that maps one Runtime binding token to its icon URL. Display sizing lives in one shared layout rule.
 _Avoid_: style rule, selector string
+
+**Runtime icon binding**:
+A frontend-only association between a Present link element and its chosen icon. It is disposable render state and must never become persisted document content.
+_Avoid_: inline style, document attribute, cache entry
+
+**Icon binding key**:
+The Link scope key selected for a Runtime icon binding after icon precedence is resolved. It may be the domain key rather than the discovered route key when a Pinned domain icon governs that link.
+_Avoid_: discovered scope, link URL, selector key
+
+**Runtime binding token**:
+A short, opaque number assigned to an Icon binding key for one plugin instance and stored in `data-linkmark-key`. Tokens are not reused within that instance and are not persistent identities.
+_Avoid_: binding key, scope key, persistent ID
 
 **Specific-page discovery**:
 An optional workspace cache policy that permits retrieving an external link's path, without its query parameters or fragment, to discover a page-specific icon. It is disabled by default; default resolution probes standard root icon paths and configured providers without retrieving HTML documents or manifests.
@@ -209,7 +221,7 @@ The cache identity for a link: a domain or a domain-plus-route key when the site
 _Avoid_: bare domain, page URL
 
 **Present scope**:
-A Link scope whose link elements currently exist in a mounted editor or static container in a Frontend client's document; Icon rules are generated for Present scopes, so the stylesheet stays bounded by document content rather than cache size.
+A Link scope whose link elements currently exist in a mounted editor or static container in a Frontend client's document; Runtime icon bindings are reconciled only for Present scopes, so the stylesheet stays bounded by document content rather than cache size.
 _Avoid_: active scope key, visible scope
 
 **Parent-domain probing**:

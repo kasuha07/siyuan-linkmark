@@ -33,8 +33,12 @@ in `dist/`.
 
 ## Conventions
 
-- Do not write `style` or `data-*` attributes to editable SiYuan document nodes.
-  Use runtime CSS injected into `document.head`.
+- Do not write persistent rendering metadata such as `style` or `custom-*`
+  attributes to editable SiYuan document nodes. The sole exception is the
+  transient, Linkmark-owned `data-linkmark-key`: it must not trigger an edit
+  transaction or survive Lute conversion, and must be removed when its binding
+  expires, icons are disabled, or the plugin unloads. Use runtime CSS injected
+  into `document.head`.
 - Do not add third-party link-icon detection, priority behavior, or compatibility settings.
 - Keep user-pinned icons safe from ordinary refresh and cache cleanup.
 - Do not add general static icon libraries. A small reviewed mapping for

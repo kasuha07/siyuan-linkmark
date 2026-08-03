@@ -6,7 +6,7 @@ import {
   localDiscoveryRegionFor,
   type DiscoveryWork,
 } from "../src/frontend-render-work";
-import { reconcilePresentRules, createIconRule, type PresentRuleContext } from "../src/icon-rule";
+import { reconcilePresentBindings, type PresentBindingContext } from "../src/icon-rule";
 import { perfCacheOverlay, perfScenarioLinkUrls } from "../src/perf-scenario";
 import { RESOLVER_VERSION } from "../src/resolver-contract";
 import { scopeForUrl } from "../src/url-scope";
@@ -200,12 +200,11 @@ describe("FrontendRenderWorkQueue", () => {
   });
 
   it("evicts departed scopes on a full discovery without local scans touching other regions", () => {
-    const context: PresentRuleContext = {
+    const context: PresentBindingContext = {
       cache: {
         "a.example.dev": { url: "icon-a.png", fetchedAt: Date.now() - 1_000, resolverVersion: RESOLVER_VERSION },
         "b.example.dev": { url: "icon-b.png", fetchedAt: Date.now() - 1_000, resolverVersion: RESOLVER_VERSION },
       },
-      iconSize: 1,
       cacheDays: 30,
       pauseAutomaticFetch: false,
     };
@@ -213,18 +212,20 @@ describe("FrontendRenderWorkQueue", () => {
     const bScope = { key: "b.example.dev", domain: "b.example.dev" };
     const work = new FrontendRenderWorkQueue<{ key: string; domain: string }>();
     let rules = new Map<string, string>();
+    let present = new Map<string, { key: string; domain: string }>();
     let publications = 0;
     const discover = (discovery: DiscoveryWork<{ key: string; domain: string }>) => {
       const discovered = discovery?.kind === "full"
         ? [aScope] // b.example.dev left the document
         : discovery?.regions ?? [];
-      const reconciled = reconcilePresentRules({
-        discovery: discovered,
+      if (discovery?.kind === "full") present = new Map(discovered.map((scope) => [scope.key, scope]));
+      else for (const scope of discovered) present.set(scope.key, scope);
+      const reconciled = reconcilePresentBindings({
+        discovery: present.values(),
         context,
         previous: rules,
-        full: discovery?.kind === "full",
       });
-      rules = reconciled.rules;
+      rules = reconciled.bindings;
       return reconciled.changed;
     };
     const executor = {
@@ -248,7 +249,7 @@ describe("FrontendRenderWorkQueue", () => {
     work.flushDiscovery();
     flushFrontendRenderWork(work, executor);
     expect([...rules.keys()]).toEqual(["a.example.dev"]);
-    expect(rules.get("a.example.dev")).toBe(createIconRule(aScope, "icon-a.png", 1));
+    expect(rules.get("a.example.dev")).toBe("icon-a.png");
     expect(publications).toBe(2);
 
     work.requestLocalDiscovery(bScope);

@@ -11,7 +11,13 @@ import {
   type ProviderPreset,
   type ResolverMode,
 } from "./resolver-contract";
-import { createIconRule, reconcilePresentRules, type PresentRuleContext } from "./icon-rule";
+import {
+  createScopeQuery,
+  planBindingSynchronization,
+  presentIconBindingFor,
+  reconcilePresentBindings,
+  type PresentBindingContext,
+} from "./icon-rule";
 import {
   CACHE_POLICY_FIELDS,
   clamp,
@@ -47,6 +53,7 @@ import {
 } from "./frontend-format";
 import { fetchOutcomeFor, type FetchOutcome } from "./refresh-outcome";
 import { FrontendPerformanceTrace, type FrontendTraceStageName } from "./frontend-performance-trace";
+import { LINKMARK_BINDING_ATTRIBUTE, RuntimeIconBindingPublisher } from "./runtime-icon-bindings";
 import { scopeForUrl, scopeFromCacheKey, type LinkScope } from "./url-scope";
 
 type FetchTrigger = "automatic" | "manual";
@@ -82,7 +89,11 @@ export default class LinkmarkPlugin extends Plugin {
     automaticGeneration: number;
   }>();
   private failedDomains = new Map<string, number>();
-  private iconRules = new Map<string, string>();
+  private presentScopes = new Map<string, LinkScope>();
+  private iconBindings = new Map<string, string>();
+  private pendingMarkerBindings = new Map<HTMLElement, string | undefined>();
+  private pendingFullMarkerReconcile = false;
+  private readonly bindingPublisher = new RuntimeIconBindingPublisher(document, RUNTIME_STYLE_ID);
   private observer?: MutationObserver;
   private scanTimer?: number;
   private renderWorkTimer?: number;
@@ -114,7 +125,7 @@ export default class LinkmarkPlugin extends Plugin {
     // cached scopes render at the first frame; the trailing scheduled scan
     // is a safety net for content that changed during load.
     this.scanLinks();
-    this.renderRules();
+    this.publishBindings();
     this.scheduleScan();
   }
 
@@ -124,7 +135,7 @@ export default class LinkmarkPlugin extends Plugin {
     if (this.scanTimer !== undefined) window.clearTimeout(this.scanTimer);
     if (this.renderWorkTimer !== undefined) window.clearTimeout(this.renderWorkTimer);
     this.topBarElement?.remove();
-    document.getElementById(RUNTIME_STYLE_ID)?.remove();
+    this.bindingPublisher.destroy();
   }
 
   private t(key: string) {
@@ -173,7 +184,6 @@ export default class LinkmarkPlugin extends Plugin {
     try {
       this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
       this.updateCacheCount();
-      this.requestRuleRebuild();
       this.scheduleScan();
       return true;
     } catch (error) {
@@ -187,6 +197,7 @@ export default class LinkmarkPlugin extends Plugin {
     if (!bind) return;
     await bind("cache.changed", (params) => {
       const payload = params?.params && typeof params.params === "object" ? params.params : params;
+      const previousCache = this.cache;
       const application = applyCacheChangeEvent(this.cache, payload, this.lastCacheRevision, this.lastCacheEpoch);
       if (application.status === "ignored") return;
       if (application.status === "refetch" || application.status === "epoch-changed") {
@@ -198,8 +209,7 @@ export default class LinkmarkPlugin extends Plugin {
       for (const key of this.manualRefreshKeys.keys()) {
         if (this.cache[key]) this.manualRefreshKeys.delete(key);
       }
-      this.requestRuleRebuild();
-      this.scheduleScan();
+      this.synchronizeCacheBindings(previousCache, changedCacheKeys(payload));
     });
     await bind("cache.resolution-failed", (params) => {
       const key = params?.key ?? params?.params?.key;
@@ -480,7 +490,10 @@ export default class LinkmarkPlugin extends Plugin {
     this.setting = new Setting({
       confirmCallback: async () => {
         const previousMonogramSignature = monogramSignature(this.settings);
+        const wasEnabled = this.settings.enabled;
         const wasPaused = this.settings.pauseAutomaticFetch;
+        const previousIconSize = this.settings.iconSize;
+        const previousCacheDays = this.settings.cacheDays;
         this.settings.enabled = enabled.checked;
         this.settings.pauseAutomaticFetch = pauseAutomaticFetch.checked;
         this.settings.allowFullPageDiscovery = allowFullPageDiscovery.checked;
@@ -502,8 +515,11 @@ export default class LinkmarkPlugin extends Plugin {
           await this.invalidateGeneratedMonograms();
         }
         if (!wasPaused && this.settings.pauseAutomaticFetch) this.automaticFetchGeneration += 1;
-        this.requestRuleRebuild();
-        if (this.settings.enabled && !this.settings.pauseAutomaticFetch) this.scheduleScan();
+        if (!this.settings.enabled) this.requestRuleRebuild();
+        else if (!wasEnabled
+          || wasPaused !== this.settings.pauseAutomaticFetch
+          || previousCacheDays !== this.settings.cacheDays) this.scheduleScan();
+        else if (previousIconSize !== this.settings.iconSize) this.requestRuleRebuild();
       },
     });
     this.setting.addItem({
@@ -644,7 +660,6 @@ export default class LinkmarkPlugin extends Plugin {
             const summary = trace.disable();
             if (summary) console.info("[siyuan-linkmark] Frontend performance trace summary", summary);
           }
-          this.requestRuleRebuild();
           this.scheduleScan();
         },
       });
@@ -727,8 +742,8 @@ export default class LinkmarkPlugin extends Plugin {
     this.settings.enabled = enabled;
     if (this.enabledInput) this.enabledInput.checked = enabled;
     await this.saveDisplaySettings();
-    this.requestRuleRebuild();
-    if (enabled && !this.settings.pauseAutomaticFetch) this.scheduleScan();
+    if (enabled) this.scheduleScan();
+    else this.requestRuleRebuild();
     showMessage(this.t(enabled ? "pluginEnabled" : "pluginDisabled"));
   }
 
@@ -871,9 +886,8 @@ export default class LinkmarkPlugin extends Plugin {
     this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.delete(key);
     this.manualRefreshKeys.delete(key);
-    this.requestRuleRebuild();
     this.updateCacheCount();
-    if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
+    this.scheduleScan();
   }
 
   private openCacheManager() {
@@ -1054,8 +1068,7 @@ export default class LinkmarkPlugin extends Plugin {
       this.failedDomains.delete(selectedScope.key);
       this.manualRefreshKeys.delete(scope.key);
       this.manualRefreshKeys.delete(selectedScope.key);
-      this.requestRuleRebuild();
-      if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
+      this.scheduleScan();
       this.updateCacheCount();
       showMessage(this.t("customIconSaved").replace("{domain}", scope.domain));
       return true;
@@ -1073,9 +1086,8 @@ export default class LinkmarkPlugin extends Plugin {
     this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.delete(key);
     this.manualRefreshKeys.delete(key);
-    this.requestRuleRebuild();
     this.updateCacheCount();
-    if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
+    this.scheduleScan();
     showMessage(this.t("automaticRestored").replace("{domain}", entry.domain ?? key.split("::")[0]));
   }
 
@@ -1193,7 +1205,7 @@ export default class LinkmarkPlugin extends Plugin {
         if (!root.isConnected) return;
         this.cache[targetScope.key] = selected;
         if (targetScope.key !== selectedScope.key) delete this.cache[selectedScope.key];
-        this.requestRuleRebuild();
+        this.scheduleScan();
         dialog.destroy();
         afterChange();
       } catch {
@@ -1263,7 +1275,7 @@ export default class LinkmarkPlugin extends Plugin {
     this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.clear();
     this.manualRefreshKeys.clear();
-    this.requestRuleRebuild();
+    this.scheduleScan();
     this.updateCacheCount();
   }
 
@@ -1273,8 +1285,7 @@ export default class LinkmarkPlugin extends Plugin {
     this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
     this.failedDomains.clear();
     this.manualRefreshKeys.clear();
-    this.requestRuleRebuild();
-    if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
+    this.scheduleScan();
   }
 
   private startObserver() {
@@ -1302,7 +1313,7 @@ export default class LinkmarkPlugin extends Plugin {
   /**
    * A link scope can leave the document without any added node to scan, so a
    * removed link subtree escalates to a full discovery: the full scan evicts
-   * Icon rules for scopes that are no longer Present, which a local scan
+   * Runtime icon bindings for scopes that are no longer Present, which a local scan
    * never does. The render-work debounce coalesces the removals protyle
    * performs while re-creating elements during editing.
    */
@@ -1342,14 +1353,9 @@ export default class LinkmarkPlugin extends Plugin {
     this.scheduleRenderWork();
   }
 
-  private requestRulePublication() {
-    this.renderWork.requestRulePublication();
-    this.scheduleRenderWork();
-  }
-
   private scheduleRenderWork() {
     if (this.renderWorkTimer !== undefined) return;
-    // Let concurrent cache updates settle before replacing the complete stylesheet.
+    // Let concurrent cache and discovery changes settle into one atomic publication.
     this.renderWorkTimer = window.setTimeout(() => this.flushRenderWork(), RULE_RENDER_BATCH_DELAY);
   }
 
@@ -1359,14 +1365,14 @@ export default class LinkmarkPlugin extends Plugin {
       // The trace measures the rebuild itself into the reconcile stage and
       // its own batch slot, keeping a coincident rebuild out of the
       // Full-discovery total.
-      rebuildRules: () => this.rebuildRules(),
+      rebuildRules: () => this.rebuildBindings(),
       discover: (discovery) => {
         if (discovery.kind === "full") return this.scanLinks();
         let rulesChanged = false;
         for (const root of discovery.regions) rulesChanged = this.scanLinks(root) || rulesChanged;
         return rulesChanged;
       },
-      publishRules: () => this.traceStage("publication", () => this.renderRules()),
+      publishRules: () => this.traceStage("publication", () => this.publishBindings()),
     };
     const trace = this.performanceTrace;
     if (trace) trace.flush(this.renderWork, executor);
@@ -1386,21 +1392,38 @@ export default class LinkmarkPlugin extends Plugin {
    * other surface (cache counts, management UI, refresh, persistence) keeps
    * reading the adopted snapshot cache.
    */
-  private cacheViewForRender(): Record<string, CacheEntry> {
-    return this.performanceTrace?.cacheView(this.cache) ?? this.cache;
+  private cacheViewForRender(cache = this.cache): Record<string, CacheEntry> {
+    return this.performanceTrace?.cacheView(cache) ?? cache;
   }
 
   private scanLinks(root?: Element | null) {
     if (!this.settings.enabled) return false;
+    const full = !root;
     const domains = this.traceStage("discovery", () => this.collectDocumentDomains(root));
-
-    const reconciled = this.traceStage("reconcile", () => reconcilePresentRules({
-      discovery: [...domains.values()].map(({ scope }) => scope),
-      context: this.presentRuleContext(),
-      previous: this.iconRules,
-      full: !root,
+    if (full) {
+      this.presentScopes = new Map([...domains].map(([key, { scope }]) => [key, scope]));
+      this.pendingMarkerBindings.clear();
+      this.pendingFullMarkerReconcile = true;
+    } else {
+      for (const [key, { scope }] of domains) this.presentScopes.set(key, scope);
+    }
+    const context = this.presentBindingContext();
+    const reconciled = this.traceStage("reconcile", () => reconcilePresentBindings({
+      discovery: this.presentScopes.values(),
+      context,
+      previous: this.iconBindings,
     }));
-    this.iconRules = reconciled.rules;
+    this.iconBindings = reconciled.bindings;
+    const publisherChanged = this.bindingPublisher.replaceBindings(this.iconBindings, this.settings.iconSize);
+    let markerChanged = false;
+    for (const { scope, elements } of domains.values()) {
+      const bindingKey = presentIconBindingFor(scope, context)?.key;
+      const token = this.bindingPublisher.tokenFor(bindingKey);
+      for (const element of elements) {
+        this.pendingMarkerBindings.set(element, bindingKey);
+        if (element.getAttribute(LINKMARK_BINDING_ATTRIBUTE) !== token) markerChanged = true;
+      }
+    }
 
     // An active performance session renders from the read-only fixture view,
     // so its scans must never issue Cache authority RPC. Forcing the paused
@@ -1423,7 +1446,7 @@ export default class LinkmarkPlugin extends Plugin {
       if (decision.action === "keep" && decision.fetch) void this.fetchAndCache(scope, targetUrl);
       if (decision.action === "fetch") void this.fetchAndCache(scope, targetUrl);
     });
-    return reconciled.changed;
+    return full || reconciled.changed || publisherChanged || markerChanged;
   }
 
   private fetchAndCache(
@@ -1482,12 +1505,13 @@ export default class LinkmarkPlugin extends Plugin {
       if (invalidated()) return "failure";
       if (result.status === "ready") {
         const entry = result.entry;
-        this.cache[scope.key] = entry;
+        const previousCache = this.cache;
+        this.cache = { ...this.cache, [scope.key]: entry };
         this.updateCacheCount();
         this.failedDomains.delete(scope.key);
         this.failureReasons.delete(scope.key);
         this.manualRefreshKeys.delete(scope.key);
-        if (this.setRule(scope, entry.url)) this.requestRulePublication();
+        this.synchronizeCacheBindings(previousCache, [scope.key]);
         return fetchOutcomeFor(entry);
       }
       if (result.status === "queued") {
@@ -1526,71 +1550,98 @@ export default class LinkmarkPlugin extends Plugin {
       if (this.cache[key] !== expected) return;
       await this.callKernel("cache.remove", key);
       this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
-      this.requestRuleRebuild();
       this.updateCacheCount();
     } finally {
       this.pendingDomains.delete(key);
-      if (!this.settings.pauseAutomaticFetch) this.scheduleScan();
+      this.scheduleScan();
     }
   }
 
-  private rebuildRules() {
+  private rebuildBindings() {
     if (!this.settings.enabled) {
-      this.iconRules.clear();
+      this.presentScopes.clear();
+      this.iconBindings.clear();
+      this.pendingMarkerBindings.clear();
+      this.pendingFullMarkerReconcile = true;
+      this.bindingPublisher.replaceBindings(this.iconBindings, this.settings.iconSize);
       this.updateCacheCount();
       return;
     }
-    // The rule map keys are the known Present scopes, so a rebuild recomputes
-    // their rules against the current cache. Scopes whose entry left the
-    // cache produce no rule and are evicted; adding rules for scopes that
-    // were never present is the full scan's job.
-    const view = this.cacheViewForRender();
-    const scopes: LinkScope[] = [];
-    for (const key of this.iconRules.keys()) {
-      const entry = view[key];
-      if (entry) scopes.push(scopeFromCacheKey(key, entry.domain, entry.pathPrefix));
-    }
-    const reconciled = reconcilePresentRules({
-      discovery: scopes,
-      context: this.presentRuleContext(),
-      previous: this.iconRules,
-      full: true,
+    const reconciled = reconcilePresentBindings({
+      discovery: this.presentScopes.values(),
+      context: this.presentBindingContext(),
+      previous: this.iconBindings,
     });
-    this.iconRules = reconciled.rules;
+    if (!sameMapKeys(this.iconBindings, reconciled.bindings)) {
+      this.scheduleScan();
+      this.updateCacheCount();
+      return;
+    }
+    this.iconBindings = reconciled.bindings;
+    this.bindingPublisher.replaceBindings(this.iconBindings, this.settings.iconSize);
     this.updateCacheCount();
   }
 
-  private presentRuleContext(): PresentRuleContext {
+  private presentBindingContext(cache = this.cacheViewForRender()): PresentBindingContext {
     return {
-      cache: this.cacheViewForRender(),
-      iconSize: this.settings.iconSize,
+      cache,
       cacheDays: this.settings.cacheDays,
       pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
     };
   }
 
-  private setRule(scope: LinkScope, url: string) {
-    if (!this.settings.enabled) return false;
-    const rule = createIconRule(scope, url, this.settings.iconSize);
-    if (this.iconRules.get(scope.key) === rule) return false;
-    this.iconRules.set(scope.key, rule);
-    return true;
-  }
-
-  private renderRules() {
-    let style = document.getElementById(RUNTIME_STYLE_ID) as HTMLStyleElement | null;
-    if (!style) {
-      style = document.createElement("style");
-      style.id = RUNTIME_STYLE_ID;
-      document.head.appendChild(style);
+  private synchronizeCacheBindings(previousCache: Record<string, CacheEntry>, changedKeys: Iterable<string>) {
+    if (!this.settings.enabled) return;
+    const plan = planBindingSynchronization({
+      scopes: this.presentScopes.values(),
+      before: this.presentBindingContext(this.cacheViewForRender(previousCache)),
+      after: this.presentBindingContext(),
+      changedKeys,
+    });
+    if (plan.kind === "rules") {
+      this.requestRuleRebuild();
+      return;
     }
-    // Domain selectors intentionally come first. Route selectors are more
-    // specific semantically but use the same CSS specificity, so they must be
-    // rendered later to let /doc/ and /sheet/ coexist predictably.
-    style.textContent = [...this.iconRules.entries()]
-      .sort(([left], [right]) => Number(left.includes("::")) - Number(right.includes("::")))
-      .map(([, rule]) => rule)
-      .join("\n");
+    if (plan.kind === "full" || !this.scheduleTargetedDiscovery(plan.scopes)) this.scheduleScan();
   }
 
+  private scheduleTargetedDiscovery(scopes: Iterable<LinkScope>) {
+    let matched = false;
+    for (const scope of scopes) {
+      for (const element of document.querySelectorAll<HTMLElement>(createScopeQuery(scope))) {
+        matched = true;
+        this.scheduleScan(element);
+      }
+    }
+    return matched;
+  }
+
+  private publishBindings() {
+    const markers = this.pendingMarkerBindings;
+    const full = this.pendingFullMarkerReconcile;
+    this.pendingMarkerBindings = new Map();
+    this.pendingFullMarkerReconcile = false;
+    this.bindingPublisher.publish(markers, full);
+  }
+
+}
+
+function changedCacheKeys(payload: unknown) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const event = payload as { upserts?: unknown; removed?: unknown };
+  const upserts = event.upserts && typeof event.upserts === "object" && !Array.isArray(event.upserts)
+    ? Object.keys(event.upserts)
+    : [];
+  const removed = Array.isArray(event.removed)
+    ? event.removed.filter((key): key is string => typeof key === "string")
+    : [];
+  return [...new Set([...upserts, ...removed])];
+}
+
+function sameMapKeys(left: ReadonlyMap<string, unknown>, right: ReadonlyMap<string, unknown>) {
+  if (left.size !== right.size) return false;
+  for (const key of left.keys()) {
+    if (!right.has(key)) return false;
+  }
+  return true;
 }

@@ -9,7 +9,7 @@ import {
   FrontendRenderWorkQueue,
   type FrontendRenderWorkExecutor,
 } from "../src/frontend-render-work";
-import { createIconRule, reconcilePresentRules } from "../src/icon-rule";
+import { reconcilePresentBindings } from "../src/icon-rule";
 import { PERF_CACHE_VIEW_ENTRIES, PERF_SCOPE_COUNT } from "../src/perf-scenario";
 import { scopeForUrl } from "../src/url-scope";
 
@@ -368,18 +368,13 @@ describe("FrontendPerformanceTrace", () => {
     };
     const view = trace.cacheView(realCache)!;
     const routeScope = scopeForUrl("https://nocode.host/p00000/ref-1")!;
-    const result = reconcilePresentRules({
+    const result = reconcilePresentBindings({
       discovery: [routeScope],
-      context: { cache: view, iconSize: 1, cacheDays: 30, pauseAutomaticFetch: false },
+      context: { cache: view, cacheDays: 30, pauseAutomaticFetch: false },
       previous: new Map(),
-      full: true,
     });
-    expect(result.rules.has(routeScope.key)).toBe(false);
-    expect(result.rules.get("nocode.host")).toBe(createIconRule(
-      { key: "nocode.host", domain: "nocode.host" },
-      "pinned-nocode.png",
-      1,
-    ));
+    expect(result.bindings.has(routeScope.key)).toBe(false);
+    expect(result.bindings.get("nocode.host")).toBe("pinned-nocode.png");
   });
 
   it("supplies the five hundred scenario scopes through the overlay", () => {

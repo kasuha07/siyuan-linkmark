@@ -1,62 +1,42 @@
 import { describe, expect, it } from "vitest";
-import { createIconRule, reconcilePresentRules, type PresentRuleContext } from "../src/icon-rule";
+import {
+  createScopeQuery,
+  planBindingSynchronization,
+  presentIconBindingFor,
+  reconcilePresentBindings,
+  type PresentBindingContext,
+} from "../src/icon-rule";
 import { RESOLVER_VERSION } from "../src/resolver-contract";
 import { perfCacheOverlay, perfScenarioScopes, PERF_CACHE_VIEW_ENTRIES, PERF_SCOPE_COUNT } from "../src/perf-scenario";
 import { scopeForUrl } from "../src/url-scope";
 
-describe("createIconRule", () => {
+describe("createScopeQuery", () => {
   const domainScope = { key: "example.com", domain: "example.com" };
-  const routeScope = scopeForUrl("https://docs.qq.com/doc/abc");
 
-  it("targets every link element for https and http with the exact origin", () => {
-    const rule = createIconRule(domainScope, "https://cdn.example.com/icon.png", 1);
-    for (const selector of [
-      ".protyle-wysiwyg span[data-type~='a'][data-href=\"https://example.com\"]::before",
-      ".protyle-wysiwyg span[data-type~='a'][data-href^=\"https://example.com/\"]::before",
-      ".protyle-wysiwyg span[data-type~='url'][data-href=\"https://example.com\"]::before",
-      ".protyle-wysiwyg a[href=\"https://example.com\"]::before",
-      ".b3-typography a[href=\"https://example.com\"]::before",
-      ".b3-typography a[href^=\"http://example.com/\"]::before",
-    ]) {
-      expect(rule).toContain(selector);
-    }
+  it("builds transient exact and boundary queries for supported link elements", () => {
+    const query = createScopeQuery(domainScope);
+    expect(query).toContain(".protyle-wysiwyg span[data-type~='a'][data-href=\"https://example.com\"]");
+    expect(query).toContain(".protyle-wysiwyg span[data-type~='url'][data-href^=\"https://example.com/\"]");
+    expect(query).toContain(".protyle-wysiwyg a[href^=\"https://example.com?\"]");
+    expect(query).toContain(".b3-typography a[href^=\"http://example.com:\"]");
+    expect(query).not.toContain("::before");
   });
 
-  it("includes path, query, fragment, and port boundary prefixes on domain scopes", () => {
-    const rule = createIconRule(domainScope, "icon.png", 1);
-    expect(rule).toContain("[data-href^=\"https://example.com/\"]");
-    expect(rule).toContain("[data-href^=\"https://example.com?\"]");
-    expect(rule).toContain("[data-href^=\"https://example.com#\"]");
-    expect(rule).toContain("[data-href^=\"https://example.com:\"]");
-  });
-
-  it("uses the route prefix as the exact match and drops the port boundary", () => {
-    expect(routeScope?.routeKey).toBe("doc");
-    const rule = createIconRule(routeScope!, "icon.png", 1);
-    expect(rule).toContain("[data-href=\"https://docs.qq.com/doc\"]");
-    expect(rule).toContain("[data-href^=\"https://docs.qq.com/doc/\"]");
-    expect(rule).not.toContain("[data-href^=\"https://docs.qq.com/doc:\"]");
-  });
-
-  it("escapes angle brackets in the icon URL", () => {
-    const rule = createIconRule(domainScope, "https://cdn.example.com/a<icon>.png", 1);
-    expect(rule).toContain("url(\"https://cdn.example.com/a\\3c icon>.png\")");
-  });
-
-  it("embeds the display preference icon size in em units", () => {
-    const rule = createIconRule(domainScope, "icon.png", 1.4);
-    expect(rule).toContain("width: 1.4em;");
-    expect(rule).toContain("height: 1.4em;");
+  it("uses route boundaries without treating a port as part of the route", () => {
+    const routeScope = scopeForUrl("https://docs.qq.com/doc/abc")!;
+    const query = createScopeQuery(routeScope);
+    expect(query).toContain("[data-href=\"https://docs.qq.com/doc\"]");
+    expect(query).toContain("[data-href^=\"https://docs.qq.com/doc/\"]");
+    expect(query).not.toContain("[data-href^=\"https://docs.qq.com/doc:\"]");
   });
 });
 
-describe("reconcilePresentRules", () => {
+describe("Present icon bindings", () => {
   const now = Date.now();
   const domainScope = { key: "example.com", domain: "example.com" };
   const routeScope = { key: "docs.qq.com::doc", domain: "docs.qq.com", routeKey: "doc", pathPrefix: "/doc" };
-  const context = (overrides: Partial<PresentRuleContext> = {}): PresentRuleContext => ({
+  const context = (overrides: Partial<PresentBindingContext> = {}): PresentBindingContext => ({
     cache: {},
-    iconSize: 1,
     cacheDays: 30,
     pauseAutomaticFetch: false,
     ...overrides,
@@ -69,228 +49,152 @@ describe("reconcilePresentRules", () => {
     ...overrides,
   });
 
-  it("produces rules for discovered Present scopes with fresh, current entries", () => {
-    const result = reconcilePresentRules({
+  it("resolves fresh current entries to compact key/url bindings", () => {
+    const result = reconcilePresentBindings({
       discovery: [domainScope],
       context: context({ cache: { [domainScope.key]: entry() } }),
       previous: new Map(),
-      full: true,
     });
     expect(result.changed).toBe(true);
-    expect([...result.rules.keys()]).toEqual(["example.com"]);
-    expect(result.rules.get("example.com")).toBe(createIconRule(domainScope, "icon.png", 1));
+    expect(result.bindings).toEqual(new Map([[domainScope.key, "icon.png"]]));
   });
 
-  it("produces no rule for stale, legacy-version, and missing scopes", () => {
-    const stale = reconcilePresentRules({
-      discovery: [domainScope],
-      context: context({ cache: { [domainScope.key]: entry({ fetchedAt: now - 40 * 86400000 }) } }),
-      previous: new Map(),
-      full: true,
-    });
-    expect(stale.rules.size).toBe(0);
-
-    const legacy = reconcilePresentRules({
-      discovery: [domainScope],
-      context: context({ cache: { [domainScope.key]: entry({ resolverVersion: RESOLVER_VERSION - 1 }) } }),
-      previous: new Map(),
-      full: true,
-    });
-    expect(legacy.rules.size).toBe(0);
-
-    const missing = reconcilePresentRules({
-      discovery: [domainScope],
-      context: context(),
-      previous: new Map(),
-      full: true,
-    });
-    expect(missing.rules.size).toBe(0);
+  it("rejects stale, legacy-version, and missing entries", () => {
+    for (const cache of [
+      { [domainScope.key]: entry({ fetchedAt: now - 40 * 86400000 }) },
+      { [domainScope.key]: entry({ resolverVersion: RESOLVER_VERSION - 1 }) },
+      {},
+    ]) {
+      expect(presentIconBindingFor(domainScope, context({ cache }))).toBeUndefined();
+    }
   });
 
   it("keeps stale Pinned entries and paused legacy monograms", () => {
-    const pinned = reconcilePresentRules({
-      discovery: [domainScope],
-      context: context({ cache: { [domainScope.key]: entry({ pinned: true, fetchedAt: 0 }) } }),
-      previous: new Map(),
-      full: true,
-    });
-    expect(pinned.rules.size).toBe(1);
-
-    const pausedLegacy = reconcilePresentRules({
-      discovery: [domainScope],
-      context: context({
-        pauseAutomaticFetch: true,
-        cache: { [domainScope.key]: entry({ source: "generated monogram", resolverVersion: RESOLVER_VERSION - 1, fetchedAt: 0 }) },
-      }),
-      previous: new Map(),
-      full: true,
-    });
-    expect(pausedLegacy.rules.size).toBe(1);
+    expect(presentIconBindingFor(domainScope, context({
+      cache: { [domainScope.key]: entry({ pinned: true, fetchedAt: 0 }) },
+    }))).toEqual({ key: domainScope.key, iconUrl: "icon.png" });
+    expect(presentIconBindingFor(domainScope, context({
+      pauseAutomaticFetch: true,
+      cache: {
+        [domainScope.key]: entry({
+          source: "generated monogram",
+          resolverVersion: RESOLVER_VERSION - 1,
+          fetchedAt: 0,
+        }),
+      },
+    }))).toEqual({ key: domainScope.key, iconUrl: "icon.png" });
   });
 
-  it("suppresses the route rule under a pinned domain and serves through the domain rule", () => {
-    const pinnedUrl = "pinned-icon.png";
-    const result = reconcilePresentRules({
-      discovery: [routeScope],
-      context: context({
-        cache: {
-          [routeScope.key]: entry({ domain: "docs.qq.com", routeKey: "doc", pathPrefix: "/doc", url: "route-icon.png" }),
-          [routeScope.domain]: entry({ pinned: true, domain: "docs.qq.com", url: pinnedUrl }),
-        },
-      }),
-      previous: new Map(),
-      full: true,
-    });
-    expect(result.rules.has(routeScope.key)).toBe(false);
-    expect(result.rules.get(routeScope.domain)).toBe(createIconRule(
-      { key: "docs.qq.com", domain: "docs.qq.com" },
-      pinnedUrl,
-      1,
-    ));
+  it("binds a route to the Pinned domain that governs its final icon", () => {
+    const binding = presentIconBindingFor(routeScope, context({
+      cache: {
+        [routeScope.key]: entry({ domain: routeScope.domain, url: "route-icon.png" }),
+        [routeScope.domain]: entry({ pinned: true, domain: routeScope.domain, url: "pinned-icon.png" }),
+      },
+    }));
+    expect(binding).toEqual({ key: routeScope.domain, iconUrl: "pinned-icon.png" });
   });
 
-  it("evicts rules for scopes absent from the new discovery on a full reconcile", () => {
-    const previous = new Map([
-      ["departed.example.com", "old-rule"],
-      [domainScope.key, "old-rule"],
-    ]);
-    const result = reconcilePresentRules({
+  it("plans direct CSSOM updates when final binding keys stay unchanged", () => {
+    const before = context({ cache: { [domainScope.key]: entry({ url: "old.png" }) } });
+    const after = context({ cache: { [domainScope.key]: entry({ url: "new.png" }) } });
+    expect(planBindingSynchronization({
+      scopes: [domainScope],
+      before,
+      after,
+      changedKeys: [domainScope.key],
+    })).toEqual({ kind: "rules" });
+  });
+
+  it("plans targeted discovery for an ordinary exact binding change", () => {
+    const before = context({
+      cache: { [routeScope.domain]: entry({ domain: routeScope.domain, url: "domain.png" }) },
+    });
+    const after = context({
+      cache: {
+        ...before.cache,
+        [routeScope.key]: entry({ domain: routeScope.domain, url: "route.png" }),
+      },
+    });
+    expect(planBindingSynchronization({
+      scopes: [routeScope],
+      before,
+      after,
+      changedKeys: [routeScope.key],
+    })).toEqual({ kind: "targeted", scopes: [routeScope] });
+  });
+
+  it("plans Full discovery for Pinned precedence and broad changes", () => {
+    const before = context({ cache: { [domainScope.key]: entry() } });
+    const pinned = context({ cache: { [domainScope.key]: entry({ pinned: true }) } });
+    expect(planBindingSynchronization({
+      scopes: [domainScope],
+      before,
+      after: pinned,
+      changedKeys: [domainScope.key],
+    })).toEqual({ kind: "full" });
+
+    const scopes = Array.from({ length: 9 }, (_, index) => ({
+      key: `scope-${index}.example.com`,
+      domain: `scope-${index}.example.com`,
+    }));
+    const after = context({ cache: Object.fromEntries(scopes.map((scope) => [scope.key, entry({ domain: scope.domain })])) });
+    expect(planBindingSynchronization({
+      scopes,
+      before: context(),
+      after,
+      changedKeys: scopes.map((scope) => scope.key),
+    })).toEqual({ kind: "full" });
+  });
+
+  it("reports changes only when the compact binding map changes", () => {
+    const previous = new Map([[domainScope.key, "icon.png"]]);
+    const unchanged = reconcilePresentBindings({
       discovery: [domainScope],
       context: context({ cache: { [domainScope.key]: entry() } }),
       previous,
-      full: true,
     });
-    expect(result.changed).toBe(true);
-    expect([...result.rules.keys()]).toEqual(["example.com"]);
-  });
+    expect(unchanged.changed).toBe(false);
+    expect(unchanged.bindings).not.toBe(previous);
 
-  it("only adds or updates rules on a local reconcile", () => {
-    const previous = new Map([["departed.example.com", "old-rule"]]);
-    const result = reconcilePresentRules({
-      discovery: [domainScope],
-      context: context({ cache: { [domainScope.key]: entry() } }),
-      previous,
-      full: false,
-    });
-    expect(result.changed).toBe(true);
-    expect(result.rules.get("departed.example.com")).toBe("old-rule");
-    expect(result.rules.get("example.com")).toBe(createIconRule(domainScope, "icon.png", 1));
-  });
-
-  it("reuses the previous map when local discovery produces no usable rule", () => {
-    const previous = new Map([["unrelated.example.com", "unrelated-rule"]]);
-    const result = reconcilePresentRules({
+    const departed = reconcilePresentBindings({
       discovery: [],
       context: context(),
       previous,
-      full: false,
     });
-    expect(result.changed).toBe(false);
-    expect(result.rules).toBe(previous);
+    expect(departed.changed).toBe(true);
+    expect(departed.bindings.size).toBe(0);
   });
 
-  it("reuses the previous map when every local rule is already current", () => {
-    const rule = createIconRule(domainScope, "icon.png", 1);
-    const previous = new Map([
-      [domainScope.key, rule],
-      ["unrelated.example.com", "unrelated-rule"],
-    ]);
-    const result = reconcilePresentRules({
-      discovery: [domainScope],
-      context: context({ cache: { [domainScope.key]: entry() } }),
-      previous,
-      full: false,
-    });
-    expect(result.changed).toBe(false);
-    expect(result.rules).toBe(previous);
-  });
-
-  it("copies on the first effective local upsert and applies every later upsert", () => {
-    const secondScope = { key: "second.example.com", domain: "second.example.com" };
-    const previous = new Map([
-      [domainScope.key, "old-rule"],
-      ["unrelated.example.com", "unrelated-rule"],
-    ]);
-    const result = reconcilePresentRules({
-      discovery: [domainScope, secondScope],
-      context: context({
-        cache: {
-          [domainScope.key]: entry(),
-          [secondScope.key]: entry({ domain: secondScope.domain, url: "second-icon.png" }),
-        },
-      }),
-      previous,
-      full: false,
-    });
-    expect(result.changed).toBe(true);
-    expect(result.rules).not.toBe(previous);
-    expect(previous).toEqual(new Map([
-      [domainScope.key, "old-rule"],
-      ["unrelated.example.com", "unrelated-rule"],
-    ]));
-    expect(result.rules.get("unrelated.example.com")).toBe("unrelated-rule");
-    expect(result.rules.get(domainScope.key)).toBe(createIconRule(domainScope, "icon.png", 1));
-    expect(result.rules.get(secondScope.key)).toBe(createIconRule(secondScope, "second-icon.png", 1));
-  });
-
-  it("reports no change when a full reconcile matches the previous map", () => {
-    const rule = createIconRule(domainScope, "icon.png", 1);
-    const previous = new Map([[domainScope.key, rule]]);
-    const result = reconcilePresentRules({
-      discovery: [domainScope],
-      context: context({ cache: { [domainScope.key]: entry() } }),
-      previous,
-      full: true,
-    });
-    expect(result.changed).toBe(false);
-    expect(result.rules).not.toBe(previous);
-    expect(result.rules.get("example.com")).toBe(rule);
-  });
-
-  it("produces rules only for discovered Present scopes against a 10,000-entry cache", () => {
-    const cache: Record<string, { url: string; fetchedAt: number; resolverVersion: number; domain: string }> = {};
+  it("reads only discovered scopes from a 10,000-entry cache", () => {
+    const cache: PresentBindingContext["cache"] = {};
     for (let index = 0; index < 10_000; index += 1) {
       const key = `domain-${index}.example.com`;
-      cache[key] = { url: `icon-${index}.png`, fetchedAt: now - 1_000, resolverVersion: RESOLVER_VERSION, domain: key };
+      cache[key] = entry({ domain: key, url: `icon-${index}.png` });
     }
     const discovery = [
       { key: "domain-0.example.com", domain: "domain-0.example.com" },
       { key: "domain-9999.example.com", domain: "domain-9999.example.com" },
     ];
-    const result = reconcilePresentRules({
+    const result = reconcilePresentBindings({
       discovery,
       context: context({ cache }),
       previous: new Map(),
-      full: true,
     });
-    expect([...result.rules.keys()]).toEqual([
-      "domain-0.example.com",
-      "domain-9999.example.com",
-    ]);
-    expect(result.rules.get("domain-0.example.com")).toBe(createIconRule(discovery[0], "icon-0.png", 1));
+    expect(result.bindings).toEqual(new Map([
+      ["domain-0.example.com", "icon-0.png"],
+      ["domain-9999.example.com", "icon-9999.png"],
+    ]));
   });
 
-  it("reconciles only the 500 scenario scopes against the 10,000-entry fixture cache", () => {
+  it("produces exactly 500 bindings for the standard scenario", () => {
     const overlay = perfCacheOverlay(now);
-    const scopes = perfScenarioScopes();
-    const result = reconcilePresentRules({
-      discovery: scopes,
+    const result = reconcilePresentBindings({
+      discovery: perfScenarioScopes(),
       context: context({ cache: overlay }),
       previous: new Map(),
-      full: true,
     });
     expect(Object.keys(overlay)).toHaveLength(PERF_CACHE_VIEW_ENTRIES);
-    expect(result.rules.size).toBe(PERF_SCOPE_COUNT);
-    const domainScope = scopes[0];
-    expect(result.rules.get(domainScope.key)).toBe(createIconRule(
-      domainScope,
-      overlay[domainScope.key].url,
-      1,
-    ));
-    const routeScope = scopeForUrl("https://nocode.host/p00019/ref-3")!;
-    expect(result.rules.has(routeScope.key)).toBe(true);
-    for (const key of result.rules.keys()) {
-      expect(overlay[key]).toBeDefined();
-    }
+    expect(result.bindings.size).toBe(PERF_SCOPE_COUNT);
   });
 });
