@@ -177,15 +177,73 @@ describe("reconcilePresentRules", () => {
     expect(result.rules.get("example.com")).toBe(createIconRule(domainScope, "icon.png", 1));
   });
 
-  it("reports no change when a full reconcile matches the previous map", () => {
+  it("reuses the previous map when local discovery produces no usable rule", () => {
+    const previous = new Map([["unrelated.example.com", "unrelated-rule"]]);
+    const result = reconcilePresentRules({
+      discovery: [],
+      context: context(),
+      previous,
+      full: false,
+    });
+    expect(result.changed).toBe(false);
+    expect(result.rules).toBe(previous);
+  });
+
+  it("reuses the previous map when every local rule is already current", () => {
     const rule = createIconRule(domainScope, "icon.png", 1);
+    const previous = new Map([
+      [domainScope.key, rule],
+      ["unrelated.example.com", "unrelated-rule"],
+    ]);
     const result = reconcilePresentRules({
       discovery: [domainScope],
       context: context({ cache: { [domainScope.key]: entry() } }),
-      previous: new Map([[domainScope.key, rule]]),
+      previous,
+      full: false,
+    });
+    expect(result.changed).toBe(false);
+    expect(result.rules).toBe(previous);
+  });
+
+  it("copies on the first effective local upsert and applies every later upsert", () => {
+    const secondScope = { key: "second.example.com", domain: "second.example.com" };
+    const previous = new Map([
+      [domainScope.key, "old-rule"],
+      ["unrelated.example.com", "unrelated-rule"],
+    ]);
+    const result = reconcilePresentRules({
+      discovery: [domainScope, secondScope],
+      context: context({
+        cache: {
+          [domainScope.key]: entry(),
+          [secondScope.key]: entry({ domain: secondScope.domain, url: "second-icon.png" }),
+        },
+      }),
+      previous,
+      full: false,
+    });
+    expect(result.changed).toBe(true);
+    expect(result.rules).not.toBe(previous);
+    expect(previous).toEqual(new Map([
+      [domainScope.key, "old-rule"],
+      ["unrelated.example.com", "unrelated-rule"],
+    ]));
+    expect(result.rules.get("unrelated.example.com")).toBe("unrelated-rule");
+    expect(result.rules.get(domainScope.key)).toBe(createIconRule(domainScope, "icon.png", 1));
+    expect(result.rules.get(secondScope.key)).toBe(createIconRule(secondScope, "second-icon.png", 1));
+  });
+
+  it("reports no change when a full reconcile matches the previous map", () => {
+    const rule = createIconRule(domainScope, "icon.png", 1);
+    const previous = new Map([[domainScope.key, rule]]);
+    const result = reconcilePresentRules({
+      discovery: [domainScope],
+      context: context({ cache: { [domainScope.key]: entry() } }),
+      previous,
       full: true,
     });
     expect(result.changed).toBe(false);
+    expect(result.rules).not.toBe(previous);
     expect(result.rules.get("example.com")).toBe(rule);
   });
 

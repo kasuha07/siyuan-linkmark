@@ -12,10 +12,17 @@ repeatable way to measure discovery, rule reconciliation, or stylesheet
 publication in a real Frontend client.
 
 The absence of browser automation means wall-clock performance cannot be a
-stable CI acceptance gate. Without a development-only trace, a standard manual
-scenario, and an explicit baseline-first stop condition, performance work would
-either rely on impressions or introduce complexity without evidence that it
-improves Editor responsiveness.
+stable CI acceptance gate. The development-only trace and standard manual
+scenario make measurement available when an optimization needs it, but making
+manual baseline and candidate sessions mandatory for every optimization would
+also block low-risk improvements whose reduced work can be established from
+the algorithm and whose behavior can be locked by automated tests.
+
+Local Present-scope reconciliation currently copies the complete Icon rule map
+before it knows whether one rule changed. Ordinary input in a region with no
+links therefore performs an O(Present scopes) Map copy even though local
+discovery produces no rule and the published stylesheet remains unchanged.
+This defeats part of the intended scaling benefit of local discovery.
 
 ## Solution
 
@@ -28,24 +35,25 @@ the trace to receive one automatic console summary. Development profiling uses
 a process-local Frontend cache view containing 10,000 fixture entries; it never
 mutates or replaces the Cache authority's data.
 
-The trace reports enough evidence to compare the current baseline with a
-candidate optimization: incremental-interaction sample count and P95 execution
+The trace reports enough evidence to compare a baseline with a candidate when
+profiling is warranted: incremental-interaction sample count and P95 execution
 time, the slowest Full discovery, and the slowest Rule freshness interval. The
 manual targets are an Incremental interaction P95 of at most 8 milliseconds, a
 Full discovery of at most 50 milliseconds, and Rule freshness of at most 300
-milliseconds. These values are profiling targets, not CI gates or promises
-across devices.
+milliseconds. These values are optional profiling targets, not CI gates or
+promises across devices.
 
 Automated tests lock the structural properties that make those targets
 plausible: ordinary input remains locally scoped, repeated work is coalesced,
 one batch publishes rules at most once, and rule computation scales with
-Present scopes rather than the complete Frontend cache view. Runtime code is
-changed only after the baseline identifies a concrete hotspot. A candidate
-optimization is retained only when it improves a key metric by at least 20
-percent in the same recorded environment without regressing the other targets
-or existing behavior. If the baseline already meets the targets and no such
-hotspot exists, diagnostic support, structural coverage, and the research
-record are a complete outcome.
+Present scopes rather than the complete Frontend cache view. Low-risk
+structural optimizations may proceed without manual measurement when they
+provably remove work, add no persistent derived state, and preserve behavior
+through automated checks. Higher-risk changes involving new indexes, copied
+state, scheduling semantics, or material memory-for-CPU trade-offs still
+require profiling evidence. Local reconciliation uses streaming copy-on-write:
+it returns the previous Map when no effective upsert exists and copies only
+when the first rule actually changes.
 
 ## User Stories
 
@@ -72,18 +80,29 @@ record are a complete outcome.
 21. As a maintainer, I want the trace state bounded, so that collecting a longer session cannot itself cause an unbounded memory increase.
 22. As a maintainer, I want structural tests instead of CI timing assertions, so that slower test hosts do not produce false failures.
 23. As a maintainer, I want the standard fixture to prove local discovery, work coalescing, single publication per batch, and Present-scope-bounded reconciliation, so that automated coverage protects the intended algorithmic shape.
-24. As a maintainer, I want baseline and candidate measurements recorded with the SiYuan, Chromium, Linkmark, device, and source revision details, so that a claimed improvement can be interpreted and reproduced.
-25. As a maintainer, I want a candidate optimization to improve a key metric by at least 20 percent in the same environment, so that code complexity is justified by evidence rather than measurement noise.
-26. As a maintainer, I want a baseline that already meets every target to permit no runtime optimization, so that performance work does not become mandatory churn.
-27. As a maintainer, I want a persistent DOM index considered only after profiling proves Full discovery remains a bottleneck, so that MutationObserver state complexity is not introduced speculatively.
-28. As a maintainer, I want any new performance-derived production state to scale with Present scopes and target at most 5 MiB in the standard scenario, so that CPU improvements do not copy the complete Cache or create unbounded memory growth.
-29. As a maintainer, I want the full TypeScript, ESLint, Vitest, build, and package checks to remain green, so that diagnostic work does not weaken the marketplace payload.
+24. As a maintainer making a measured performance claim, I want baseline and candidate measurements recorded with the SiYuan, Chromium, Linkmark, device, and source revision details, so that the claim can be interpreted and reproduced.
+25. As a maintainer, I want low-risk structural optimizations to proceed from algorithmic evidence and automated behavior checks, so that obvious reductions in work do not depend on manual profiling ceremony.
+26. As a maintainer, I want changes that add indexes, copied state, scheduling semantics, or material memory-for-CPU trade-offs to require profiling, so that complex optimizations remain evidence-backed.
+27. As a maintainer, I want unmeasured optimizations described only in terms of proven complexity or work reduction, so that the project does not imply an unobserved P95 improvement.
+28. As a maintainer, I want a persistent DOM index considered only after profiling proves Full discovery remains a bottleneck, so that MutationObserver state complexity is not introduced speculatively.
+29. As a maintainer, I want any new performance-derived production state to scale with Present scopes and target at most 5 MiB in the standard scenario, so that CPU improvements do not copy the complete Cache or create unbounded memory growth.
+30. As a user typing in a region with no links, I want local reconciliation to reuse the existing Icon rule map, so that unrelated Present scopes do not create avoidable copying work.
+31. As a user editing a link whose Icon rule is already current, I want local reconciliation to reuse the existing Icon rule map, so that a no-op scan stays proportional to the locally discovered scopes.
+32. As a user adding or changing a link, I want local reconciliation to copy only when the first effective rule upsert is found, so that changed rules remain isolated without paying the copy cost on every input.
+33. As a maintainer, I want a changed local reconciliation to preserve all previous rules outside the scanned region without mutating its input Map, so that local discovery retains its add-or-update-only contract.
+34. As a maintainer, I want Full reconciliation to keep its complete replacement and departed-scope eviction behavior, so that optimizing ordinary input cannot leave stale Icon rules behind.
+35. As a maintainer, I want the full TypeScript, ESLint, Vitest, build, and package checks to remain green, so that performance work does not weaken the marketplace payload.
 
 ## Implementation Decisions
 
 - The work is limited to the Interactive render pipeline: editor mutation scheduling, link discovery, Icon rule reconciliation, and runtime stylesheet publication. Plugin startup, Cache snapshot transport, favicon resolution, network retrieval, Cache persistence, and private icon serving are non-regression boundaries rather than optimization targets.
-- Baseline measurement precedes runtime optimization. The first implementation slice provides the development diagnostic, the generated scenario, structural coverage, and a recorded baseline before choosing a hotspot.
+- Performance evidence is proportional to change risk. A structural optimization may proceed without manual profiling when the reduced work follows directly from the algorithm, it adds no persistent derived state, and automated tests preserve the affected behavior. Changes that add indexes, copied state, scheduling semantics, batching semantics, or material memory-for-CPU trade-offs require a recorded profile before selection and retention.
 - The existing Frontend render-work boundary is the primary automated seam. It already represents discovery requests, rule rebuild requests, publication requests, work coalescing, and one externally visible flush. Present-scope rule reconciliation remains its collaborating pure policy seam rather than being replaced by a lower-level test surface.
+- Local Present-scope reconciliation processes discovery as a stream rather than first constructing a temporary computed Map. It begins with the previous Icon rule Map and evaluates each locally discovered scope independently.
+- A local candidate that produces no usable rule or produces the rule already stored for its key is a no-op. If every candidate is a no-op, reconciliation returns the exact previous Map and reports no change.
+- On the first effective local upsert, reconciliation copies the previous Map once, applies that upsert, and applies all later effective upserts to the copy. It returns the new Map and reports a change. The input Map is never mutated, and rules outside the locally scanned region remain present.
+- The reconciliation input contract requires an actual Map rather than an arbitrary ReadonlyMap because unchanged local reconciliation intentionally returns the same Map object. This is an internal ownership contract; callers may continue replacing their current rule Map with the returned result.
+- Full reconciliation is unchanged. It computes the complete rule Map from current discovery, removes scopes absent from that discovery, and does not adopt the local copy-on-write identity contract.
 - Frontend performance trace is available only in development builds. It is default-off, process-local, never persisted, and reset when the Frontend client reloads.
 - Development settings expose one Frontend performance trace switch alongside the existing development Resolution trace surface. Enabling it starts a fresh session; disabling it prints one summary to the developer console and clears all samples and fixture state.
 - Trace timing uses a monotonic Frontend clock. The measured stages distinguish discovery, Icon rule reconciliation, stylesheet publication, total incremental execution, Full discovery execution, and the interval from stable editor input to applicable rule publication.
@@ -94,15 +113,14 @@ record are a complete outcome.
 - Enabling the development performance scenario supplies a read-only, process-local Frontend cache overlay of exactly 10,000 fresh current entries. The 500 Present scopes resolve through that view, while the remaining entries exercise large-cache isolation. The render pipeline reads the overlay as a composite view that additionally surfaces the real cache's pinned entries, so Pinned precedence and pinned-domain route suppression remain invariant while profiling; unpinned real entries stay invisible to the pipeline.
 - The fixture overlay exists only at the Interactive render pipeline's cache-read boundary. It must not overwrite the adopted Cache snapshot, change Cache revision or Cache epoch, affect cache counts or management UI, invoke Kernel RPC, suppress or create real cache mutations, persist data, or survive trace disablement or Frontend reload. While the trace is active, the pipeline's automatic scan never issues Cache authority RPC: scopes absent from the view are skipped and stale entries are not expired, mirroring the paused automatic-fetch decision mode.
 - Disabling the trace removes the fixture overlay and requests the ordinary reconciliation needed to restore rendering from the real Frontend cache state.
-- The manual profiling flow remains deliberately short: generate and import the document, enable the trace, perform approximately 30 seconds of ordinary input, link paste, and link deletion, then disable the trace and retain the resulting summary.
+- When profiling is selected, the manual flow remains deliberately short: generate and import the document, enable the trace, perform approximately 30 seconds of ordinary input, link paste, and link deletion, then disable the trace and retain the resulting summary.
 - Incremental interaction targets P95 execution time of at most 8 milliseconds, excluding deliberate scheduling delay. Full discovery targets at most 50 milliseconds of main-thread execution. Rule freshness targets publication within 300 milliseconds after input becomes stable, including scheduling delay.
 - The targets are manual profiling goals only. They are interpreted against the environment recorded with the result and are not cross-device guarantees, automated acceptance budgets, or reasons to add flaky timing assertions.
 - Any performance-derived state added to production must scale with Present scopes rather than the complete Frontend cache. If such state is introduced, one manual heap check records whether its additional memory remains within the 5 MiB target in the standard scenario.
-- A persistent DOM index, element-to-scope map, or scope reference count is not a predetermined solution. It becomes a candidate only when the baseline shows Full discovery is a material hotspot that remains above target after simpler measured improvements.
+- A persistent DOM index, element-to-scope map, or scope reference count is a high-risk optimization because it adds derived state and MutationObserver coordination. It becomes a candidate only when profiling shows Full discovery is a material hotspot that remains after simpler improvements.
 - Prefer deletion, existing work coalescing, existing rule maps, and narrower discovery before new state or abstractions. No new dependency is permitted for instrumentation, fixture generation, percentile calculation, or optimization.
-- A runtime optimization is retained only when the same manual scenario and recorded environment show at least 20 percent improvement in a key metric, every other profiling target remains non-regressed, and automated behavior checks remain green.
-- If the baseline already meets all profiling targets and no candidate clears the improvement threshold, the diagnostic, fixture generator, structural tests, glossary, SPEC, and research record complete the work without a runtime optimization.
-- The performance research record contains the source revision, Linkmark version, SiYuan version, Chromium version, device summary, scenario confirmation, baseline summary, any candidate summary, identified hotspot, retained or rejected change, and explicit limitations. It is evidence for this optimization pass, not a permanent platform benchmark.
+- A low-risk unmeasured optimization may be retained when its structural reduction is explicit, focused automated behavior checks and repository validation remain green, and it introduces no speculative abstraction or state. Documentation must not translate that structural evidence into a numeric latency or percentile claim.
+- A measured performance claim requires a research record containing the source revision, Linkmark version, SiYuan version, Chromium version, device summary, scenario confirmation, baseline summary, candidate summary, identified hotspot, retained or rejected change, and explicit limitations. It is evidence for that optimization pass, not a permanent platform benchmark.
 - Existing rendering behavior remains invariant: supported link elements and URL forms, domain and route selector precedence, Display preference sizing, Pinned icon precedence, freshness policy, paused legacy monograms, fail-open behavior, Cache change reconciliation, and removal of rules for scopes that are no longer Present.
 
 ## Testing Decisions
@@ -112,6 +130,9 @@ record are a complete outcome.
 - Ordinary input and a newly added link must produce local discovery only. Tests prove the mounted editor host is not selected as a fallback whole-document region and that nested or repeated local regions are reduced to the narrowest useful set.
 - Repeated mutations in one scheduling window must coalesce into one work batch. A batch may rebuild, discover, and publish as required, but it publishes the runtime stylesheet at most once.
 - A Full discovery supersedes pending local discovery and evicts Icon rules for Link scopes no longer Present. Local discovery only adds or updates rules for its regions and does not accidentally evict scopes outside those regions.
+- Present-scope reconciliation tests treat returned Map identity as observable behavior. A local reconcile with empty discovery and a populated previous Map returns that same Map and reports no change; a local reconcile whose computed rule already matches does the same.
+- A local reconcile with one or more effective upserts returns a different Map, leaves the previous Map unchanged, retains unrelated previous rules, and applies every upsert after the first change. These checks prove copy-on-write isolation without asserting private allocation counters or loop structure.
+- Full reconciliation tests continue to prove complete replacement, equality reporting, and departed-scope eviction independently of the local identity contract.
 - Present-scope reconciliation against 10,000 cache entries must produce rules only for the 500 discovered scopes. Tests prove the behavior through lookup and output cardinality rather than inspecting loop counters or private collections.
 - Tests preserve domain and route-rule ordering, pinned-domain suppression of route rules, fresh/current entry filtering, paused legacy-monogram behavior, and no rule for missing or unusable entries.
 - Development trace tests use a controllable monotonic clock and the same high-level flush seam. They prove session reset, bounded samples, correct P95 and maxima, one summary on disable, and complete clearing before a later session.
@@ -120,7 +141,7 @@ record are a complete outcome.
 - Build-boundary tests extend the existing development-versus-production prior art. They prove that development artifacts contain the Frontend performance trace control and fixture surface while production artifacts omit them.
 - The fixture generator has a deterministic output test or package check that proves exactly 2,000 links and 500 distinct Link scopes without committing the generated Markdown artifact.
 - Existing Frontend render-work tests, Present-scope rule tests with a 10,000-entry cache, frontend cache-state tests, and production build-boundary tests are the prior art and should be extended rather than replaced.
-- Manual profiling is the only evidence for the 8 millisecond, 50 millisecond, 300 millisecond, 5 MiB, and 20 percent targets. The research record must distinguish measured values from structural test evidence.
+- Manual profiling is the only evidence for the 8 millisecond, 50 millisecond, 300 millisecond, and 5 MiB targets. Structural tests may prove reduced algorithmic work and state bounds, but they do not prove elapsed-time or percentile improvements.
 - Run the repository's full validation command after implementation. It must pass TypeScript validation, ESLint with zero warnings, and the Vitest suite. The production build and package-content validation must still produce and accept the complete marketplace payload.
 
 ## Out of Scope
@@ -132,7 +153,8 @@ record are a complete outcome.
 - Persisting performance trace sessions, fixture cache entries, generated documents, profiling history, or diagnostic settings.
 - Writing fixture data into the Cache authority, workspace plugin storage, SiYuan documents automatically, or any real cache-management surface.
 - Production telemetry, analytics, remote logging, a user-facing performance dashboard, external profiling service, or a new dependency.
-- Committing to a persistent DOM index before measurement, or retaining an optimization that misses the 20 percent improvement threshold.
+- Committing to a persistent DOM index or other high-risk derived state before profiling identifies the corresponding hotspot.
+- Claiming a numeric P95, elapsed-time, or percentage improvement for an optimization that was not manually measured in a recorded environment.
 - General UI redesign, third-party link-icon detection or compatibility, static icon libraries, release tagging, version changes, publication, and unrelated refactors.
 
 ## Further Notes
@@ -140,5 +162,5 @@ record are a complete outcome.
 - Editor responsiveness is the primary performance outcome. Favicon download speed and resolver throughput are intentionally not proxies for it.
 - The 250 millisecond discovery debounce and subsequent render batch are part of the current Rule freshness behavior. They may change only when the measured result remains within the 300 millisecond target and coalescing behavior is preserved.
 - The 5 MiB target applies only if an optimization adds production Frontend state. The development-only 10,000-entry fixture and bounded trace samples are diagnostic inputs and are reported separately.
-- No ADR is required at specification time. The diagnostic and baseline-first workflow are reversible, and a persistent DOM index has not been selected. If later profiling justifies a hard-to-reverse architecture change, that decision must be evaluated independently against the repository's ADR criteria.
+- No ADR is required for the risk-proportional evidence policy or local copy-on-write optimization because both are reversible and add no durable architectural state. If later profiling justifies a hard-to-reverse architecture change, that decision must be evaluated independently against the repository's ADR criteria.
 - This SPEC is intentionally local. Issue-tracker publication and the `ready-for-agent` label are not performed because the requested outcome is a repository-local specification.

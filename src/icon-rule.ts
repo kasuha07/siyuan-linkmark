@@ -33,24 +33,28 @@ export type PresentRuleReconcileResult = {
 export function reconcilePresentRules(input: {
   discovery: Iterable<LinkScope>;
   context: PresentRuleContext;
-  previous: ReadonlyMap<string, string>;
+  previous: Map<string, string>;
   full: boolean;
 }): PresentRuleReconcileResult {
+  if (!input.full) {
+    let rules = input.previous;
+    let changed = false;
+    for (const scope of input.discovery) {
+      const candidate = presentRuleFor(scope, input.context);
+      if (!candidate || rules.get(candidate.key) === candidate.rule) continue;
+      if (!changed) {
+        rules = new Map(input.previous);
+        changed = true;
+      }
+      rules.set(candidate.key, candidate.rule);
+    }
+    return { rules, changed };
+  }
+
   const computed = new Map<string, string>();
   for (const scope of input.discovery) {
     const rule = presentRuleFor(scope, input.context);
     if (rule) computed.set(rule.key, rule.rule);
-  }
-  if (!input.full) {
-    let changed = false;
-    const rules = new Map(input.previous);
-    for (const [key, rule] of computed) {
-      if (rules.get(key) !== rule) {
-        rules.set(key, rule);
-        changed = true;
-      }
-    }
-    return { rules, changed };
   }
   let changed = input.previous.size !== computed.size;
   if (!changed) {
