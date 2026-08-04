@@ -41,16 +41,17 @@ describe("perfScenarioScopes", () => {
 });
 
 describe("perfScenarioLinkUrls", () => {
-  it("contains 2,000 links across 500 distinct Link scopes with four copies each", () => {
+  it("contains 2,000 links across 500 distinct hrefs and Link scopes with four copies each", () => {
     const urls = perfScenarioLinkUrls();
     expect(urls).toHaveLength(PERF_LINK_COUNT);
     const scopeKeys = urls.map((url) => scopeForUrl(url)?.key).filter((key): key is string => Boolean(key));
     expect(new Set(scopeKeys).size).toBe(PERF_SCOPE_COUNT);
+    expect(new Set(urls).size).toBe(PERF_SCOPE_COUNT);
     const counts = new Map<string, number>();
     for (const key of scopeKeys) counts.set(key, (counts.get(key) ?? 0) + 1);
     for (const count of counts.values()) expect(count).toBe(4);
-    expect(urls[0]).toBe("https://perf-site-0.example.dev/ref-0");
-    expect(urls[urls.length - 1]).toBe("https://nocode.host/p00019/ref-3");
+    expect(urls[0]).toBe("https://perf-site-0.example.dev/ref");
+    expect(urls[urls.length - 1]).toBe("https://nocode.host/p00019");
   });
 });
 

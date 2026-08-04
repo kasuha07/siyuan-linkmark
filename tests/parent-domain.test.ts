@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { parse } from "tldts";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   InvalidShareDomainError,
   INVALID_SHARE_DOMAIN,
@@ -9,6 +10,50 @@ import {
   shareEligibilityOf,
   SHARED_PIN_EXCLUSIONS,
 } from "../src/parent-domain";
+
+vi.mock("tldts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("tldts")>();
+  return { ...actual, parse: vi.fn(actual.parse) };
+});
+
+const parseMock = vi.mocked(parse);
+
+beforeEach(() => parseMock.mockClear());
+
+describe("host classification cache", () => {
+  it("reuses eligible, ineligible, and invalid original hostname inputs", () => {
+    expect(shareEligibilityOf("memo-eligible.example.dev")).toEqual({
+      eligible: true,
+      shareDomain: "example.dev",
+    });
+    expect(parentDomainOf("memo-eligible.example.dev")).toBe("example.dev");
+    expect(shareEligibilityOf("memo-private.github.io")).toEqual({
+      eligible: false,
+      reason: "private-suffix-family",
+    });
+    expect(parentDomainOf("memo-private.github.io")).toBeUndefined();
+    expect(shareEligibilityOf("memo-invalid-unknownxyz")).toEqual({ eligible: false, reason: "public-suffix" });
+    expect(shareDomainFor("memo-invalid-unknownxyz")).toBeNull();
+
+    expect(parseMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("refreshes recency and evicts the least-recent input after 1,024 entries", () => {
+    const retained = "lru-retained.example.dev";
+    expect(parentDomainOf(retained)).toBe("example.dev");
+    for (let index = 0; index < 1_023; index += 1) {
+      parentDomainOf(`lru-fill-${index}.example.dev`);
+    }
+    expect(parentDomainOf(retained)).toBe("example.dev");
+    parentDomainOf("lru-overflow.example.dev");
+    expect(parentDomainOf(retained)).toBe("example.dev");
+    expect(parseMock.mock.calls.filter(([hostname]) => hostname === retained)).toHaveLength(1);
+
+    const evicted = "lru-fill-0.example.dev";
+    parentDomainOf(evicted);
+    expect(parseMock.mock.calls.filter(([hostname]) => hostname === evicted)).toHaveLength(2);
+  });
+});
 
 describe("parentDomainOf", () => {
   it("returns no parent for registrable domains without one", () => {

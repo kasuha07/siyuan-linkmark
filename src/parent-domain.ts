@@ -90,6 +90,7 @@ export const SHARED_PIN_EXCLUSIONS: ReadonlyArray<{
 ];
 
 const EXCLUDED_BOUNDARIES = new Set(SHARED_PIN_EXCLUSIONS.map((entry) => entry.boundary));
+const HOST_CLASSIFICATION_CACHE_LIMIT = 1_024;
 
 /**
  * The shared domain-scope classification. It normalizes the hostname
@@ -103,6 +104,8 @@ type HostClassification =
   | { kind: "eligible"; normalized: string; registrable: string }
   | { kind: "ineligible-share"; normalized: string; registrable: string; reason: "private-suffix-family" | "reviewed-exclusion" }
   | { kind: "invalid"; normalized: string; reason: "ip-address" | "special-use" | "malformed" | "public-suffix" | "no-registrable-domain" };
+
+const hostClassifications = new Map<string, HostClassification>();
 
 /**
  * The single PSL-derived eTLD+1 of a hostname, in normalized form, or null
@@ -170,6 +173,22 @@ export function pickerScopeChoices(scope: { domain: string; routeKey?: string })
 }
 
 function classifyHostname(hostname: string): HostClassification {
+  const cached = hostClassifications.get(hostname);
+  if (cached) {
+    hostClassifications.delete(hostname);
+    hostClassifications.set(hostname, cached);
+    return cached;
+  }
+  const classified = classifyHostnameUncached(hostname);
+  hostClassifications.set(hostname, classified);
+  if (hostClassifications.size > HOST_CLASSIFICATION_CACHE_LIMIT) {
+    const leastRecent = hostClassifications.keys().next().value;
+    if (leastRecent !== undefined) hostClassifications.delete(leastRecent);
+  }
+  return classified;
+}
+
+function classifyHostnameUncached(hostname: string): HostClassification {
   const normalized = normalizeHostname(hostname);
   if (!normalized) return { kind: "invalid", normalized: hostname.trim().toLowerCase(), reason: "malformed" };
   const parsed = parse(normalized, TLDTS_OPTIONS);

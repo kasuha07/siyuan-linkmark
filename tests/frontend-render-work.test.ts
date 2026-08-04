@@ -213,13 +213,15 @@ describe("FrontendRenderWorkQueue", () => {
   });
 
   it("evicts departed scopes on a full discovery without local scans touching other regions", () => {
+    const now = Date.now();
     const context: PresentBindingContext = {
       cache: {
-        "a.example.dev": { url: "icon-a.png", fetchedAt: Date.now() - 1_000, resolverVersion: RESOLVER_VERSION },
-        "b.example.dev": { url: "icon-b.png", fetchedAt: Date.now() - 1_000, resolverVersion: RESOLVER_VERSION },
+        "a.example.dev": { url: "icon-a.png", fetchedAt: now - 1_000, resolverVersion: RESOLVER_VERSION },
+        "b.example.dev": { url: "icon-b.png", fetchedAt: now - 1_000, resolverVersion: RESOLVER_VERSION },
       },
       cacheDays: 30,
       pauseAutomaticFetch: false,
+      now,
     };
     const aScope = { key: "a.example.dev", domain: "a.example.dev" };
     const bScope = { key: "b.example.dev", domain: "b.example.dev" };

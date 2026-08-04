@@ -13,6 +13,7 @@ export type PresentBindingContext = {
   cache: Record<string, CacheEntry>;
   cacheDays: number;
   pauseAutomaticFetch: boolean;
+  now: number;
 };
 
 export type PresentIconBinding = {
@@ -47,7 +48,7 @@ export function presentIconBindingFor(
     && entry.resolverVersion !== RESOLVER_VERSION;
   const current = entry.pinned || entry.resolverVersion === RESOLVER_VERSION || pausedLegacyMonogram;
   if (!current) return undefined;
-  const fresh = context.pauseAutomaticFetch || isCacheEntryFresh(entry, context.cacheDays);
+  const fresh = context.pauseAutomaticFetch || isCacheEntryFresh(entry, context.cacheDays, context.now);
   if (!fresh) return undefined;
   return { key: cacheKey, iconUrl: entry.url };
 }

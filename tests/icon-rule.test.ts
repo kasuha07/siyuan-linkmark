@@ -41,6 +41,7 @@ describe("Present icon bindings", () => {
     cache: {},
     cacheDays: 30,
     pauseAutomaticFetch: false,
+    now,
     ...overrides,
   });
   const entry = (overrides: Record<string, unknown> = {}) => ({
@@ -69,6 +70,29 @@ describe("Present icon bindings", () => {
     ]) {
       expect(presentIconBindingFor(domainScope, context({ cache }))).toBeUndefined();
     }
+  });
+
+  it("uses one supplied evaluation time for every freshness decision", () => {
+    const first = { key: "first.example.dev", domain: "first.example.dev" };
+    const second = { key: "second.example.dev", domain: "second.example.dev" };
+    const evaluationTime = 10_000;
+    const result = reconcilePresentBindings({
+      discovery: [first, second],
+      context: context({
+        now: evaluationTime,
+        cacheDays: 1,
+        cache: {
+          [first.key]: entry({ domain: first.domain, fetchedAt: evaluationTime - 1, url: "first.png" }),
+          [second.key]: entry({ domain: second.domain, fetchedAt: evaluationTime - 1, url: "second.png" }),
+        },
+      }),
+      previous: new Map(),
+    });
+
+    expect(result.bindings).toEqual(new Map([
+      [first.key, "first.png"],
+      [second.key, "second.png"],
+    ]));
   });
 
   it("keeps stale Pinned entries and paused legacy monograms", () => {
@@ -124,6 +148,27 @@ describe("Present icon bindings", () => {
       after,
       changedKeys: [routeScope.key],
     })).toEqual({ kind: "targeted", scopes: [routeScope] });
+  });
+
+  it("uses one evaluation time for a before-and-after freshness comparison", () => {
+    const evaluationTime = 86_400_001;
+    const before = context({
+      now: evaluationTime,
+      cacheDays: 1,
+      cache: { [domainScope.key]: entry({ fetchedAt: 0 }) },
+    });
+    const after = context({
+      now: evaluationTime,
+      cacheDays: 1,
+      cache: { [domainScope.key]: entry({ fetchedAt: 1 }) },
+    });
+
+    expect(planBindingSynchronization({
+      scopes: [domainScope],
+      before,
+      after,
+      changedKeys: [domainScope.key],
+    })).toEqual({ kind: "targeted", scopes: [domainScope] });
   });
 
   it("plans Full discovery for Pinned precedence and broad changes", () => {

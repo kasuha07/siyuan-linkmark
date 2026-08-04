@@ -6,6 +6,12 @@ import { planScanDecision, type CacheEntry } from "./frontend-cache-state";
 import { IconPickerDialog } from "./frontend-icon-picker";
 import { showRefreshResult } from "./frontend-labels";
 import {
+  discoverLinks,
+  linkElementsIn,
+  linkHref,
+  type LinkDiscoveryCandidate,
+} from "./frontend-link-discovery";
+import {
   LINK_CONTENT_OBSERVER_OPTIONS,
   LINK_IDENTITY_ATTRIBUTES,
   planMutationDiscovery,
@@ -32,7 +38,7 @@ import {
   type PresentBindingContext,
 } from "./icon-rule";
 import { LINKMARK_BINDING_ATTRIBUTE, RuntimeIconBindingPublisher } from "./runtime-icon-bindings";
-import { scopeForUrl, scopeFromCacheKey, type LinkScope } from "./url-scope";
+import { scopeFromCacheKey, type LinkScope } from "./url-scope";
 
 const DISPLAY_SETTINGS_FILE = "display-settings-v2.json";
 const RUNTIME_STYLE_ID = "siyuan-linkmark-runtime-style";
@@ -243,28 +249,33 @@ export default class LinkmarkPlugin extends Plugin {
   private currentDocumentRoot() {
     const active = document.querySelector<HTMLElement>(".layout__wnd--active .protyle-wysiwyg");
     if (active) return active;
-    return [...document.querySelectorAll<HTMLElement>(".protyle-wysiwyg")]
-      .find((element) => element.offsetParent !== null) ?? null;
+    for (const element of document.querySelectorAll<HTMLElement>(".protyle-wysiwyg")) {
+      if (element.offsetParent !== null) return element;
+    }
+    return null;
   }
 
   private collectDocumentDomains(root?: Element | null) {
-    const domains = new Map<string, { scope: LinkScope; targetUrl: string; elements: HTMLElement[] }>();
-    const roots = root
-      ? [root]
-      : [...this.contentObservers.containers()].filter((container) => container.isConnected);
-    const elements = roots.flatMap((container) => [
-      ...(container.matches(LINK_SELECTOR) ? [container as HTMLElement] : []),
-      ...container.querySelectorAll<HTMLElement>(LINK_SELECTOR),
-    ]);
-    for (const element of elements) {
-      const href = element.dataset.href ?? element.getAttribute("href") ?? "";
-      const scope = scopeForUrl(href);
-      if (!scope) continue;
-      const existing = domains.get(scope.key);
-      if (existing) existing.elements.push(element);
-      else domains.set(scope.key, { scope, targetUrl: href, elements: [element] });
+    return discoverLinks({
+      candidates: this.linkCandidates(root),
+      onElement: () => undefined,
+    });
+  }
+
+  private *linkCandidates(root?: Element | null): IterableIterator<LinkDiscoveryCandidate<HTMLElement>> {
+    if (root) {
+      yield* this.linkCandidatesIn(root);
+      return;
     }
-    return domains;
+    for (const container of this.contentObservers.containers()) {
+      if (container.isConnected) yield* this.linkCandidatesIn(container);
+    }
+  }
+
+  private *linkCandidatesIn(container: Element): IterableIterator<LinkDiscoveryCandidate<HTMLElement>> {
+    for (const element of linkElementsIn(container, LINK_SELECTOR)) {
+      yield { element, href: linkHref(element) };
+    }
   }
 
   private currentDocumentTargetUrl(scopeKey: string) {
@@ -445,15 +456,31 @@ export default class LinkmarkPlugin extends Plugin {
   private scanLinks(root?: Element | null) {
     if (!this.settings.enabled) return false;
     const full = !root;
-    const domains = this.collectDocumentDomains(root);
     if (full) {
-      this.presentScopes = new Map([...domains].map(([key, { scope }]) => [key, scope]));
       this.pendingMarkerBindings.clear();
       this.pendingFullMarkerReconcile = true;
+    }
+    const cache = this.client.entries();
+    const cacheDays = this.settings.cacheDays;
+    const pauseAutomaticFetch = Boolean(this.settings.pauseAutomaticFetch);
+    const now = Date.now();
+    const context: PresentBindingContext = { cache, cacheDays, pauseAutomaticFetch, now };
+    let markerChanged = false;
+    const domains = discoverLinks({
+      candidates: this.linkCandidates(root),
+      onElement: (element, scope) => {
+        const bindingKey = scope ? presentIconBindingFor(scope, context)?.key : undefined;
+        const token = this.bindingPublisher.tokenFor(bindingKey);
+        this.pendingMarkerBindings.set(element, bindingKey);
+        if ((element.getAttribute(LINKMARK_BINDING_ATTRIBUTE) ?? undefined) !== token) markerChanged = true;
+      },
+    });
+    if (full) {
+      this.presentScopes = new Map();
+      for (const [key, { scope }] of domains) this.presentScopes.set(key, scope);
     } else {
       for (const [key, { scope }] of domains) this.presentScopes.set(key, scope);
     }
-    const context = this.presentBindingContext();
     const reconciled = reconcilePresentBindings({
       discovery: this.presentScopes.values(),
       context,
@@ -461,24 +488,16 @@ export default class LinkmarkPlugin extends Plugin {
     });
     this.iconBindings = reconciled.bindings;
     const publisherChanged = this.bindingPublisher.replaceBindings(this.iconBindings, this.settings.iconSize);
-    let markerChanged = false;
-    for (const { scope, elements } of domains.values()) {
-      const bindingKey = presentIconBindingFor(scope, context)?.key;
-      const token = this.bindingPublisher.tokenFor(bindingKey);
-      for (const element of elements) {
-        this.pendingMarkerBindings.set(element, bindingKey);
-        if (element.getAttribute(LINKMARK_BINDING_ATTRIBUTE) !== token) markerChanged = true;
-      }
-    }
 
     domains.forEach(({ scope, targetUrl }, key) => {
       const decision = planScanDecision({
         scopeKey: key,
         scope,
-        cache: this.client.entries(),
-        pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
-        cacheDays: this.settings.cacheDays,
+        cache,
+        pauseAutomaticFetch,
+        cacheDays,
         failedAt: this.client.failedAt(key),
+        now,
       });
       if (decision.action === "expire") {
         void this.client.expire(decision.cacheKey, decision.entry, () => this.scheduleScan());
@@ -512,20 +531,22 @@ export default class LinkmarkPlugin extends Plugin {
     this.bindingPublisher.replaceBindings(this.iconBindings, this.settings.iconSize);
   }
 
-  private presentBindingContext(cache = this.client.entries()): PresentBindingContext {
+  private presentBindingContext(cache = this.client.entries(), now = Date.now()): PresentBindingContext {
     return {
       cache,
       cacheDays: this.settings.cacheDays,
       pauseAutomaticFetch: Boolean(this.settings.pauseAutomaticFetch),
+      now,
     };
   }
 
   private synchronizeCacheBindings(previousCache: Record<string, CacheEntry>, changedKeys: Iterable<string>) {
     if (!this.settings.enabled) return;
+    const now = Date.now();
     const plan = planBindingSynchronization({
       scopes: this.presentScopes.values(),
-      before: this.presentBindingContext(previousCache),
-      after: this.presentBindingContext(),
+      before: this.presentBindingContext(previousCache, now),
+      after: this.presentBindingContext(this.client.entries(), now),
       changedKeys,
     });
     if (plan.kind === "rules") {

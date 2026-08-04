@@ -53,6 +53,46 @@ profiling tools against the real Frontend cache state.
 - Structural optimizations may proceed without manual timing when the reduced work follows from the algorithm, no persistent state is added, and behavior remains covered.
 - Documentation must not translate structural evidence into an unmeasured latency, percentile, or percentage claim.
 
+### Approved follow-up: scan simplification
+
+The following design is approved but not yet implemented. It reduces structural
+work in Link discovery without changing Link scope identity, Runtime icon
+binding, Cache match precedence, refresh targeting, or automatic-fetch behavior.
+
+- Full and Local discovery iterate registered containers and each
+  `querySelectorAll()` result directly. They do not expand a `NodeList` into an
+  array.
+- One traversal aggregates unique Link scopes and collects element bindings.
+  `pendingMarkerBindings` remains the only batch-owned collection of element
+  references; discovery does not retain a per-scope `HTMLElement[]`, perform a
+  second DOM query, or create a persistent element index or reference count.
+- A scan-local `href -> LinkScope | null` cache ensures that each distinct href,
+  including an invalid href, is classified at most once in one discovery pass.
+  The cache is released when the pass ends.
+- Discovery order remains unchanged: registered-container order, a matching
+  root before its descendants, descendant DOM order, and `data-href` before
+  `href`. When different hrefs produce the same Link scope, the first valid href
+  remains its `targetUrl`.
+- One scan evaluation captures the Frontend Cache view reference, Cache policy
+  freshness window, automatic-fetch pause state, and current time once. The
+  Cache view is neither copied nor frozen; the synchronous, non-yielding scan
+  uses the captured reference for binding reconciliation, marker selection, and
+  scan decisions. A Cache before/after comparison likewise uses one time value.
+- `cachedIconForScope()` derives Shared-pin applicability through one
+  `shareEligibilityOf()` result. Exact Pinned, route-domain Pinned, Shared-pin,
+  exact automatic, and route-domain fallback precedence remains unchanged.
+- Host classification uses an independent module-local 1,024-entry LRU in each
+  Frontend or kernel runtime. The original hostname input is the key so a hit
+  skips both URL normalization and PSL classification; eligible and ineligible
+  results are cached. The cache is never persisted or shared across RPC.
+- Discovery does not add a scan-local `LinkScope -> CacheMatch` cache. Once host
+  classification is memoized, the remaining exact, domain, and Shared-pin
+  lookups stay as direct Cache view property reads.
+- A small stateless discovery function accepts an iterable of link elements and
+  hrefs, aggregates scopes and first target URLs, and reports each element for
+  Runtime binding. DOM ownership, scheduling, and persistent state remain in
+  the plugin composition root.
+
 ## Testing Decisions
 
 - The highest automated seam is one Frontend render-work flush supplied with a deterministic executor.
@@ -63,6 +103,24 @@ profiling tools against the real Frontend cache state.
 - The generator test proves exactly 2,000 links and 500 distinct scopes without committing the generated Markdown artifact.
 - Build-boundary and package tests prove no trace control, trace RPC, trace logger, or runtime performance fixture exists in development or production artifacts.
 - Manual profiling is the only evidence for the 8 millisecond, 50 millisecond, 300 millisecond, and 5 MiB targets.
+- The approved scan simplification does not require manual testing and does not
+  claim a measured latency improvement. Its acceptance evidence is deterministic
+  structural work reduction plus behavior equivalence.
+- The standard 2,000-link / 500-scope scenario proves that each of its 500
+  distinct hrefs is classified once while all 2,000 elements are reported once
+  for Runtime binding and exactly 500 Link scopes are aggregated.
+- Focused discovery tests cover repeated invalid hrefs, different hrefs sharing
+  one scope, first-target retention, root-before-descendant ordering, attribute
+  precedence, and null-result memoization.
+- Host-classification tests prove repeat-call reuse, caching of ineligible and
+  invalid results, LRU recency, and eviction at 1,024 entries without exposing
+  mutable cache state to production callers.
+- Cache-match and freshness tests preserve exact, route-domain, Shared-pin, and
+  automatic fallback precedence while proving that one evaluation time governs
+  a complete scan or before/after comparison.
+- Fresh implementation verification runs `npm run check` followed by
+  `npm run build`; no browser profiling session is part of this follow-up's
+  completion criteria.
 
 ## Out of Scope
 
@@ -70,6 +128,9 @@ profiling tools against the real Frontend cache state.
 - An in-app trace, runtime fixture overlay, diagnostic setting, telemetry, analytics, remote logging, or performance dashboard.
 - Changing Cache policy, Display preferences, Link scope identity, pinned-icon behavior, cache freshness, route precedence, automatic-fetch behavior, or fail-open rendering.
 - Committing to a persistent DOM index before profiling identifies Full discovery as a material hotspot.
+- A second DOM traversal, persistent href cache, persistent element collection,
+  scan-local Cache-match memo, or copied Frontend Cache view for the approved
+  scan simplification.
 - General UI redesign, release publication, version changes, or unrelated refactors.
 
 ## Further Notes

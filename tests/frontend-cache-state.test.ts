@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { shareDomainFor } from "../src/parent-domain";
+import { describe, expect, it, vi } from "vitest";
+import { shareDomainFor, shareEligibilityOf } from "../src/parent-domain";
 import {
   applyCacheChangeEvent,
   cacheBeforeChange,
@@ -9,6 +9,11 @@ import {
   planScanDecision,
   type CacheEntry,
 } from "../src/frontend-cache-state";
+
+vi.mock("../src/parent-domain", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/parent-domain")>();
+  return { ...actual, shareEligibilityOf: vi.fn(actual.shareEligibilityOf) };
+});
 
 function entry(partial: Partial<CacheEntry> = {}): CacheEntry {
   return { url: "https://cdn.example.com/icon.png", fetchedAt: 1_000_000, ...partial };
@@ -43,6 +48,18 @@ describe("shareDomainFor", () => {
 });
 
 describe("cachedIconForScope", () => {
+  it("derives shared-pin applicability from one eligibility result", () => {
+    const eligibility = vi.mocked(shareEligibilityOf);
+    eligibility.mockClear();
+    const cache = { "example.dev": entry({ pinned: true, includeSubdomains: true }) };
+
+    expect(cachedIconForScope(cache, {
+      key: "a.example.dev",
+      domain: "a.example.dev",
+    })?.cacheKey).toBe("example.dev");
+    expect(eligibility).toHaveBeenCalledOnce();
+  });
+
   it("prefers the exact pinned entry over every other candidate", () => {
     const cache = {
       [domainScope.key]: entry({ pinned: true }),

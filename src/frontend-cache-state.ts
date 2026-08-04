@@ -1,4 +1,4 @@
-import { isEligibleShareTarget, shareDomainFor } from "./parent-domain";
+import { shareEligibilityOf } from "./parent-domain";
 import type { LinkScope } from "./url-scope";
 
 export type CacheEntry = {
@@ -138,10 +138,12 @@ export function cachedIconForScope(cache: Record<string, CacheEntry>, scope: Lin
   // A shared pin is consulted only at the scope's own eligible eTLD+1: a
   // single hop that never climbs a parent chain and never re-enables a
   // legacy shared pin whose scope is no longer valid.
-  const shareDomain = shareDomainFor(scope.domain);
-  if (shareDomain && shareDomain !== scope.domain && isEligibleShareTarget(shareDomain)) {
-    const shared = cache[shareDomain];
-    if (shared?.pinned && shared.includeSubdomains) return { cacheKey: shareDomain, entry: shared };
+  const shareEligibility = shareEligibilityOf(scope.domain);
+  if (shareEligibility.eligible && shareEligibility.shareDomain !== scope.domain) {
+    const shared = cache[shareEligibility.shareDomain];
+    if (shared?.pinned && shared.includeSubdomains) {
+      return { cacheKey: shareEligibility.shareDomain, entry: shared };
+    }
   }
   if (exact) return { cacheKey: scope.key, entry: exact };
   const domainFallback = scope.routeKey ? cache[scope.domain] : undefined;
