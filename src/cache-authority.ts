@@ -523,6 +523,13 @@ export class KernelCacheAuthority {
         .filter(([, entry]) => entry.source === "generated monogram")
         .map(([key]) => [key, this.invalidate(key)]),
     );
+    // 与 clear() 一致：失效所有可能产出 generated 条目的 in-flight 任务。
+    // 无法预知任务结果，因此真实 favicon 下载也会一并失效（代价最多
+    // MAX_RESOLUTION_CONCURRENCY 个重新下载），保证旧配置的 monogram 绝不
+    // 在 clear-generated 之后 commit。
+    for (const key of this.inFlight.keys()) {
+      if (!this.cache[key]?.pinned) invalidations.set(key, this.invalidate(key));
+    }
     return this.enqueueCacheMutation(async () => {
       const generated = Object.entries(this.cache).filter(([, entry]) => entry.source === "generated monogram");
       if (generated.length === 0) {

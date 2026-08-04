@@ -45,7 +45,7 @@ API and serves committed icon bytes over an authenticated private icon route.
 - The authority keeps one serialized cache-operation queue and one in-flight map keyed by Link scope. A matching request joins existing work; distinct route-specific scopes remain independent.
 - A Cache entry is authoritative only after icon bytes are validated and its index update commits. Replaced automatic payloads are removed only after the replacement commits.
 - Pinned icons never expire and are excluded from ordinary refresh and clear-cache cleanup. Explicit restore-automatic and delete operations remain workspace cache operations.
-- Delete, restore-automatic, and clear-cache actions invalidate affected In-flight tasks. An invalidated task must not commit either icon bytes or index state, even if its network request completed.
+- Delete, restore-automatic, clear-cache, and clear-generated actions invalidate affected In-flight tasks. An invalidated task must not commit either icon bytes or index state, even if its network request completed.
 - Cache policy is workspace-wide: resolver source and mode, fallback, monogram configuration, automatic-fetch pause, full-page discovery, and cache lifetime. Display preferences are per Frontend client: rendering enabled state and icon size.
 - On first authority initialization, only Linkmark's own cache index and private payloads are read. Data from the old `auto-favicon` plugin is neither imported nor deleted.
 - Icon bytes are stored in plugin-private storage and delivered through an authenticated Private icon route. Data URIs are permitted only as a controlled fallback if future Docker-browser validation proves CSS cannot use the private route.

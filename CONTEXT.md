@@ -168,6 +168,10 @@ _Avoid_: general platform blacklist, inferred hosting platform
 A reviewed route-type icon attached to a Link scope for a recognized office platform. Tencent Docs and Google Docs use hosted HTTP(S) URLs (`platformIconUrl`); Feishu uses a locally generated composite SVG (`platformIconSvg`) that resolves without any network retrieval.
 _Avoid_: favicon, platform icon URL, data URI
 
+**Generated monogram**:
+A locally generated fallback icon for a Link scope that the cache authority produces when resolution is exhausted and the workspace cache policy's fallback mode is monogram.
+_Avoid_: fallback icon, generated icon, placeholder
+
 **Registrable parent**:
 The one eTLD+1 returned by PSL for a hostname when it differs from that hostname; it is the only parent Linkmark may probe or target with a shared pin.
 _Avoid_: immediate parent, parent chain

@@ -1016,6 +1016,96 @@ describe("KernelCacheAuthority", () => {
     expect(snapshotCache(authority)).toEqual({});
   });
 
+  it("does not let clear-generated recreate an in-flight generated monogram", async () => {
+    const storage = new MemoryStorage();
+    let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => await new Promise((resolve) => { resolveDownload = resolve; }),
+    }, () => 100);
+    await authority.initialize();
+
+    // key 尚不在 cache 的 in-flight 任务也必须失效：monogram 配置变化后，
+    // 旧配置的 generated monogram 不得在 clear-generated 之后落地。
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
+    await authority.clearGenerated();
+    resolveDownload?.(resolved("generated monogram"));
+
+    await settle();
+    expect(snapshotCache(authority)).toEqual({});
+    expect([...storage.files.keys()].filter((path) => path.startsWith("icons/"))).toEqual([]);
+  });
+
+  it("does not let clear-generated recreate an in-flight real favicon", async () => {
+    const storage = new MemoryStorage();
+    let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => await new Promise((resolve) => { resolveDownload = resolve; }),
+    }, () => 100);
+    await authority.initialize();
+
+    // 无法预知 in-flight 任务的结果，clear-generated 连真实 favicon 下载也
+    // 一并失效；其结果不得在清除之后落地。
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
+    await authority.clearGenerated();
+    resolveDownload?.(resolved("FaviconKit"));
+
+    await settle();
+    expect(snapshotCache(authority)).toEqual({});
+    expect([...storage.files.keys()].filter((path) => path.startsWith("icons/"))).toEqual([]);
+  });
+
+  it("starts a fresh task for a scope invalidated by clear-generated", async () => {
+    const releases: Array<() => void> = [];
+    let calls = 0;
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async () => {
+        calls += 1;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return resolved("generated monogram");
+      },
+    }, () => 100);
+    await authority.initialize();
+
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await authority.clearGenerated();
+    // 旧任务已失效：再次请求必须启动新任务，而不是合并到旧任务。
+    await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
+
+    releases[0]?.();
+    await vi.waitFor(() => expect(calls).toBe(2));
+    releases[1]?.();
+
+    await vi.waitFor(() => expect(snapshotCache(authority)[scope().key]).toBeDefined());
+    expect(snapshotCache(authority)).toEqual({
+      "example.com": expect.objectContaining({ source: "generated monogram" }),
+    });
+  });
+
+  it("keeps an in-flight refresh task on a pinned scope untouched by clear-generated", async () => {
+    const storage = new MemoryStorage();
+    let resolveDownload: ((value: { bytes: ArrayBuffer; contentType: string; source: string }) => void) | undefined;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => await new Promise((resolve) => { resolveDownload = resolve; }),
+    }, () => 100);
+    await authority.initialize();
+    await authority.putPinned(scope(), entry({ domain: "example.com", pinned: true }), "image/png", new Uint8Array([1]).buffer);
+    const pinned = snapshotCache(authority)[scope().key];
+
+    // pinned scope 上的刷新任务不被 clear-generated 失效：其结果也不会替换 pinned 条目。
+    await expect(authority.getOrQueue(scope(), true)).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(resolveDownload).toBeTypeOf("function"));
+    await authority.clearGenerated();
+    resolveDownload?.(resolved("FaviconKit"));
+
+    await settle();
+    expect(snapshotCache(authority)).toEqual({
+      "example.com": expect.objectContaining({ iconId: pinned.iconId, pinned: true }),
+    });
+  });
+
   it("retains pinned entries when clearing the workspace cache", async () => {
     const storage = new MemoryStorage();
     const received: CacheChangeEvent[] = [];
