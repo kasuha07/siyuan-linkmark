@@ -80,18 +80,23 @@ export interface IconResolver {
 
 /**
  * A revisioned incremental broadcast describing one committed Cache
- * persistence batch: the entries that were added or replaced and the Link
- * scope keys that left the cache. The revision is a strictly increasing
- * per-process counter, so a Frontend client can detect a missed batch; the
- * epoch identifies the kernel process that produced the batch, so a client
- * can detect that a restart reset the revision.
+ * persistence batch: the Cache keys that were added or replaced and the Cache
+ * keys that left the cache. The revision is a strictly increasing per-process
+ * counter, so a Frontend client can detect a missed batch; the epoch
+ * identifies the kernel process that produced the batch, so a client can
+ * detect that a restart reset the revision. `changedKeys` enumerates exactly
+ * those keys, or is null when the batch is too broad to enumerate (for
+ * example a bulk clear), in which case every Frontend client must refresh its
+ * working set without skipping.
  */
 export type CacheCursor = {
   epoch: string;
   revision: number;
 };
 
-export type CacheChangeEvent = CacheCursor;
+export type CacheChangeEvent = CacheCursor & {
+  changedKeys: string[] | null;
+};
 
 export type CacheMutationReceipt =
   | ({ status: "committed" } & CacheCursor)
@@ -162,6 +167,10 @@ export type CacheAuthorityOptions = {
 const CACHE_INDEX_FILE = "favicon-cache-v2.json";
 const ICON_DIRECTORY = "icons";
 const MAX_RESOLUTION_CONCURRENCY = 4;
+// Batches larger than this send a null `changedKeys` sentinel instead of the
+// key list: any Frontend document with real links almost certainly intersects
+// a broad change, so the list would only waste event payload bytes.
+const MAX_EVENT_CHANGED_KEYS = 128;
 
 type InFlightTask = {
   generation: number;
@@ -750,10 +759,16 @@ export class KernelCacheAuthority {
   }
 
   private async publishChange(upserts: Record<string, CacheEntry>, removed: string[]): Promise<CacheMutationReceipt> {
-    void upserts;
-    void removed;
     this.cacheRevision += 1;
-    const change: CacheChangeEvent = { epoch: this.cacheEpoch, revision: this.cacheRevision };
+    // Enumerate the batch keys so unrelated Frontend clients can skip their
+    // working-set lookup; a bulk operation too broad to enumerate sends the
+    // null sentinel so every client refreshes unconditionally.
+    const changedKeys = [...new Set([...Object.keys(upserts), ...removed])];
+    const change: CacheChangeEvent = {
+      epoch: this.cacheEpoch,
+      revision: this.cacheRevision,
+      changedKeys: changedKeys.length > MAX_EVENT_CHANGED_KEYS ? null : changedKeys,
+    };
     try {
       await this.options.onCacheChanged?.({ ...change });
     } catch (error) {
@@ -763,7 +778,8 @@ export class KernelCacheAuthority {
         // Notification diagnostics cannot change an already committed mutation.
       }
     }
-    return { status: "committed", ...change };
+    // The receipt intentionally carries only the cursor, never the batch keys.
+    return { status: "committed", epoch: change.epoch, revision: change.revision };
   }
 
   private sortedCacheKeys() {

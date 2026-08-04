@@ -101,8 +101,12 @@ The bounded cache state needed by one Frontend client for its Present scopes and
 _Avoid_: cache snapshot, frontend cache mirror, management cache
 
 **Working-set refresh**:
-The coalesced replacement of a Frontend cache working set by looking up all Present scopes after authoritative cache state changes. Changes arriving during a lookup require at most one follow-up refresh rather than parallel lookups.
+The coalesced replacement of a Frontend cache working set by looking up all Present scopes after authoritative cache state changes, reporting only Affected scopes. An invalidation that cannot affect any Present scope is skipped without a lookup; changes arriving during a lookup require at most one follow-up refresh rather than parallel lookups.
 _Avoid_: cache snapshot recovery, per-entry patch, reverse-dependency update
+
+**Affected scope**:
+A Present scope whose Cache match (matched Cache key or Entry token) changed since the last adopted Cache lookup; only affected scopes can require binding synchronization.
+_Avoid_: changed working-set key, union of working-set keys, all-scope resync
 
 **Cache-management query**:
 A revision-tagged search of authoritative Cache entries for management actions, ordered deterministically by normalized Cache key rather than client locale. Its result is read live from the current Cache revision rather than retained as a historical snapshot.
@@ -197,7 +201,7 @@ A complete isolated view of the authoritative cache. It is not transferred to a 
 _Avoid_: live cache object, mutable cache reference
 
 **Cache change event**:
-A compact cache-authority invalidation carrying only the current Cache revision and Cache epoch. It tells Frontend clients to refresh affected query views and their Frontend cache working sets without broadcasting Cache entries.
+A compact cache-authority invalidation carrying the current Cache revision, Cache epoch, and the changed Cache keys of the committed batch, or a null sentinel when the batch is too broad to enumerate. It tells Frontend clients to refresh affected query views and to refresh Frontend cache working sets only when a Present scope may be affected, without broadcasting Cache entries.
 _Avoid_: cache delta, full cache broadcast, cache snapshot push
 
 **Cache mutation receipt**:

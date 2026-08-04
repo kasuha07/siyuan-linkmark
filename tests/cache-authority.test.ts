@@ -195,7 +195,8 @@ describe("KernelCacheAuthority", () => {
     });
     expect(receipt).toEqual(expect.objectContaining({ status: "committed", epoch: expect.any(String), revision: expect.any(Number) }));
     expect(receipt).not.toHaveProperty("change");
-    expect(received.at(-1)).toEqual({ epoch: receipt.epoch, revision: receipt.revision });
+    expect(receipt).not.toHaveProperty("changedKeys");
+    expect(received.at(-1)).toEqual({ epoch: receipt.epoch, revision: receipt.revision, changedKeys: [scope().key] });
   });
 
   it("keeps a freshly pinned entry when an expiry removal arrives with a stale guard", async () => {
@@ -874,7 +875,11 @@ describe("KernelCacheAuthority", () => {
 
     await vi.waitFor(() => expect(received).toHaveLength(1));
     expect(storage.cacheIndexWrites).toBe(1);
-    expect(received).toEqual([{ epoch: expect.any(String), revision: 1 }]);
+    expect(received).toEqual([{
+      epoch: expect.any(String),
+      revision: 1,
+      changedKeys: expect.arrayContaining(["first.example.com", "second.example.com"]),
+    }]);
     expect(snapshotCache(authority)).toEqual({
       "first.example.com": expect.objectContaining({ source: "first.example.com" }),
       "second.example.com": expect.objectContaining({ source: "second.example.com" }),
@@ -904,7 +909,11 @@ describe("KernelCacheAuthority", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(storage.cacheIndexWrites).toBe(1);
       expect(received).toHaveLength(1);
-      expect(received[0]).toEqual({ epoch: expect.any(String), revision: 1 });
+      expect(received[0]).toEqual({
+        epoch: expect.any(String),
+        revision: 1,
+        changedKeys: expect.arrayContaining(["first.example.com", "second.example.com"]),
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -1324,8 +1333,11 @@ describe("KernelCacheAuthority", () => {
 
     const receipt = await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
 
-    expect(receipt).toEqual({ status: "committed", ...received[0] });
+    // The receipt shares the committed cursor but never carries the batch keys.
+    expect(receipt).toEqual({ status: "committed", epoch: received[0].epoch, revision: received[0].revision });
     expect(receipt).not.toBe(received[0]);
+    expect(received[0].changedKeys).toEqual([scope().key]);
+    expect(receipt).not.toHaveProperty("changedKeys");
     received[0].revision = 999;
     expect(receipt.revision).toBe(1);
   });
@@ -1393,13 +1405,13 @@ describe("KernelCacheAuthority", () => {
 
     await authority.remove("plain.example.com");
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number) });
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), changedKeys: ["plain.example.com"] });
     expect(snapshotCache(authority)["plain.example.com"]).toBeUndefined();
     nextEvent = received.length;
 
     await authority.clearGenerated();
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number) });
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), changedKeys: ["generated.example.com"] });
     expect(snapshotCache(authority)["generated.example.com"]).toBeUndefined();
     nextEvent = received.length;
 
@@ -1409,16 +1421,41 @@ describe("KernelCacheAuthority", () => {
 
     await authority.clear();
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number) });
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), changedKeys: ["plain-2.example.com"] });
     expect(snapshotCache(authority)["plain-2.example.com"]).toBeUndefined();
     nextEvent = received.length;
 
     await authority.putPinned(scope("second.example.com"), entry({ domain: "second.example.com", pinned: true }), "image/png", new Uint8Array([3]).buffer);
     await authority.putPinned(scope("first.example.com"), entry({ domain: "first.example.com", pinned: true }), "image/png", new Uint8Array([4]).buffer, "second.example.com");
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[received.length - 1]).toEqual({ epoch: expect.any(String), revision: expect.any(Number) });
+    expect(received[received.length - 1]).toEqual({
+      epoch: expect.any(String),
+      revision: expect.any(Number),
+      changedKeys: expect.arrayContaining(["first.example.com", "second.example.com"]),
+    });
     expect(snapshotCache(authority)).toMatchObject({ "first.example.com": expect.objectContaining({ pinned: true }) });
     expect(snapshotCache(authority)["second.example.com"]).toBeUndefined();
+  });
+
+  it("sends a null changedKeys sentinel when a batch is too broad to enumerate", async () => {
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), {
+      resolve: async (requested) => resolved(requested.key),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+
+    for (let index = 0; index < 150; index += 1) {
+      await authority.getOrQueue(scope(`bulk-${index}.example.com`));
+    }
+    await vi.waitFor(() => expect(snapshotCache(authority)["bulk-149.example.com"]).toBeDefined());
+    expect(received).toHaveLength(1);
+    expect(received[0].changedKeys).toBeNull();
+
+    await authority.clear();
+    await vi.waitFor(() => expect(received).toHaveLength(2));
+    expect(received[1].changedKeys).toBeNull();
   });
 
   it("resolves new-format iconIds in constant time and rejects mismatches", async () => {

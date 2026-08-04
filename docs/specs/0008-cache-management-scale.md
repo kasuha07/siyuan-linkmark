@@ -66,11 +66,9 @@ are guaranteed never to be reused.
 - The Frontend no longer calls the complete Cache snapshot RPC for startup or
   recovery. A complete snapshot may remain internal to the authority and tests,
   but it is not a Frontend transport contract.
-- Cache change events carry only Cache epoch and Cache revision. Resolution
-  failure notifications continue to carry a Link scope key and sanitized
-  failure category without entry or payload data.
+- Cache change events carry Cache epoch, Cache revision, and the changed Cache keys of the committed batch, or a null sentinel when the batch is too broad to enumerate (ADR 0018). A Frontend client skips its working-set lookup when no Present scope's candidate Cache keys intersect the change; an event from another Cache epoch always triggers a lookup. Resolution failure notifications continue to carry a Link scope key and sanitized failure category without entry or payload data.
 - Cache mutation receipts identify `committed` or `unchanged` and carry Cache
-  epoch and Cache revision without Cache entry deltas. Existing rules remain:
+  epoch and Cache revision without Cache entry deltas or batch keys. Existing rules remain:
   no-op mutations do not persist, broadcast, or advance revision, and committed
   persistence is not rolled back by notification failure.
 - A newer revision or a different epoch invalidates the Frontend cache working
@@ -182,7 +180,7 @@ are guaranteed never to be reused.
 
 - Virtual scrolling or an infinite list.
 - Historical pagination snapshots, cursor sessions, or MVCC.
-- A reverse dependency index for targeted Present-scope invalidation.
+- A reverse dependency index for targeted Present-scope invalidation. The changed-keys hint in Cache change events (ADR 0018) is not a reverse dependency index: the Kernel never tracks which Frontend clients hold which scopes, and the client-side candidate-key predicate is computed locally.
 - Persisting or resuming Bulk cache refresh across Kernel reload.
 - General cache persistence partitioning, journaling, or removal of the current
   whole-index write per Cache persistence batch.

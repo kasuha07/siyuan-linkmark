@@ -16,6 +16,7 @@ import {
 } from "./frontend-cache-state";
 import { errorText } from "./frontend-format";
 import { CACHE_POLICY_FIELDS, pickCachePolicy, type Settings } from "./frontend-settings";
+import { shareEligibilityOf } from "./parent-domain";
 import { fetchOutcomeFor, type FetchOutcome } from "./refresh-outcome";
 import { scopeFromCacheKey, type LinkScope } from "./url-scope";
 
@@ -75,6 +76,7 @@ export class FrontendCacheClient {
   private lastCacheRevision: number | undefined;
   private lastCacheEpoch: string | undefined;
   private readonly presentScopes = new Map<string, LinkScope>();
+  private readonly scopeCandidates = new Map<string, string[]>();
   private workingSetRefresh?: Promise<void>;
   private workingSetDirty = false;
   private readonly cursorListeners = new Set<(cursor: CacheCursor) => void>();
@@ -150,7 +152,11 @@ export class FrontendCacheClient {
       return Promise.resolve();
     }
     this.presentScopes.clear();
-    for (const [key, scope] of next) this.presentScopes.set(key, scope);
+    this.scopeCandidates.clear();
+    for (const [key, scope] of next) {
+      this.presentScopes.set(key, scope);
+      this.scopeCandidates.set(key, candidateCacheKeys(scope));
+    }
     return this.requestWorkingSetRefresh();
   }
 
@@ -159,8 +165,11 @@ export class FrontendCacheClient {
     if (!bind) return;
     await bind("cache.changed", (params) => {
       const payload = eventPayload(params);
+      // An event from another epoch requires a lookup so entry tokens are
+      // re-established under the new baseline before it can be trusted.
+      const epochChanged = typeof payload.epoch === "string" && payload.epoch !== this.lastCacheEpoch;
       if (!this.observeCursor(payload)) return;
-      void this.requestWorkingSetRefresh();
+      if (epochChanged || this.changedKeysTouchPresentScopes(payload)) void this.requestWorkingSetRefresh();
     });
     await bind("cache.resolution-failed", (params) => {
       const payload = eventPayload(params);
@@ -408,6 +417,10 @@ export class FrontendCacheClient {
     if (this.workingSetRefresh) return this.workingSetRefresh;
     this.workingSetRefresh = this.runWorkingSetRefresh().finally(() => {
       this.workingSetRefresh = undefined;
+      // A request that arrived after the loop's final check set the dirty
+      // flag but no iteration consumed it; without this re-request the
+      // invalidation would be lost until the next event or mutation.
+      if (this.workingSetDirty) void this.requestWorkingSetRefresh();
     });
     return this.workingSetRefresh;
   }
@@ -455,22 +468,59 @@ export class FrontendCacheClient {
   }
 
   private adoptWorkingSet(result: CacheLookupResult) {
-    const previous = Object.fromEntries(Object.entries(this.cache).map(([key, entry]) => [key, { ...entry }]));
     const next: Record<string, CacheEntry> = {};
+    const nextTokens = new Map<string, string>();
     for (const match of Object.values(result.matches)) {
-      if (match) next[match.cacheKey] = { ...match.entry };
+      if (match) {
+        next[match.cacheKey] = { ...match.entry };
+        nextTokens.set(match.cacheKey, match.entryToken);
+      }
     }
-    const changedKeys = [...new Set([...Object.keys(previous), ...Object.keys(next)])];
+    // Report only keys whose authoritative match actually changed. The entry
+    // token embeds the Cache key and entry content, so equal tokens prove an
+    // unchanged match; an unrelated invalidation batch then no longer triggers
+    // binding synchronization for every Present scope.
+    const changedCacheKeys = [...new Set([...Object.keys(this.cache), ...Object.keys(next)])]
+      .filter((key) => this.entryTokens.get(key) !== nextTokens.get(key));
+    if (changedCacheKeys.length === 0) {
+      // Nothing a Present scope matches changed: the working set is already
+      // current, so keep the existing entries and tokens and let their object
+      // identity survive for expiry decisions. No key can have left the set
+      // here, because a departing key always differs from the missing new
+      // token and would have been reported as changed.
+      return;
+    }
+    const previous = cacheBeforeChange(this.cache, Object.fromEntries(
+      changedCacheKeys.map((key) => [key, this.cache[key]]),
+    ));
     for (const key of Object.keys(this.cache)) delete this.cache[key];
     for (const [key, entry] of Object.entries(next)) this.cache[key] = entry;
     this.entryTokens.clear();
-    for (const match of Object.values(result.matches)) {
-      if (match) this.entryTokens.set(match.cacheKey, match.entryToken);
-    }
+    for (const [key, token] of nextTokens) this.entryTokens.set(key, token);
     for (const key of this.manualRefreshKeys.keys()) {
       if (this.cache[key]) this.manualRefreshKeys.delete(key);
     }
-    if (changedKeys.length > 0) this.options.callbacks.onCacheChanged(previous, changedKeys);
+    this.options.callbacks.onCacheChanged(previous, changedCacheKeys);
+  }
+
+  /**
+   * Whether an invalidation's changed keys can affect any Present scope. A
+   * lookup is required whenever the keys are unknown (sentinel or legacy
+   * event) or any Present scope's candidate Cache key intersects the change;
+   * the candidate set is exactly the Cache slots `effectiveCacheMatch` reads,
+   * so an empty intersection proves no match can have changed.
+   */
+  private changedKeysTouchPresentScopes(payload: Record<string, unknown>) {
+    const changedKeys = payload.changedKeys;
+    if (!Array.isArray(changedKeys)) return true;
+    const changed = new Set(changedKeys.filter((key): key is string => typeof key === "string"));
+    if (changed.size === 0) return false;
+    for (const candidates of this.scopeCandidates.values()) {
+      for (const candidate of candidates) {
+        if (changed.has(candidate)) return true;
+      }
+    }
+    return false;
   }
 
   private observeCursor(value: unknown): value is CacheCursor {
@@ -595,6 +645,20 @@ function eventPayload(params: unknown): Record<string, unknown> {
     return record.params as Record<string, unknown>;
   }
   return record;
+}
+
+/**
+ * The Cache keys that can influence one Link scope's effective match: its
+ * own key, its domain slot for route scopes, and its eligible share-domain
+ * slot. `effectiveCacheMatch` reads no other Cache slots, so an invalidation
+ * whose changed keys avoid every candidate cannot change the scope's match.
+ */
+function candidateCacheKeys(scope: LinkScope) {
+  const candidates = [scope.key];
+  if (scope.routeKey) candidates.push(scope.domain);
+  const eligibility = shareEligibilityOf(scope.domain);
+  if (eligibility.eligible && eligibility.shareDomain !== scope.domain) candidates.push(eligibility.shareDomain);
+  return candidates;
 }
 
 function isCacheEntryChangedError(error: unknown) {
