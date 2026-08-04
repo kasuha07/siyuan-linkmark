@@ -769,18 +769,22 @@ export class KernelCacheAuthority {
         next += 1;
         if (index >= scopes.length) return;
         const scope = scopes[index];
-        const before = this.cache[scope.key];
         refresh.scheduled += 1;
         try {
           const result = await this.getOrQueue(scope, true, false);
           if (result.status === "queued") await this.inFlight.get(scope.key)?.promise;
           const after = this.cache[scope.key];
-          if (after?.pinned) refresh.skipped += 1;
-          else if (after?.iconId && after.iconId !== before?.iconId) refresh.completed += 1;
-          else refresh.failed += 1;
+          if (!after || after.pinned) {
+            // 刷新期间条目被并发删除或钉住：其结果已无关紧要，不计为失败。
+            refresh.skipped += 1;
+          } else {
+            // 条目仍在：刷新完成。图标未变化（解析未提交新图标）也不算失败，
+            // 原图标继续生效，解析问题由失败通知路径单独上报。
+            refresh.completed += 1;
+          }
         } catch {
-          // A single scope failure (for example a rejecting failure
-          // notification) must not abort the whole refresh; count it.
+          // 单个 scope 的失败（例如失败通知回调拒绝）不得中断整个批量刷新；
+          // 计入 failed。
           refresh.failed += 1;
         }
         await this.notifyBulkRefresh(refresh);

@@ -301,6 +301,52 @@ describe("KernelCacheAuthority", () => {
     expect(unhandled).toEqual([]);
   });
 
+  it("counts a scope whose icon stayed unchanged as completed, not failed", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(Object.fromEntries(
+      Array.from({ length: 2 }, (_, index) => {
+        const domain = `bulk-unchanged-${index}.example.dev`;
+        return [domain, entry({ domain, targetUrl: `https://${domain}/`, iconId: `old-${index}` })];
+      }),
+    )));
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => null,
+    }, () => 100);
+    await authority.initialize();
+
+    await authority.startBulkRefresh();
+    await vi.waitFor(() => expect(authority.stats().bulkRefresh?.state).toBe("completed"));
+    expect(authority.stats().bulkRefresh).toMatchObject({ total: 2, scheduled: 2, completed: 2, failed: 0, skipped: 0 });
+  });
+
+  it("counts an entry concurrently removed during the Bulk refresh as skipped, not failed", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(Object.fromEntries(
+      Array.from({ length: 2 }, (_, index) => {
+        const domain = `bulk-removed-${index}.example.dev`;
+        return [domain, entry({ domain, targetUrl: `https://${domain}/`, iconId: `old-${index}` })];
+      }),
+    )));
+    const releases: Array<() => void> = [];
+    let calls = 0;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => {
+        calls += 1;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return resolved();
+      },
+    }, () => 100);
+    await authority.initialize();
+
+    await authority.startBulkRefresh();
+    await vi.waitFor(() => expect(calls).toBe(2));
+    await authority.remove("bulk-removed-0.example.dev");
+    releases.splice(0).forEach((release) => release());
+    await vi.waitFor(() => expect(authority.stats().bulkRefresh?.state).toBe("completed"));
+    expect(authority.stats().bulkRefresh).toMatchObject({ total: 2, scheduled: 2, completed: 1, failed: 0, skipped: 1 });
+    expect(snapshotCache(authority)["bulk-removed-0.example.dev"]).toBeUndefined();
+  });
+
   it("does not report a generated monogram as a remote refresh success", () => {
     expect(fetchOutcomeFor(entry({ source: "FaviconKit" }))).toBe("success");
     expect(fetchOutcomeFor(entry({ source: "generated monogram" }))).toBe("fallback");
