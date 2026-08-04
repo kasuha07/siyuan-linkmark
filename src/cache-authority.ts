@@ -771,12 +771,18 @@ export class KernelCacheAuthority {
         const scope = scopes[index];
         const before = this.cache[scope.key];
         refresh.scheduled += 1;
-        const result = await this.getOrQueue(scope, true, false);
-        if (result.status === "queued") await this.inFlight.get(scope.key)?.promise;
-        const after = this.cache[scope.key];
-        if (after?.pinned) refresh.skipped += 1;
-        else if (after?.iconId && after.iconId !== before?.iconId) refresh.completed += 1;
-        else refresh.failed += 1;
+        try {
+          const result = await this.getOrQueue(scope, true, false);
+          if (result.status === "queued") await this.inFlight.get(scope.key)?.promise;
+          const after = this.cache[scope.key];
+          if (after?.pinned) refresh.skipped += 1;
+          else if (after?.iconId && after.iconId !== before?.iconId) refresh.completed += 1;
+          else refresh.failed += 1;
+        } catch {
+          // A single scope failure (for example a rejecting failure
+          // notification) must not abort the whole refresh; count it.
+          refresh.failed += 1;
+        }
         await this.notifyBulkRefresh(refresh);
       }
     };

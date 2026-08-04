@@ -486,11 +486,11 @@ export default class LinkmarkPlugin extends Plugin {
         now,
       });
       if (decision.action === "expire") {
-        void this.client.expire(decision.cacheKey, decision.entry, () => this.scheduleScan());
+        void this.client.expire(decision.cacheKey, decision.entry, () => this.scheduleScan()).catch(() => undefined);
         return;
       }
-      if (decision.action === "keep" && decision.fetch) void this.client.fetchAndCache(scope, targetUrl);
-      if (decision.action === "fetch") void this.client.fetchAndCache(scope, targetUrl);
+      if (decision.action === "keep" && decision.fetch) void this.client.fetchAndCache(scope, targetUrl).catch(() => undefined);
+      if (decision.action === "fetch") void this.client.fetchAndCache(scope, targetUrl).catch(() => undefined);
     });
     return full || reconciled.changed || publisherChanged || markerChanged;
   }

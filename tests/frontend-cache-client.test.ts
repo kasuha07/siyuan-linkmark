@@ -196,3 +196,67 @@ describe("FrontendCacheClient expiry guard", () => {
     expect(remove).not.toHaveBeenCalled();
   });
 });
+
+describe("FrontendCacheClient fetch failure containment", () => {
+  function syncedClient() {
+    let revision = 2;
+    const calls: Record<string, (...args: unknown[]) => Promise<unknown>> = {
+      "cache.stats": vi.fn(async () => ({ entryCount: 1, epoch: "kernel-1", revision: 2 })),
+      "cache.policy.get": vi.fn(async () => ({})),
+      "cache.lookup": vi.fn(async () => ({
+        epoch: "kernel-1",
+        revision: revision++,
+        matches: {
+          "example.dev": {
+            cacheKey: "example.dev",
+            entry: { url: "icon.png", fetchedAt: 1, domain: "example.dev" },
+            entryToken: "token-a",
+          },
+        },
+      })),
+    };
+    return { calls, client: new FrontendCacheClient({
+      rpc: { call: calls, bind: () => undefined },
+      settings: { ...defaultSettings },
+      callbacks: { onCacheChanged: vi.fn(), onEntryCountChange: vi.fn(), onManualRefreshFailed: vi.fn() },
+    }) };
+  }
+
+  it("never leaks an unhandled rejection when a fire-and-forget fetch fails", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    const { calls, client } = syncedClient();
+    calls["cache.get-or-queue"] = vi.fn(async () => { throw new Error("kernel unreachable"); });
+    await client.load();
+    await client.setPresentScopes([{ key: "example.dev", domain: "example.dev" }]);
+    try {
+      // The scan's fire-and-forget call pattern must never surface a rejection.
+      void client.fetchAndCache({ key: "example.dev", domain: "example.dev" }, "https://example.dev/");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
+
+  it("re-requests through the supersede path when a manual fetch supersedes an automatic one", async () => {
+    let resolveFirst!: (value: unknown) => void;
+    const getOrQueue = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+      .mockResolvedValueOnce({ status: "unavailable" });
+    const { calls, client } = syncedClient();
+    calls["cache.get-or-queue"] = getOrQueue;
+    await client.load();
+    await client.setPresentScopes([{ key: "example.dev", domain: "example.dev" }]);
+    const scope = { key: "example.dev", domain: "example.dev", targetUrl: "https://example.dev/" };
+
+    const automatic = client.fetchAndCache(scope, scope.targetUrl);
+    const manual = client.fetchAndCache(scope, scope.targetUrl, false, "manual");
+    resolveFirst({ status: "ready", entry: { url: "icon.png", fetchedAt: 2, domain: "example.dev", source: "test resolver" }, entryToken: "token-x" });
+
+    await expect(automatic).resolves.toBe("success");
+    await expect(manual).resolves.toBe("unavailable");
+    expect(getOrQueue).toHaveBeenCalledTimes(2);
+  });
+});

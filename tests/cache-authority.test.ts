@@ -274,6 +274,33 @@ describe("KernelCacheAuthority", () => {
     expect(authority.stats().bulkRefresh).toMatchObject({ total: 8, scheduled: 4, state: "cancelled" });
   });
 
+  it("counts a rejecting failure notification as failed instead of leaking an unhandled rejection", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(Object.fromEntries(
+      Array.from({ length: 2 }, (_, index) => {
+        const domain = `bulk-fail-${index}.example.dev`;
+        return [domain, entry({ domain, targetUrl: `https://${domain}/`, iconId: `old-${index}` })];
+      }),
+    )));
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on("unhandledRejection", onUnhandled);
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => null,
+    }, () => 100, {
+      onResolutionFailure: async () => { throw new Error("broadcast failed"); },
+    });
+    try {
+      await authority.initialize();
+      await authority.startBulkRefresh();
+      await vi.waitFor(() => expect(authority.stats().bulkRefresh?.state).toBe("completed"));
+      expect(authority.stats().bulkRefresh).toMatchObject({ total: 2, scheduled: 2, completed: 0, failed: 2 });
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
+
   it("does not report a generated monogram as a remote refresh success", () => {
     expect(fetchOutcomeFor(entry({ source: "FaviconKit" }))).toBe("success");
     expect(fetchOutcomeFor(entry({ source: "generated monogram" }))).toBe("fallback");

@@ -222,7 +222,7 @@ export class FrontendCacheClient {
       const supersedesInvalidatedAutomatic = pending.trigger === "automatic"
         && pending.automaticGeneration !== this.automaticFetchGeneration;
       return (trigger === "manual" && pending.trigger === "automatic") || supersedesInvalidatedAutomatic
-        ? pending.promise.then(() => this.fetchAndCache(scope, targetUrl, preserveExisting, trigger))
+        ? pending.promise.catch(() => undefined).then(() => this.fetchAndCache(scope, targetUrl, preserveExisting, trigger))
         : pending.promise;
     }
     const request = this.runFetchAndCache(
@@ -240,7 +240,7 @@ export class FrontendCacheClient {
     });
     void request.finally(() => {
       if (this.pendingFetches.get(scope.key)?.promise === request) this.pendingFetches.delete(scope.key);
-    });
+    }).catch(() => undefined);
     return request;
   }
 
