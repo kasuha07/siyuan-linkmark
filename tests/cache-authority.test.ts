@@ -347,6 +347,119 @@ describe("KernelCacheAuthority", () => {
     expect(snapshotCache(authority)["bulk-removed-0.example.dev"]).toBeUndefined();
   });
 
+  it("does not resurrect an entry deleted before the Bulk refresh worker picked its scope", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(Object.fromEntries(
+      Array.from({ length: 5 }, (_, index) => {
+        const domain = `bulk-early-remove-${index}.example.dev`;
+        return [domain, entry({ domain, targetUrl: `https://${domain}/`, iconId: `old-${index}` })];
+      }),
+    )));
+    const releases: Array<() => void> = [];
+    let calls = 0;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => {
+        calls += 1;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return resolved();
+      },
+    }, () => 100);
+    await authority.initialize();
+
+    await authority.startBulkRefresh();
+    // 4 workers occupy the first four scopes; the fifth is not picked yet.
+    await vi.waitFor(() => expect(calls).toBe(4));
+    await authority.remove("bulk-early-remove-4.example.dev");
+    expect(snapshotCache(authority)["bulk-early-remove-4.example.dev"]).toBeUndefined();
+
+    await vi.waitFor(async () => {
+      releases.splice(0).forEach((release) => release());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(authority.stats().bulkRefresh?.state).toBe("completed");
+    });
+    expect(authority.stats().bulkRefresh).toMatchObject({ total: 5, scheduled: 5, completed: 4, failed: 0, skipped: 1 });
+    expect(snapshotCache(authority)["bulk-early-remove-4.example.dev"]).toBeUndefined();
+    // 删除先于任务创建：基线失效，没有为已删除的 scope 发起新的解析调用。
+    expect(calls).toBe(4);
+  });
+
+  it("skips every scope cleared during the Bulk refresh without recreating entries", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(Object.fromEntries(
+      Array.from({ length: 5 }, (_, index) => {
+        const domain = `bulk-clear-${index}.example.dev`;
+        return [domain, entry({ domain, targetUrl: `https://${domain}/`, iconId: `old-${index}` })];
+      }),
+    )));
+    const releases: Array<() => void> = [];
+    let calls = 0;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => {
+        calls += 1;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return resolved();
+      },
+    }, () => 100);
+    await authority.initialize();
+
+    await authority.startBulkRefresh();
+    await vi.waitFor(() => expect(calls).toBe(4));
+    await authority.clear();
+    expect(snapshotCache(authority)).toEqual({});
+
+    await vi.waitFor(async () => {
+      releases.splice(0).forEach((release) => release());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(authority.stats().bulkRefresh?.state).toBe("completed");
+    });
+    expect(authority.stats().bulkRefresh).toMatchObject({ total: 5, scheduled: 5, completed: 0, failed: 0, skipped: 5 });
+    // 清空不会被批量刷新填回；已清除的条目也没有发起新的解析调用。
+    expect(snapshotCache(authority)).toEqual({});
+    expect(calls).toBe(4);
+  });
+
+  it("skips a scope recreated by a client after deletion during the Bulk refresh", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(Object.fromEntries(
+      Array.from({ length: 5 }, (_, index) => {
+        const domain = `bulk-recreated-${index}.example.dev`;
+        return [domain, entry({ domain, targetUrl: `https://${domain}/`, iconId: `old-${index}` })];
+      }),
+    )));
+    const releases: Array<() => void> = [];
+    let calls = 0;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => {
+        calls += 1;
+        await new Promise<void>((resolve) => releases.push(resolve));
+        return resolved();
+      },
+    }, () => 100);
+    await authority.initialize();
+
+    await authority.startBulkRefresh();
+    await vi.waitFor(() => expect(calls).toBe(4));
+    await authority.remove("bulk-recreated-4.example.dev");
+    // 一个 Frontend 的自动发现（例如用户打开含该链接的文档）在运行中重建该 scope。
+    // 4 个 worker 槽位占满时该任务先排队，放行后才会真正解析。
+    const requeue = authority.getOrQueue(
+      { key: "bulk-recreated-4.example.dev", domain: "bulk-recreated-4.example.dev", targetUrl: "https://bulk-recreated-4.example.dev/" },
+      false,
+      true,
+    );
+
+    await vi.waitFor(async () => {
+      releases.splice(0).forEach((release) => release());
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(authority.stats().bulkRefresh?.state).toBe("completed");
+    });
+    await requeue;
+    // 用户重建的条目保留（等待其 commit）；刷新因基线失效跳过它，而非用刷新结果覆盖。
+    await vi.waitFor(() => expect(snapshotCache(authority)["bulk-recreated-4.example.dev"]).toBeDefined());
+    expect(authority.stats().bulkRefresh).toMatchObject({ total: 5, scheduled: 5, completed: 4, failed: 0, skipped: 1 });
+    expect(calls).toBe(5);
+  });
+
   it("does not report a generated monogram as a remote refresh success", () => {
     expect(fetchOutcomeFor(entry({ source: "FaviconKit" }))).toBe("success");
     expect(fetchOutcomeFor(entry({ source: "generated monogram" }))).toBe("fallback");

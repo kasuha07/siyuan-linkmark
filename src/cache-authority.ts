@@ -299,6 +299,11 @@ export class KernelCacheAuthority {
     const scopes = Object.entries(this.cache)
       .filter(([, entry]) => !entry.pinned)
       .map(([key, entry]) => scopeForEntry(key, entry));
+    // Baseline generations captured with the scope set: a scope mutated after
+    // the run starts is excluded from this run even when its refresh task has
+    // not begun, so deletion or replacement before task creation cannot be
+    // undone by the run.
+    const baselines = new Map(scopes.map((scope) => [scope.key, this.generationFor(scope.key)]));
     const refresh: BulkRefreshState = {
       id: `${this.cacheEpoch}-${(++this.bulkRefreshSequence).toString(36)}`,
       state: scopes.length === 0 ? "completed" : "running",
@@ -310,7 +315,7 @@ export class KernelCacheAuthority {
     };
     this.bulkRefresh = refresh;
     await this.notifyBulkRefresh(refresh);
-    if (scopes.length > 0) void this.runBulkRefresh(refresh, scopes);
+    if (scopes.length > 0) void this.runBulkRefresh(refresh, scopes, baselines);
     return { status: "started" as const, refresh: copyBulkRefresh(refresh) };
   }
 
@@ -326,7 +331,7 @@ export class KernelCacheAuthority {
     this.policy = { ...policy };
   }
 
-  async getOrQueue(scope: LinkScope, force = false, automatic = false): Promise<CacheRequestResult> {
+  async getOrQueue(scope: LinkScope, force = false, automatic = false, expectedGeneration?: number): Promise<CacheRequestResult> {
     await this.initialize();
     const existing = this.invalidationGenerations.has(scope.key) ? undefined : this.cache[scope.key];
     if (automatic && this.policy.pauseAutomaticFetch) {
@@ -340,6 +345,13 @@ export class KernelCacheAuthority {
     }
     const trigger: ResolutionTrigger = automatic ? "automatic" : "manual";
     const generation = this.generationFor(scope.key);
+    if (expectedGeneration !== undefined && generation !== expectedGeneration) {
+      // A workspace mutation (deletion, Pinning, replacement, clear) changed
+      // the scope since the caller captured its baseline generation. The
+      // caller's work is obsolete: decline without starting a fresh task so
+      // the mutation is not undone by a later refresh result.
+      return { status: "unavailable" };
+    }
     const pending = this.inFlight.get(scope.key);
     if (pending?.generation === generation) return { status: "queued" };
 
@@ -761,7 +773,7 @@ export class KernelCacheAuthority {
     await this.options.onResolutionFailure?.(scope, category);
   }
 
-  private async runBulkRefresh(refresh: BulkRefreshState, scopes: LinkScope[]) {
+  private async runBulkRefresh(refresh: BulkRefreshState, scopes: LinkScope[], baselines: Map<string, number>) {
     let next = 0;
     const worker = async () => {
       while (refresh.state === "running") {
@@ -771,16 +783,22 @@ export class KernelCacheAuthority {
         const scope = scopes[index];
         refresh.scheduled += 1;
         try {
-          const result = await this.getOrQueue(scope, true, false);
-          if (result.status === "queued") await this.inFlight.get(scope.key)?.promise;
-          const after = this.cache[scope.key];
-          if (!after || after.pinned) {
-            // 刷新期间条目被并发删除或钉住：其结果已无关紧要，不计为失败。
+          const result = await this.getOrQueue(scope, true, false, baselines.get(scope.key));
+          if (result.status === "unavailable") {
+            // 条目自刷新启动后被删除、钉住或替换（基线失效）：本次刷新不再
+            // 适用，跳过而不发起新任务，不计为失败。
             refresh.skipped += 1;
           } else {
-            // 条目仍在：刷新完成。图标未变化（解析未提交新图标）也不算失败，
-            // 原图标继续生效，解析问题由失败通知路径单独上报。
-            refresh.completed += 1;
+            if (result.status === "queued") await this.inFlight.get(scope.key)?.promise;
+            const after = this.cache[scope.key];
+            if (!after || after.pinned) {
+              // 刷新期间条目被并发删除或钉住：其结果已无关紧要，不计为失败。
+              refresh.skipped += 1;
+            } else {
+              // 条目仍在：刷新完成。图标未变化（解析未提交新图标）也不算失败，
+              // 原图标继续生效，解析问题由失败通知路径单独上报。
+              refresh.completed += 1;
+            }
           }
         } catch {
           // 单个 scope 的失败（例如失败通知回调拒绝）不得中断整个批量刷新；

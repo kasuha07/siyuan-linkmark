@@ -45,7 +45,7 @@ are guaranteed never to be reused.
 18. As a user closing the initiating window, I want Bulk cache refresh to continue, so that the Workspace operation does not depend on one Frontend lifecycle.
 19. As a user reopening the manager, I want to see current Bulk cache refresh status, so that missed progress notifications do not hide the operation.
 20. As a user cancelling Bulk cache refresh, I want unscheduled work to stop while shared in-flight resolutions finish safely, so that cancellation does not disrupt other clients.
-21. As a user Pinning or deleting during Bulk cache refresh, I want generation invalidation to protect the newer mutation, so that an older refresh result cannot recreate or overwrite it.
+21. As a user Pinning or deleting during Bulk cache refresh, I want generation invalidation to protect the newer mutation, so that an older refresh result cannot recreate or overwrite it, and a scope mutated after the run started is skipped rather than re-resolved even when its refresh task has not begun.
 22. As a user loading the same private icon repeatedly, I want the browser to reuse it for a year, so that unchanged icon bytes are not repeatedly requested.
 23. As a user receiving a refreshed icon, I want its private URL never reused for different bytes, so that immutable caching cannot display stale content.
 24. As a maintainer, I want deterministic automated acceptance at the authority, Frontend synchronization, and manager state seams, so that no manual browser testing is delegated to the user.
@@ -118,6 +118,10 @@ are guaranteed never to be reused.
   run without persistent recovery.
 - Existing generation invalidation remains authoritative when Bulk cache
   refresh races deletion, Pinning, replacement, or other explicit mutations.
+  Each scope captured at run start carries the generation baseline taken with
+  it; a scope whose generation changed before its refresh task begins returns
+  unavailable without starting a task, so deletion or replacement before task
+  creation cannot resurrect the entry, and such scopes count as skipped work.
 - Icon IDs must become non-reusable across Kernel authority lifetimes and icon
   replacements while retaining legacy icon-ID parsing. The implementation must
   not require browser-only randomness APIs unavailable in Goja.

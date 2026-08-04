@@ -217,7 +217,7 @@ An explicit management action whose result applies to the shared cache for every
 _Avoid_: local cache action, device-only cache action
 
 **Bulk cache refresh**:
-A Kernel-owned Workspace cache operation over the non-Pinned Cache entries present when the operation starts. It uses bounded resolution concurrency, admits only one workspace run at a time, and reports progress without requiring a Frontend client to enumerate the authoritative cache.
+A Kernel-owned Workspace cache operation over the non-Pinned Cache entries present when the operation starts. It uses bounded resolution concurrency, admits only one workspace run at a time, and reports progress without requiring a Frontend client to enumerate the authoritative cache. A scope mutated after the run starts is excluded from that run even when its refresh task has not begun, so deletion, Pinning, or replacement cannot be undone by the refresh.
 _Avoid_: frontend refresh loop, refresh current page, unbounded refresh queue
 
 **Workspace operation lifecycle**:
