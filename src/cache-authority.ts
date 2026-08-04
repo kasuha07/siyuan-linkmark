@@ -1,4 +1,5 @@
 import { InvalidShareDomainError, isEligibleShareTarget, shareEligibilityOf } from "./parent-domain";
+import { effectiveCacheMatch } from "./cache-match";
 import type { CachePolicyFields } from "./resolver-contract";
 
 export type CacheEntry = {
@@ -83,16 +84,55 @@ export interface IconResolver {
  * epoch identifies the kernel process that produced the batch, so a client
  * can detect that a restart reset the revision.
  */
-export type CacheChangeEvent = {
+export type CacheCursor = {
   epoch: string;
   revision: number;
-  upserts: Record<string, CacheEntry>;
-  removed: string[];
 };
 
+export type CacheChangeEvent = CacheCursor;
+
 export type CacheMutationReceipt =
-  | { status: "committed"; change: CacheChangeEvent }
+  | ({ status: "committed" } & CacheCursor)
   | { status: "unchanged"; epoch: string; revision: number };
+
+export type CacheLookupResult = CacheCursor & {
+  matches: Record<string, { cacheKey: string; entry: CacheEntry } | null>;
+};
+
+export type CacheManagementQuery = { query: string; offset: number; limit: number };
+
+export type CacheManagementItem = { key: string; entry: CacheEntry; entryToken: string };
+
+export type CacheManagementPage = CacheCursor & CacheManagementQuery & {
+  items: CacheManagementItem[];
+  total: number;
+};
+
+export type CacheEntryGuard = { epoch: string; entryToken: string };
+
+export type BulkRefreshState = {
+  id: string;
+  state: "running" | "cancelling" | "cancelled" | "completed";
+  total: number;
+  scheduled: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+};
+
+export type CacheStats = CacheCursor & {
+  entryCount: number;
+  bulkRefresh?: BulkRefreshState;
+};
+
+export class CacheEntryChangedError extends Error {
+  readonly code = "cache_entry_changed";
+
+  constructor() {
+    super("cache_entry_changed");
+    this.name = "CacheEntryChangedError";
+  }
+}
 
 /**
  * An isolated view of the authoritative Cache together with the revision
@@ -107,12 +147,14 @@ export type CacheSnapshot = {
 };
 
 export type CacheAuthorityOptions = {
+  cacheEpoch?: string;
   cachePolicy?: CachePolicy;
   resolverVersion?: number;
   privateIconUrl?: (iconId: string) => string;
   onCacheChanged?: (event: CacheChangeEvent) => Promise<void> | void;
   onCacheChangedError?: (error: unknown) => Promise<void> | void;
   onResolutionFailure?: (scope: LinkScope, category: ResolutionFailureCategory) => Promise<void> | void;
+  onBulkRefreshChanged?: (state: BulkRefreshState) => Promise<void> | void;
 };
 
 const CACHE_INDEX_FILE = "favicon-cache-v2.json";
@@ -150,7 +192,10 @@ export class KernelCacheAuthority {
   private policy: CachePolicy;
   private iconSequence = 0;
   private cacheRevision = 0;
-  private readonly cacheEpoch = newCacheEpoch();
+  private readonly cacheEpoch: string;
+  private sortedKeys?: { revision: number; keys: string[] };
+  private bulkRefresh?: BulkRefreshState;
+  private bulkRefreshSequence = 0;
 
   constructor(
     private readonly storage: CacheStorage,
@@ -159,6 +204,7 @@ export class KernelCacheAuthority {
     private readonly options: CacheAuthorityOptions = {},
   ) {
     this.policy = options.cachePolicy ?? { cacheDays: 30 };
+    this.cacheEpoch = options.cacheEpoch ?? newCacheEpoch();
   }
 
   async initialize() {
@@ -195,6 +241,79 @@ export class KernelCacheAuthority {
 
   snapshot(): CacheSnapshot {
     return { cache: copyCache(this.cache), revision: this.cacheRevision, epoch: this.cacheEpoch };
+  }
+
+  async lookup(scopes: LinkScope[]): Promise<CacheLookupResult> {
+    await this.initialize();
+    const matches = Object.fromEntries(scopes.map((scope) => {
+      const match = effectiveCacheMatch(this.cache, scope);
+      return [scope.key, match ? { cacheKey: match.cacheKey, entry: copyEntry(match.entry) } : null];
+    }));
+    return { matches, epoch: this.cacheEpoch, revision: this.cacheRevision };
+  }
+
+  async query(input: CacheManagementQuery): Promise<CacheManagementPage> {
+    await this.initialize();
+    const query = input.query.trim().toLowerCase();
+    const offset = Math.max(0, Math.floor(input.offset));
+    const limit = Math.min(200, Math.max(1, Math.floor(input.limit)));
+    const keys = this.sortedCacheKeys().filter((key) => {
+      const entry = this.cache[key];
+      return !query || key.toLowerCase().includes(query) || entry.domain?.toLowerCase().includes(query);
+    });
+    return {
+      items: keys.slice(offset, offset + limit).map((key) => ({
+        key,
+        entry: copyEntry(this.cache[key]),
+        entryToken: entryToken(key, this.cache[key]),
+      })),
+      total: keys.length,
+      offset,
+      limit,
+      epoch: this.cacheEpoch,
+      revision: this.cacheRevision,
+      query,
+    };
+  }
+
+  stats(): CacheStats {
+    return {
+      entryCount: Object.keys(this.cache).length,
+      epoch: this.cacheEpoch,
+      revision: this.cacheRevision,
+      bulkRefresh: this.bulkRefresh ? copyBulkRefresh(this.bulkRefresh) : undefined,
+    };
+  }
+
+  async startBulkRefresh() {
+    await this.initialize();
+    if (this.bulkRefresh?.state === "running" || this.bulkRefresh?.state === "cancelling") {
+      return { status: "already-running" as const, refresh: copyBulkRefresh(this.bulkRefresh) };
+    }
+    const scopes = Object.entries(this.cache)
+      .filter(([, entry]) => !entry.pinned)
+      .map(([key, entry]) => scopeForEntry(key, entry));
+    const refresh: BulkRefreshState = {
+      id: `${this.cacheEpoch}-${(++this.bulkRefreshSequence).toString(36)}`,
+      state: scopes.length === 0 ? "completed" : "running",
+      total: scopes.length,
+      scheduled: 0,
+      completed: 0,
+      failed: 0,
+      skipped: 0,
+    };
+    this.bulkRefresh = refresh;
+    await this.notifyBulkRefresh(refresh);
+    if (scopes.length > 0) void this.runBulkRefresh(refresh, scopes);
+    return { status: "started" as const, refresh: copyBulkRefresh(refresh) };
+  }
+
+  cancelBulkRefresh() {
+    if (this.bulkRefresh?.state === "running") {
+      this.bulkRefresh.state = "cancelling";
+      void this.notifyBulkRefresh(this.bulkRefresh);
+    }
+    return this.bulkRefresh ? copyBulkRefresh(this.bulkRefresh) : undefined;
   }
 
   setPolicy(policy: CachePolicy) {
@@ -245,11 +364,12 @@ export class KernelCacheAuthority {
     return { status: "queued" };
   }
 
-  async putPinned(scope: LinkScope, entry: CacheEntry, contentType: string, bytes: ArrayBuffer, replaceKey?: string) {
+  async putPinned(scope: LinkScope, entry: CacheEntry, contentType: string, bytes: ArrayBuffer, replaceKey?: string, guard?: CacheEntryGuard) {
     if (entry.includeSubdomains && !isEligibleShareTarget(scope.domain)) {
       throw new InvalidShareDomainError();
     }
     await this.initialize();
+    this.assertEntryGuard(replaceKey ?? scope.key, guard);
     const generation = this.invalidate(scope.key);
     const replacedGeneration = replaceKey && replaceKey !== scope.key ? this.invalidate(replaceKey) : undefined;
     const completeInvalidations = () => {
@@ -301,8 +421,9 @@ export class KernelCacheAuthority {
     });
   }
 
-  async remove(key: string) {
+  async remove(key: string, guard?: CacheEntryGuard) {
     await this.initialize();
+    this.assertEntryGuard(key, guard);
     const generation = this.invalidate(key);
     return this.enqueueCacheMutation(async () => {
       const previous = this.cache[key];
@@ -322,6 +443,12 @@ export class KernelCacheAuthority {
       await this.removePayload(previous);
       return receipt;
     });
+  }
+
+  async refreshEntry(key: string, guard: CacheEntryGuard) {
+    await this.initialize();
+    this.assertEntryGuard(key, guard);
+    return this.getOrQueue(scopeForEntry(key, this.cache[key]), true, false);
   }
 
   async clear() {
@@ -573,6 +700,7 @@ export class KernelCacheAuthority {
     for (const [key, entry] of Object.entries(upserts)) {
       Object.defineProperty(this.cache, key, { value: entry, enumerable: true, configurable: true, writable: true });
     }
+    this.sortedKeys = undefined;
   }
 
   private unchangedReceipt(): CacheMutationReceipt {
@@ -580,10 +708,12 @@ export class KernelCacheAuthority {
   }
 
   private async publishChange(upserts: Record<string, CacheEntry>, removed: string[]): Promise<CacheMutationReceipt> {
+    void upserts;
+    void removed;
     this.cacheRevision += 1;
-    const change: CacheChangeEvent = { epoch: this.cacheEpoch, revision: this.cacheRevision, upserts: copyCache(upserts), removed: [...removed] };
+    const change: CacheChangeEvent = { epoch: this.cacheEpoch, revision: this.cacheRevision };
     try {
-      await this.options.onCacheChanged?.(copyChangeEvent(change));
+      await this.options.onCacheChanged?.({ ...change });
     } catch (error) {
       try {
         await this.options.onCacheChangedError?.(error);
@@ -591,11 +721,60 @@ export class KernelCacheAuthority {
         // Notification diagnostics cannot change an already committed mutation.
       }
     }
-    return { status: "committed", change };
+    return { status: "committed", ...change };
+  }
+
+  private sortedCacheKeys() {
+    if (this.sortedKeys?.revision === this.cacheRevision) return this.sortedKeys.keys;
+    const keys = Object.keys(this.cache).sort((left, right) => (
+      ordinalCompare(left.toLowerCase(), right.toLowerCase()) || ordinalCompare(left, right)
+    ));
+    this.sortedKeys = { revision: this.cacheRevision, keys };
+    return keys;
+  }
+
+  private assertEntryGuard(key: string, guard: CacheEntryGuard | undefined) {
+    if (!guard) return;
+    const entry = this.cache[key];
+    if (guard.epoch !== this.cacheEpoch || !entry || guard.entryToken !== entryToken(key, entry)) {
+      throw new CacheEntryChangedError();
+    }
   }
 
   private async notifyResolutionFailure(scope: LinkScope, category: ResolutionFailureCategory) {
     await this.options.onResolutionFailure?.(scope, category);
+  }
+
+  private async runBulkRefresh(refresh: BulkRefreshState, scopes: LinkScope[]) {
+    let next = 0;
+    const worker = async () => {
+      while (refresh.state === "running") {
+        const index = next;
+        next += 1;
+        if (index >= scopes.length) return;
+        const scope = scopes[index];
+        const before = this.cache[scope.key];
+        refresh.scheduled += 1;
+        const result = await this.getOrQueue(scope, true, false);
+        if (result.status === "queued") await this.inFlight.get(scope.key)?.promise;
+        const after = this.cache[scope.key];
+        if (after?.pinned) refresh.skipped += 1;
+        else if (after?.iconId && after.iconId !== before?.iconId) refresh.completed += 1;
+        else refresh.failed += 1;
+        await this.notifyBulkRefresh(refresh);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(MAX_RESOLUTION_CONCURRENCY, scopes.length) }, worker));
+    refresh.state = refresh.state === "cancelling" ? "cancelled" : "completed";
+    await this.notifyBulkRefresh(refresh);
+  }
+
+  private async notifyBulkRefresh(refresh: BulkRefreshState) {
+    try {
+      await this.options.onBulkRefreshChanged?.(copyBulkRefresh(refresh));
+    } catch {
+      // Progress notification failure cannot change the Workspace operation.
+    }
   }
 
   private resolutionCategoryOf(error: unknown): ResolutionFailureCategory {
@@ -634,7 +813,8 @@ export class KernelCacheAuthority {
 
   private nextIconId(key: string) {
     this.iconSequence += 1;
-    return `${encodeScopeKey(key)}-${this.now().toString(36)}-${this.iconSequence.toString(36)}`;
+    const authorityId = Buffer.from(this.cacheEpoch, "utf8").toString("hex");
+    return `${encodeScopeKey(key)}-${this.now().toString(36)}-${authorityId}${this.iconSequence.toString(36)}`;
   }
 
   private iconPath(iconId: string) {
@@ -663,12 +843,31 @@ function copyCache(cache: Record<string, CacheEntry>): Record<string, CacheEntry
   return Object.fromEntries(Object.entries(cache).map(([key, entry]) => [key, copyEntry(entry)]));
 }
 
-function copyChangeEvent(event: CacheChangeEvent): CacheChangeEvent {
-  return { epoch: event.epoch, revision: event.revision, upserts: copyCache(event.upserts), removed: [...event.removed] };
-}
-
 function copyEntry(entry: CacheEntry): CacheEntry {
   return { ...entry };
+}
+
+function entryToken(key: string, entry: CacheEntry) {
+  return Buffer.from(JSON.stringify([key, entry]), "utf8").toString("base64url");
+}
+
+function ordinalCompare(left: string, right: string) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function scopeForEntry(key: string, entry: CacheEntry): LinkScope {
+  const domain = entry.domain ?? key.split("::", 1)[0];
+  return {
+    key,
+    domain,
+    targetUrl: entry.targetUrl ?? `https://${domain}${entry.pathPrefix ?? "/"}`,
+    routeKey: entry.routeKey,
+    pathPrefix: entry.pathPrefix,
+  };
+}
+
+function copyBulkRefresh(state: BulkRefreshState): BulkRefreshState {
+  return { ...state };
 }
 
 /**

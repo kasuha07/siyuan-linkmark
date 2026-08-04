@@ -85,15 +85,35 @@ A desktop, mobile, or browser plugin instance that renders icons and requests ca
 _Avoid_: cache writer, cache owner
 
 **Frontend cache client**:
-The frontend client's cache-facing subsystem that owns the local Cache view, the Cache revision and Cache epoch baseline, Kernel RPC calls, and fetch orchestration, and that reports cache changes and manual-refresh failures to the render pipeline through callbacks.
+The frontend client's cache-facing subsystem that owns the Frontend cache working set, Kernel RPC calls, and fetch orchestration, and that reports relevant cache changes and manual-refresh failures to the render pipeline through callbacks.
 _Avoid_: frontend cache, client cache, cache authority
+
+**Frontend cache working set**:
+The bounded cache state needed by one Frontend client for its Present scopes and in-progress cache operations. It excludes the complete authoritative cache and cache-management result pages.
+_Avoid_: cache snapshot, frontend cache mirror, management cache
+
+**Working-set refresh**:
+The coalesced replacement of a Frontend cache working set by looking up all Present scopes after authoritative cache state changes. Changes arriving during a lookup require at most one follow-up refresh rather than parallel lookups.
+_Avoid_: cache snapshot recovery, per-entry patch, reverse-dependency update
+
+**Cache-management query**:
+A revision-tagged search of authoritative Cache entries for management actions, ordered deterministically by normalized Cache key rather than client locale. Its result is read live from the current Cache revision rather than retained as a historical snapshot.
+_Avoid_: cache lookup, cache snapshot, frontend filtering
+
+**Cache-management page**:
+One offset-based slice of a Cache-management query. It is invalidated when the Cache revision or Cache epoch changes and is never combined with pages from another revision.
+_Avoid_: cursor snapshot, frontend cache page, stable historical page
+
+**Entry token**:
+An opaque Cache-authority identity for one Cache entry version, returned with a Cache-management page item and required for single-entry mutations. It changes whenever that entry's mutable state changes and rejects stale management actions.
+_Avoid_: global Cache revision, iconId assumption, frontend row identity
 
 **Editor responsiveness**:
 The user-visible ability to type, paste, and add or remove external links in a mounted SiYuan document without Linkmark causing perceptible delay. It is Linkmark's primary performance outcome for large documents.
 _Avoid_: favicon download speed, resolver throughput, general frontend performance
 
 **Large-document performance scenario**:
-The standard Linkmark responsiveness workload containing 2,000 external-link nodes, 500 distinct Link scopes, and a Frontend cache view of 10,000 entries.
+The standard Linkmark responsiveness workload containing 2,000 external-link nodes, 500 distinct Link scopes, and an authoritative cache of 10,000 entries.
 _Avoid_: large document, stress test, production maximum
 
 **Incremental interaction target**:
@@ -149,23 +169,27 @@ The authoritative record associating a link scope with its resolved or pinned pr
 _Avoid_: favicon file, cache row
 
 **Cache match**:
-The cache entry that applies to a link scope after pinned, subdomain-shared, and domain-fallback precedence resolution.
+The effective cache entry selected by the Cache authority for a Link scope after Pinned, route-domain, Shared-pin, automatic, and freshness precedence resolution.
 _Avoid_: cache hit, lookup result
 
+**Cache lookup**:
+A Cache-authority read that returns the Cache match for each requested Link scope without exposing the complete authoritative cache.
+_Avoid_: cache snapshot, frontend cache search, cache-management query
+
 **Cache snapshot**:
-An isolated view of the authoritative cache that an RPC caller or state-change subscriber may read without changing the cache authority, carrying the Cache revision and Cache epoch current when the view was taken; a Frontend client adopts them as its baseline at startup, when a Cache revision gap is detected, and when the Cache epoch changes.
+A complete isolated view of the authoritative cache. It is not transferred to a Frontend client for rendering or cache management.
 _Avoid_: live cache object, mutable cache reference
 
 **Cache change event**:
-A cache-authority broadcast that reports which Cache entries changed and which Link scopes were removed since the previous event, tagged with a Cache revision and the Cache epoch.
-_Avoid_: full cache broadcast, cache snapshot push
+A compact cache-authority invalidation carrying only the current Cache revision and Cache epoch. It tells Frontend clients to refresh affected query views and their Frontend cache working sets without broadcasting Cache entries.
+_Avoid_: cache delta, full cache broadcast, cache snapshot push
 
 **Cache mutation receipt**:
-The authoritative result of an explicit Workspace cache operation, identifying either its committed Cache change event or that no state changed at the reported Cache revision and Cache epoch. The initiating Frontend client applies a committed receipt through the same idempotent path as a broadcast.
-_Avoid_: refreshed snapshot, local optimistic result
+The authoritative result of an explicit Workspace cache operation, identifying whether state changed and carrying the resulting Cache revision and Cache epoch without Cache entry deltas.
+_Avoid_: cache delta, refreshed snapshot, local optimistic result
 
 **Cache revision**:
-The strictly increasing per-process number attached to each Cache change event and Cache snapshot; a gap between the last revision a Frontend client saw and the next event's revision means its local cache is out of date, and the number is discarded when the Cache epoch changes.
+The strictly increasing per-process number attached to authoritative cache reads, Cache change events, and Cache mutation receipts. A newer revision invalidates older Frontend cache working sets and cache-management query results, and the number is discarded when the Cache epoch changes.
 _Avoid_: version number, cache generation
 
 **Cache epoch**:
@@ -177,8 +201,8 @@ One durable cache-index write that commits all compatible cache-entry changes co
 _Avoid_: deferred best-effort save, per-entry index write
 
 **Incremental cache hot path**:
-The ordinary Cache entry mutation path in which work scales with the changed entries, except for one whole-index persistence write per Cache persistence batch. Cache snapshot construction is reserved for startup and recovery from a Cache revision or Cache epoch discontinuity.
-_Avoid_: fully incremental persistence, snapshot-per-change
+The ordinary Cache entry mutation path in which work scales with the changed entries, except for one whole-index persistence write per Cache persistence batch. Complete Cache snapshots remain internal; Frontend synchronization uses Cache lookup, Cache-management queries, and compact invalidations.
+_Avoid_: fully incremental persistence, frontend snapshot synchronization
 
 **Legacy cache**:
 The old `auto-favicon` `favicon-cache.json` index and public icon files that Linkmark deliberately neither imports nor deletes.
@@ -187,6 +211,14 @@ _Avoid_: Linkmark cache, migration source
 **Workspace cache operation**:
 An explicit management action whose result applies to the shared cache for every connected frontend client.
 _Avoid_: local cache action, device-only cache action
+
+**Bulk cache refresh**:
+A Kernel-owned Workspace cache operation over the non-Pinned Cache entries present when the operation starts. It uses bounded resolution concurrency, admits only one workspace run at a time, and reports progress without requiring a Frontend client to enumerate the authoritative cache.
+_Avoid_: frontend refresh loop, refresh current page, unbounded refresh queue
+
+**Workspace operation lifecycle**:
+The lifetime of a shared cache management operation independent of its initiating Frontend: it may continue after that client disconnects, can be observed and cooperatively cancelled by another client, and is terminated by Kernel plugin reload.
+_Avoid_: dialog lifetime, frontend task, durable background job
 
 **Cache policy**:
 The workspace-wide settings that determine favicon resolution, fallback generation, automatic retrieval, and entry freshness.
@@ -248,12 +280,16 @@ _Avoid_: blocking fallback, error icon
 The authenticated kernel-plugin HTTP endpoint that returns the bytes of an icon stored by the cache authority.
 _Avoid_: public static icon URL, direct storage path
 
+**Immutable private icon URL**:
+A Private icon route URL whose iconId is never reused across Cache authority lifetimes or icon replacements, allowing the authenticated response to use a long private max-age with `immutable` without serving a different icon under the same URL.
+_Avoid_: long-lived cache URL, content URL without identity guarantee
+
 **In-flight task**:
 A kernel-resident favicon resolution task that may continue after a frontend closes but is cancelled when the kernel plugin stops or reloads. A cache-miss request receives a queue acknowledgement without waiting for this task to resolve; a committed result is delivered through a cache-state change.
 _Avoid_: durable job, resumable task
 
 **Resolution outcome notification**:
-A cache-authority broadcast marking an In-flight task as committed or exhausted. A committed task's entry arrives through a Cache change event; an exhausted task sends only its Link scope and a sanitized failure category.
+A cache-authority broadcast marking an In-flight task as committed or exhausted. A committed task advances the Cache revision and becomes visible through Cache lookup after the compact invalidation; an exhausted task sends only its Link scope and a sanitized failure category.
 _Avoid_: RPC error, remote response payload, retry loop
 
 **Resolution concurrency**:

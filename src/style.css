@@ -10,6 +10,19 @@
   gap: 8px;
 }
 
+.siyuan-linkmark-cache-bulk-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+}
+
+.siyuan-linkmark-cache-pager {
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .siyuan-linkmark-cache-manager {
   box-sizing: border-box;
   display: flex;

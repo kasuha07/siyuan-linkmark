@@ -132,5 +132,17 @@
   "openSettings": "插件设置",
   "feedback": "问题反馈",
   "pluginEnabled": "链接印记已启用",
-  "pluginDisabled": "链接印记已停用"
+  "pluginDisabled": "链接印记已停用",
+  "cancelRefreshAll": "取消刷新",
+  "cacheLoading": "正在加载缓存条目…",
+  "previousPage": "上一页",
+  "nextPage": "下一页",
+  "cachePageSummary": "{start}–{end} / {total}",
+  "cacheEntryChanged": "该条目已发生变化，列表已刷新。",
+  "cacheActionFailed": "无法完成缓存操作。",
+  "bulkRefresh_started": "正在刷新 {total} 个缓存条目",
+  "bulkRefresh_running": "正在刷新 {completed} / {total}",
+  "bulkRefresh_cancelling": "将在完成当前任务后取消，已处理 {completed} / {total}",
+  "bulkRefresh_cancelled": "刷新已取消，已处理 {completed} / {total}",
+  "bulkRefresh_completed": "已完成 {total} 个条目的刷新"
 }

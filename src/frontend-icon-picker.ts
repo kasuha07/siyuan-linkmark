@@ -9,9 +9,10 @@ import { pickerScopeChoices } from "./parent-domain";
 import { RESOLVER_VERSION } from "./resolver-contract";
 import type { Settings } from "./frontend-settings";
 import type { LinkScope } from "./url-scope";
+import type { CacheEntryGuard } from "./cache-authority";
 
 export type IconPickerDialogActions = {
-  restoreAutomaticIcon: (key: string) => Promise<void>;
+  restoreAutomaticIcon: (key: string, guard?: CacheEntryGuard) => Promise<void>;
   scheduleScan: () => void;
 };
 
@@ -21,6 +22,7 @@ export type IconPickerDialogOptions = {
   settings: Settings;
   selectedScope: LinkScope;
   targetUrl: string;
+  entryGuard?: CacheEntryGuard;
   afterChange: () => void;
   actions: IconPickerDialogActions;
 };
@@ -31,6 +33,7 @@ export class IconPickerDialog {
   private readonly settings: Settings;
   private readonly selectedScope: LinkScope;
   private readonly targetUrl: string;
+  private readonly entryGuard?: CacheEntryGuard;
   private readonly afterChange: () => void;
   private readonly actions: IconPickerDialogActions;
 
@@ -40,6 +43,7 @@ export class IconPickerDialog {
     this.settings = options.settings;
     this.selectedScope = options.selectedScope;
     this.targetUrl = options.targetUrl;
+    this.entryGuard = options.entryGuard;
     this.afterChange = options.afterChange;
     this.actions = options.actions;
     this.open();
@@ -79,7 +83,7 @@ export class IconPickerDialog {
     controls.append(fileInput, urlInput, urlButton);
     if (this.client.entryFor(selectedScope.key)?.pinned) {
       controls.append(actionButton(t("restoreAutomatic"), "b3-button b3-button--text", () => {
-        void this.actions.restoreAutomaticIcon(selectedScope.key).then(() => {
+        void this.actions.restoreAutomaticIcon(selectedScope.key, this.entryGuard).then(() => {
           dialog.destroy();
           this.afterChange();
         });
@@ -161,6 +165,7 @@ export class IconPickerDialog {
           value,
           scopeSelect.value === "subdomains",
           selectedScope.key,
+          this.entryGuard,
         );
         if (!root.isConnected) return;
         await this.client.applyMutationReceipt(receipt);
@@ -259,6 +264,7 @@ export class IconPickerDialog {
         blob.type || "image/png",
         await blobToBase64(blob),
         selectedScope.key,
+        this.entryGuard,
       );
       await this.client.applyMutationReceipt(receipt);
       this.client.clearFailure(scope.key);

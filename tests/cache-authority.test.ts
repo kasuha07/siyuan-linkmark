@@ -7,7 +7,7 @@ import {
   type CacheStorage,
   type LinkScope,
 } from "../src/cache-authority";
-import { privateIconIdFromPath } from "../src/private-route";
+import { PRIVATE_ICON_CACHE_CONTROL, privateIconIdFromPath } from "../src/private-route";
 import { INVALID_SHARE_DOMAIN } from "../src/parent-domain";
 import { fetchOutcomeFor, outcomeForCacheRequest } from "../src/refresh-outcome";
 import { ForwardProxyIconResolver, type ForwardProxy, type KernelResolverPolicy } from "../src/kernel-resolver";
@@ -142,6 +142,98 @@ function subscribers() {
 }
 
 describe("KernelCacheAuthority", () => {
+  it("looks up effective matches and pages authoritative entries without a snapshot", async () => {
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100);
+    await authority.putPinned(
+      { key: "example.dev", domain: "example.dev", targetUrl: "https://example.dev/" },
+      entry({ domain: "example.dev", pinned: true, includeSubdomains: true }),
+      "image/png",
+      new Uint8Array([1]).buffer,
+    );
+    await authority.putPinned(
+      { key: "docs.example.dev", domain: "docs.example.dev", targetUrl: "https://docs.example.dev/" },
+      entry({ domain: "docs.example.dev", pinned: true }),
+      "image/png",
+      new Uint8Array([2]).buffer,
+    );
+
+    const lookup = await authority.lookup([
+      { key: "docs.example.dev", domain: "docs.example.dev", targetUrl: "https://docs.example.dev/" },
+      { key: "child.example.dev", domain: "child.example.dev", targetUrl: "https://child.example.dev/" },
+      { key: "missing.test", domain: "missing.test", targetUrl: "https://missing.test/" },
+    ]);
+    expect(lookup.matches).toEqual({
+      "docs.example.dev": expect.objectContaining({ cacheKey: "docs.example.dev", entry: expect.objectContaining({ pinned: true }) }),
+      "child.example.dev": expect.objectContaining({ cacheKey: "example.dev", entry: expect.objectContaining({ includeSubdomains: true }) }),
+      "missing.test": null,
+    });
+
+    const page = await authority.query({ query: "EXAMPLE", offset: 0, limit: 100 });
+    expect(page.items.map((item) => item.key)).toEqual(["docs.example.dev", "example.dev"]);
+    expect(page).toMatchObject({ total: 2, offset: 0, limit: 100, epoch: lookup.epoch, revision: lookup.revision });
+    expect(page.items.every((item) => typeof item.entryToken === "string" && item.entryToken.length > 0)).toBe(true);
+    expect(authority.stats()).toMatchObject({ entryCount: 2, epoch: lookup.epoch, revision: lookup.revision });
+  });
+
+  it("rejects a stale entry token and publishes compact mutation cursors", async () => {
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
+    const page = await authority.query({ query: "", offset: 0, limit: 100 });
+    const staleToken = page.items[0].entryToken;
+    await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([2]).buffer);
+
+    await expect(authority.remove(scope().key, { epoch: page.epoch, entryToken: staleToken }))
+      .rejects.toMatchObject({ code: "cache_entry_changed" });
+    expect(authority.stats().entryCount).toBe(1);
+
+    const receipt = await authority.remove(scope().key, {
+      epoch: page.epoch,
+      entryToken: (await authority.query({ query: "", offset: 0, limit: 100 })).items[0].entryToken,
+    });
+    expect(receipt).toEqual(expect.objectContaining({ status: "committed", epoch: expect.any(String), revision: expect.any(Number) }));
+    expect(receipt).not.toHaveProperty("change");
+    expect(received.at(-1)).toEqual({ epoch: receipt.epoch, revision: receipt.revision });
+  });
+
+  it("runs one cancellable bounded Bulk cache refresh for the captured automatic entries", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set("favicon-cache-v2.json", JSON.stringify(Object.fromEntries(
+      Array.from({ length: 8 }, (_, index) => {
+        const domain = `bulk-${index}.example.dev`;
+        return [domain, entry({ domain, targetUrl: `https://${domain}/`, iconId: `old-${index}` })];
+      }),
+    )));
+    const releases: Array<() => void> = [];
+    let active = 0;
+    let peak = 0;
+    let calls = 0;
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => {
+        calls += 1;
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        active -= 1;
+        return resolved();
+      },
+    }, () => 100);
+    await authority.initialize();
+
+    await expect(authority.startBulkRefresh()).resolves.toMatchObject({ status: "started", refresh: { state: "running", total: 8 } });
+    await expect(authority.startBulkRefresh()).resolves.toMatchObject({ status: "already-running" });
+    await vi.waitFor(() => expect(calls).toBe(4));
+    expect(peak).toBe(4);
+
+    expect(authority.cancelBulkRefresh()).toMatchObject({ state: "cancelling" });
+    releases.splice(0).forEach((release) => release());
+    await vi.waitFor(() => expect(authority.stats().bulkRefresh?.state).toBe("cancelled"));
+    expect(calls).toBe(4);
+    expect(authority.stats().bulkRefresh).toMatchObject({ total: 8, scheduled: 4, state: "cancelled" });
+  });
+
   it("does not report a generated monogram as a remote refresh success", () => {
     expect(fetchOutcomeFor(entry({ source: "FaviconKit" }))).toBe("success");
     expect(fetchOutcomeFor(entry({ source: "generated monogram" }))).toBe("fallback");
@@ -153,6 +245,7 @@ describe("KernelCacheAuthority", () => {
   });
 
   it("matches only its complete private icon route", () => {
+    expect(PRIVATE_ICON_CACHE_CONTROL).toBe("private, max-age=31536000, immutable");
     expect(privateIconIdFromPath("/plugin/private/siyuan-linkmark/icon/example-1", "siyuan-linkmark")).toBe("example-1");
     expect(privateIconIdFromPath("/icon/example-1", "siyuan-linkmark")).toBeUndefined();
     expect(privateIconIdFromPath("/plugin/private/siyuan-linkmark/icon/%2Fetc", "siyuan-linkmark")).toBeUndefined();
@@ -255,7 +348,7 @@ describe("KernelCacheAuthority", () => {
       await authority.initialize();
 
       await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
-      await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
+      await watched.waitForCache((events) => events.length === 1, "the committed entry broadcast");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -290,7 +383,7 @@ describe("KernelCacheAuthority", () => {
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     storage.releaseCacheIndexWrite();
 
-    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => events.length === 1, "the committed entry broadcast");
     expect(snapshotCache(authority)["example.com"]).toMatchObject({ source: "test resolver" });
   });
 
@@ -313,9 +406,9 @@ describe("KernelCacheAuthority", () => {
     await vi.waitFor(() => expect(calls).toBe(1));
 
     resolveDownload?.(resolved());
-    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the committed entry broadcast");
+    await watched.waitForCache((events) => events.length === 1, "the committed entry broadcast");
     expect(calls).toBe(1);
-    expect(watched.cacheEvents[0].upserts["example.com"]).toMatchObject({
+    expect(snapshotCache(authority)["example.com"]).toMatchObject({
       domain: "example.com",
       source: "test resolver",
       url: expect.stringContaining("/api/plugin/private/siyuan-linkmark/icon/"),
@@ -439,7 +532,7 @@ describe("KernelCacheAuthority", () => {
     await vi.waitFor(() => expect(resolve).toHaveBeenCalled());
   });
 
-  it("broadcasts isolated upsert entry copies without structuredClone in the kernel runtime", async () => {
+  it("broadcasts an isolated compact cursor without structuredClone in the kernel runtime", async () => {
     const received: CacheChangeEvent[] = [];
     vi.stubGlobal("structuredClone", undefined);
     try {
@@ -452,7 +545,7 @@ describe("KernelCacheAuthority", () => {
 
       await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
       await vi.waitFor(() => expect(received).toHaveLength(1));
-      received[0].upserts["example.com"].source = "subscriber mutation";
+      received[0].revision = 999;
       const snapshot = snapshotCache(authority);
       snapshot["example.com"].source = "caller mutation";
 
@@ -525,7 +618,7 @@ describe("KernelCacheAuthority", () => {
     await vi.waitFor(() => expect(calls).toBe(2));
     releases[1]?.();
 
-    await watched.waitForCache((events) => Boolean(events[0]?.upserts["example.com"]), "the replacement commit broadcast");
+    await watched.waitForCache((events) => events.length === 1, "the replacement commit broadcast");
     expect(snapshotCache(authority)).toEqual({
       "example.com": expect.objectContaining({ source: "resolver 2" }),
     });
@@ -554,17 +647,7 @@ describe("KernelCacheAuthority", () => {
 
     await vi.waitFor(() => expect(received).toHaveLength(1));
     expect(storage.cacheIndexWrites).toBe(1);
-    expect(received).toEqual([
-      {
-        epoch: expect.any(String),
-        revision: 1,
-        upserts: {
-          "first.example.com": expect.objectContaining({ source: "first.example.com" }),
-          "second.example.com": expect.objectContaining({ source: "second.example.com" }),
-        },
-        removed: [],
-      },
-    ]);
+    expect(received).toEqual([{ epoch: expect.any(String), revision: 1 }]);
     expect(snapshotCache(authority)).toEqual({
       "first.example.com": expect.objectContaining({ source: "first.example.com" }),
       "second.example.com": expect.objectContaining({ source: "second.example.com" }),
@@ -594,10 +677,7 @@ describe("KernelCacheAuthority", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(storage.cacheIndexWrites).toBe(1);
       expect(received).toHaveLength(1);
-      expect(received[0].upserts).toEqual({
-        "first.example.com": expect.any(Object),
-        "second.example.com": expect.any(Object),
-      });
+      expect(received[0]).toEqual({ epoch: expect.any(String), revision: 1 });
     } finally {
       vi.useRealTimers();
     }
@@ -857,11 +937,11 @@ describe("KernelCacheAuthority", () => {
 
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(received).toHaveLength(1));
-    const first = received[0].upserts["example.com"];
+    const first = snapshotCache(authority)["example.com"];
 
     await expect(authority.getOrQueue(scope(), true)).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(received).toHaveLength(2));
-    const second = received[1].upserts["example.com"];
+    const second = snapshotCache(authority)["example.com"];
 
     expect(first.iconId).not.toBe(second.iconId);
     await expect(authority.icon(first.iconId!)).resolves.toBeUndefined();
@@ -918,7 +998,7 @@ describe("KernelCacheAuthority", () => {
     expect(received.map((event) => event.revision)).toEqual([1, 2, 3, 4]);
   });
 
-  it("returns the committed change as an isolated mutation receipt", async () => {
+  it("returns the committed cursor as an isolated mutation receipt", async () => {
     const received: CacheChangeEvent[] = [];
     const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100, {
       onCacheChanged: (event) => { received.push(event); },
@@ -927,13 +1007,20 @@ describe("KernelCacheAuthority", () => {
 
     const receipt = await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
 
-    expect(receipt).toEqual({ status: "committed", change: received[0] });
-    if (receipt.status === "committed") {
-      expect(receipt.change).not.toBe(received[0]);
-      expect(receipt.change.upserts[scope().key]).not.toBe(received[0].upserts[scope().key]);
-      received[0].upserts[scope().key].source = "subscriber mutation";
-      expect(receipt.change.upserts[scope().key].source).toBe("test resolver");
-    }
+    expect(receipt).toEqual({ status: "committed", ...received[0] });
+    expect(receipt).not.toBe(received[0]);
+    received[0].revision = 999;
+    expect(receipt.revision).toBe(1);
+  });
+
+  it("does not reuse private icon ids across authority lifetimes", async () => {
+    const first = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100, { cacheEpoch: "authority-one" });
+    const second = new KernelCacheAuthority(new MemoryStorage(), { resolve: async () => null }, () => 100, { cacheEpoch: "authority-two" });
+    await first.initialize();
+    await second.initialize();
+    await first.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
+    await second.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
+    expect(snapshotCache(first)["example.com"].iconId).not.toBe(snapshotCache(second)["example.com"].iconId);
   });
 
   it("returns unchanged receipts without writing, broadcasting, or advancing the revision", async () => {
@@ -966,12 +1053,12 @@ describe("KernelCacheAuthority", () => {
 
     const receipt = await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
 
-    expect(receipt).toMatchObject({ status: "committed", change: { revision: 1 } });
+    expect(receipt).toMatchObject({ status: "committed", revision: 1 });
     expect(errors).toEqual([expect.objectContaining({ message: "broadcast failed" })]);
     expect(snapshotCache(authority)[scope().key]).toMatchObject({ pinned: true });
   });
 
-  it("reports removed keys for remove, clear, clear-generated, and pin-replace operations", async () => {
+  it("publishes one compact invalidation for remove, clear, clear-generated, and pin-replace operations", async () => {
     const received: CacheChangeEvent[] = [];
     const authority = new KernelCacheAuthority(new MemoryStorage(), {
       resolve: async (requested) => resolved(requested.key),
@@ -989,12 +1076,14 @@ describe("KernelCacheAuthority", () => {
 
     await authority.remove("plain.example.com");
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), upserts: {}, removed: ["plain.example.com"] });
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number) });
+    expect(snapshotCache(authority)["plain.example.com"]).toBeUndefined();
     nextEvent = received.length;
 
     await authority.clearGenerated();
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), upserts: {}, removed: ["generated.example.com"] });
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number) });
+    expect(snapshotCache(authority)["generated.example.com"]).toBeUndefined();
     nextEvent = received.length;
 
     await expect(authority.getOrQueue(scope("plain-2.example.com"))).resolves.toEqual({ status: "queued" });
@@ -1003,18 +1092,16 @@ describe("KernelCacheAuthority", () => {
 
     await authority.clear();
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number), upserts: {}, removed: ["plain-2.example.com"] });
+    expect(received[nextEvent]).toEqual({ epoch: expect.any(String), revision: expect.any(Number) });
+    expect(snapshotCache(authority)["plain-2.example.com"]).toBeUndefined();
     nextEvent = received.length;
 
     await authority.putPinned(scope("second.example.com"), entry({ domain: "second.example.com", pinned: true }), "image/png", new Uint8Array([3]).buffer);
     await authority.putPinned(scope("first.example.com"), entry({ domain: "first.example.com", pinned: true }), "image/png", new Uint8Array([4]).buffer, "second.example.com");
     await vi.waitFor(() => expect(received.length).toBeGreaterThan(nextEvent));
-    expect(received[received.length - 1]).toEqual({
-      epoch: expect.any(String),
-      revision: expect.any(Number),
-      upserts: { "first.example.com": expect.objectContaining({ pinned: true }) },
-      removed: ["second.example.com"],
-    });
+    expect(received[received.length - 1]).toEqual({ epoch: expect.any(String), revision: expect.any(Number) });
+    expect(snapshotCache(authority)).toMatchObject({ "first.example.com": expect.objectContaining({ pinned: true }) });
+    expect(snapshotCache(authority)["second.example.com"]).toBeUndefined();
   });
 
   it("resolves new-format iconIds in constant time and rejects mismatches", async () => {
@@ -1067,11 +1154,11 @@ describe("KernelCacheAuthority", () => {
 
     await expect(authority.getOrQueue(scope())).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(received).toHaveLength(1));
-    const stale = received[0].upserts["example.com"].iconId!;
+    const stale = snapshotCache(authority)["example.com"].iconId!;
 
     await expect(authority.getOrQueue(scope(), true)).resolves.toEqual({ status: "queued" });
     await vi.waitFor(() => expect(received).toHaveLength(2));
-    const current = received[1].upserts["example.com"].iconId!;
+    const current = snapshotCache(authority)["example.com"].iconId!;
     expect(current).not.toBe(stale);
     await expect(authority.icon(stale)).resolves.toBeUndefined();
 
@@ -1149,10 +1236,7 @@ describe("shared-pin eligibility and legacy migration", () => {
       "image/png",
       new Uint8Array([1]).buffer,
     );
-    expect(receipt).toMatchObject({
-      status: "committed",
-      change: { upserts: { "example.dev": { domain: "example.dev", pinned: true, includeSubdomains: true } } },
-    });
+    expect(receipt).toMatchObject({ status: "committed", revision: 1, epoch: expect.any(String) });
     const pinned = snapshotCache(authority)["example.dev"];
 
     const result = await authority.getOrQueue(hostScope("example.dev"));
@@ -1165,9 +1249,9 @@ describe("shared-pin eligibility and legacy migration", () => {
     await authority.initialize();
 
     await expect(authority.putPinned(hostScope("foo.github.io"), hostEntry("foo.github.io"), "image/png", new Uint8Array([1]).buffer))
-      .resolves.toMatchObject({ status: "committed", change: { upserts: { "foo.github.io": { domain: "foo.github.io", pinned: true } } } });
+      .resolves.toMatchObject({ status: "committed", revision: 1, epoch: expect.any(String) });
     await expect(authority.putPinned(hostScope("docs.qq.com"), hostEntry("docs.qq.com"), "image/png", new Uint8Array([2]).buffer))
-      .resolves.toMatchObject({ status: "committed", change: { upserts: { "docs.qq.com": { domain: "docs.qq.com", pinned: true } } } });
+      .resolves.toMatchObject({ status: "committed", revision: 2, epoch: expect.any(String) });
   });
 
   it("retains valid shared pins and exact tenant pins during initialization", async () => {

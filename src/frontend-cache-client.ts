@@ -1,10 +1,18 @@
-import type { CacheMutationReceipt, CacheRequestResult } from "./cache-authority";
+import type {
+  BulkRefreshState,
+  CacheEntryGuard,
+  CacheLookupResult,
+  CacheManagementPage,
+  CacheManagementQuery,
+  CacheMutationReceipt,
+  CacheRequestResult,
+  CacheStats,
+  CacheCursor,
+} from "./cache-authority";
 import {
-  applyCacheChangeEvent,
   cacheBeforeChange,
   cachedIconForScope,
   type CacheEntry,
-  type CacheSnapshot,
 } from "./frontend-cache-state";
 import { errorText } from "./frontend-format";
 import { CACHE_POLICY_FIELDS, pickCachePolicy, type Settings } from "./frontend-settings";
@@ -65,6 +73,11 @@ export class FrontendCacheClient {
   private cacheGeneration = 0;
   private lastCacheRevision: number | undefined;
   private lastCacheEpoch: string | undefined;
+  private readonly presentScopes = new Map<string, LinkScope>();
+  private workingSetRefresh?: Promise<void>;
+  private workingSetDirty = false;
+  private readonly cursorListeners = new Set<(cursor: CacheCursor) => void>();
+  private readonly bulkRefreshListeners = new Set<(state: BulkRefreshState) => void>();
 
   constructor(private readonly options: FrontendCacheClientOptions) {}
 
@@ -80,18 +93,47 @@ export class FrontendCacheClient {
     return this.cache[key];
   }
 
+  queryCache(query: CacheManagementQuery) {
+    return this.callKernel<CacheManagementPage>("cache.query", query);
+  }
+
+  cacheStats() {
+    return this.callKernel<CacheStats>("cache.stats");
+  }
+
+  async startBulkRefresh() {
+    return this.callKernel<{ status: "started" | "already-running"; refresh: BulkRefreshState }>("cache.refresh-all");
+  }
+
+  cancelBulkRefresh() {
+    return this.callKernel<BulkRefreshState | undefined>("cache.refresh-all.cancel");
+  }
+
+  onCursorChange(listener: (cursor: CacheCursor) => void) {
+    this.cursorListeners.add(listener);
+    return () => this.cursorListeners.delete(listener);
+  }
+
+  onBulkRefreshChange(listener: (state: BulkRefreshState) => void) {
+    this.bulkRefreshListeners.add(listener);
+    return () => this.bulkRefreshListeners.delete(listener);
+  }
+
   failedAt(key: string): number | undefined {
     return this.failedDomains.get(key);
   }
 
   async load() {
     try {
-      const [snapshot, policy] = await Promise.all([
-        this.callKernel<CacheSnapshot>("cache.snapshot"),
+      const [stats, policy] = await Promise.all([
+        this.callKernel<{ entryCount: number; epoch: string; revision: number }>("cache.stats"),
         this.callKernel<Partial<Settings>>("cache.policy.get"),
       ]);
-      this.adoptSnapshot(snapshot);
+      this.cacheEntryCount = stats.entryCount;
+      this.lastCacheRevision = stats.revision;
+      this.lastCacheEpoch = stats.epoch;
       this.applyPolicy(policy);
+      this.notifyCount();
     } catch (error) {
       for (const key of Object.keys(this.cache)) delete this.cache[key];
       this.cacheEntryCount = 0;
@@ -99,15 +141,16 @@ export class FrontendCacheClient {
     }
   }
 
-  async refreshSnapshot() {
-    try {
-      this.adoptSnapshot(await this.callKernel<CacheSnapshot>("cache.snapshot"));
-      this.notifyCount();
-      return true;
-    } catch (error) {
-      console.warn("[siyuan-linkmark] Unable to refetch the cache snapshot", error);
-      return false;
+  setPresentScopes(scopes: Iterable<LinkScope>) {
+    const next = new Map<string, LinkScope>();
+    for (const scope of scopes) next.set(scope.key, { ...scope });
+    if (next.size === this.presentScopes.size
+      && [...next].every(([key, scope]) => JSON.stringify(scope) === JSON.stringify(this.presentScopes.get(key)))) {
+      return Promise.resolve();
     }
+    this.presentScopes.clear();
+    for (const [key, scope] of next) this.presentScopes.set(key, scope);
+    return this.requestWorkingSetRefresh();
   }
 
   async subscribe() {
@@ -115,11 +158,8 @@ export class FrontendCacheClient {
     if (!bind) return;
     await bind("cache.changed", (params) => {
       const payload = eventPayload(params);
-      const application = this.applyIncomingCacheChange(payload);
-      if (application.status === "ignored") return;
-      if (application.status === "refetch" || application.status === "epoch-changed") {
-        void this.refreshSnapshot();
-      }
+      if (!this.observeCursor(payload)) return;
+      void this.requestWorkingSetRefresh();
     });
     await bind("cache.resolution-failed", (params) => {
       const payload = eventPayload(params);
@@ -139,6 +179,11 @@ export class FrontendCacheClient {
     await bind("cache.policy.changed", (params) => {
       const payload = eventPayload(params);
       this.applyPolicy(payload.policy as Partial<Settings> | undefined);
+    });
+    await bind("cache.refresh-all.changed", (params) => {
+      const payload = eventPayload(params) as Partial<BulkRefreshState>;
+      if (typeof payload.id !== "string" || typeof payload.state !== "string") return;
+      for (const listener of this.bulkRefreshListeners) listener(payload as BulkRefreshState);
     });
   }
 
@@ -225,11 +270,15 @@ export class FrontendCacheClient {
     return { queued, failed, skipped, failures };
   }
 
-  async remove(key: string) {
-    const receipt = await this.callKernel<CacheMutationReceipt>("cache.remove", key);
+  async remove(key: string, guard?: CacheEntryGuard) {
+    const receipt = await this.callKernel<CacheMutationReceipt>("cache.remove", key, guard);
     await this.applyMutationReceipt(receipt, [key]);
     this.failedDomains.delete(key);
     this.manualRefreshKeys.delete(key);
+  }
+
+  refreshManagedEntry(key: string, guard: CacheEntryGuard) {
+    return this.callKernel<CacheRequestResult>("cache.refresh-one", key, guard);
   }
 
   async clearGenerated() {
@@ -274,6 +323,7 @@ export class FrontendCacheClient {
     contentType: string,
     base64: string,
     selectedScopeKey: string,
+    guard?: CacheEntryGuard,
   ) {
     return this.callKernel<CacheMutationReceipt>("cache.pin", {
       key: scope.key,
@@ -281,7 +331,7 @@ export class FrontendCacheClient {
       targetUrl: this.sanitizeTargetUrl(targetUrl, scope.domain),
       routeKey: scope.routeKey,
       pathPrefix: scope.pathPrefix,
-    }, entry, contentType, base64, selectedScopeKey);
+    }, entry, contentType, base64, selectedScopeKey, guard);
   }
 
   async pinUrl(
@@ -290,11 +340,12 @@ export class FrontendCacheClient {
     value: string,
     includeSubdomains: boolean,
     selectedScopeKey: string,
+    guard?: CacheEntryGuard,
   ) {
     return this.callKernel<CacheMutationReceipt>("cache.pin-url", {
       ...targetScope,
       targetUrl: this.sanitizeTargetUrl(targetUrl, targetScope.domain),
-    }, value, includeSubdomains, selectedScopeKey);
+    }, value, includeSubdomains, selectedScopeKey, guard);
   }
 
   async candidates(scope: LinkScope, targetUrl: string, discoverPage: boolean) {
@@ -322,18 +373,9 @@ export class FrontendCacheClient {
   }
 
   async applyMutationReceipt(receipt: CacheMutationReceipt, unchangedRemoved: string[] = []) {
-    if (receipt.status === "committed") {
-      const application = this.applyIncomingCacheChange(receipt.change);
-      if (application.status === "refetch" || application.status === "epoch-changed") {
-        await this.refreshSnapshot();
-      }
-      return;
-    }
-    if (receipt.epoch !== this.lastCacheEpoch || receipt.revision !== this.lastCacheRevision) {
-      await this.refreshSnapshot();
-      return;
-    }
-    this.removeLocalCacheKeys(unchangedRemoved);
+    void unchangedRemoved;
+    this.observeCursor(receipt);
+    await Promise.all([this.requestWorkingSetRefresh(), this.refreshStats()]);
   }
 
   /**
@@ -342,49 +384,65 @@ export class FrontendCacheClient {
    * are adopted only when the snapshot carries them, so an event stream from
    * another epoch still triggers a rebaseline instead of being misapplied.
    */
-  private adoptSnapshot(snapshot: CacheSnapshot | null | undefined) {
-    for (const key of Object.keys(this.cache)) delete this.cache[key];
-    if (snapshot && typeof snapshot.cache === "object") {
-      for (const [key, entry] of Object.entries(snapshot.cache)) {
-        this.cache[key] = { ...entry };
-      }
-    }
-    this.cacheEntryCount = Object.keys(this.cache).length;
-    if (typeof snapshot?.revision === "number") this.lastCacheRevision = snapshot.revision;
-    if (typeof snapshot?.epoch === "string") this.lastCacheEpoch = snapshot.epoch;
+  private requestWorkingSetRefresh() {
+    this.workingSetDirty = true;
+    if (this.workingSetRefresh) return this.workingSetRefresh;
+    this.workingSetRefresh = this.runWorkingSetRefresh().finally(() => {
+      this.workingSetRefresh = undefined;
+    });
+    return this.workingSetRefresh;
   }
 
-  private applyIncomingCacheChange(payload: unknown) {
-    const application = applyCacheChangeEvent(this.cache, payload, this.lastCacheRevision, this.lastCacheEpoch);
-    if (application.status !== "applied") return application;
-    this.lastCacheRevision = application.revision;
-    this.cacheEntryCount += application.entryCountDelta;
+  private async runWorkingSetRefresh() {
+    while (this.workingSetDirty) {
+      this.workingSetDirty = false;
+      const result = await this.callKernel<CacheLookupResult>("cache.lookup", [...this.presentScopes.values()]);
+      if (this.lastCacheEpoch !== undefined && result.epoch !== this.lastCacheEpoch) {
+        this.workingSetDirty = true;
+        continue;
+      }
+      if (this.lastCacheRevision !== undefined && result.revision < this.lastCacheRevision) {
+        this.workingSetDirty = true;
+        continue;
+      }
+      this.lastCacheEpoch = result.epoch;
+      this.lastCacheRevision = result.revision;
+      this.adoptWorkingSet(result);
+    }
+  }
+
+  private adoptWorkingSet(result: CacheLookupResult) {
+    const previous = Object.fromEntries(Object.entries(this.cache).map(([key, entry]) => [key, { ...entry }]));
+    const next: Record<string, CacheEntry> = {};
+    for (const match of Object.values(result.matches)) {
+      if (match) next[match.cacheKey] = { ...match.entry };
+    }
+    const changedKeys = [...new Set([...Object.keys(previous), ...Object.keys(next)])];
+    for (const key of Object.keys(this.cache)) delete this.cache[key];
+    for (const [key, entry] of Object.entries(next)) this.cache[key] = entry;
     for (const key of this.manualRefreshKeys.keys()) {
       if (this.cache[key]) this.manualRefreshKeys.delete(key);
     }
-    this.options.callbacks.onCacheChanged(
-      cacheBeforeChange(this.cache, application.previous),
-      application.changedKeys,
-    );
-    this.notifyCount();
-    return application;
+    if (changedKeys.length > 0) this.options.callbacks.onCacheChanged(previous, changedKeys);
   }
 
-  private removeLocalCacheKeys(keys: string[]) {
-    const previous: Record<string, CacheEntry | undefined> = {};
-    const changed: string[] = [];
-    for (const key of keys) {
-      const entry = this.cache[key];
-      if (!entry) continue;
-      previous[key] = entry;
-      delete this.cache[key];
-      this.cacheEntryCount -= 1;
-      changed.push(key);
-    }
-    if (changed.length > 0) {
-      this.options.callbacks.onCacheChanged(cacheBeforeChange(this.cache, previous), changed);
-      this.notifyCount();
-    }
+  private observeCursor(value: unknown): value is CacheCursor {
+    if (!value || typeof value !== "object") return false;
+    const cursor = value as Partial<CacheCursor>;
+    if (typeof cursor.epoch !== "string" || typeof cursor.revision !== "number" || !Number.isFinite(cursor.revision)) return false;
+    if (this.lastCacheEpoch === cursor.epoch && this.lastCacheRevision !== undefined && cursor.revision <= this.lastCacheRevision) return false;
+    this.lastCacheEpoch = cursor.epoch;
+    this.lastCacheRevision = cursor.revision;
+    for (const listener of this.cursorListeners) listener({ epoch: cursor.epoch, revision: cursor.revision });
+    return true;
+  }
+
+  async refreshStats() {
+    const stats = await this.cacheStats();
+    this.cacheEntryCount = stats.entryCount;
+    this.observeCursor(stats);
+    this.notifyCount();
+    return stats;
   }
 
   private async runFetchAndCache(
@@ -411,8 +469,6 @@ export class FrontendCacheClient {
         const entry = result.entry;
         const previous = this.cache[scope.key];
         this.cache[scope.key] = { ...entry };
-        if (!previous) this.cacheEntryCount += 1;
-        this.notifyCount();
         this.failedDomains.delete(scope.key);
         this.failureReasons.delete(scope.key);
         this.manualRefreshKeys.delete(scope.key);

@@ -38,7 +38,7 @@ import {
   type PresentBindingContext,
 } from "./icon-rule";
 import { LINKMARK_BINDING_ATTRIBUTE, RuntimeIconBindingPublisher } from "./runtime-icon-bindings";
-import { scopeFromCacheKey, type LinkScope } from "./url-scope";
+import { type LinkScope } from "./url-scope";
 
 const DISPLAY_SETTINGS_FILE = "display-settings-v2.json";
 const RUNTIME_STYLE_ID = "siyuan-linkmark-runtime-style";
@@ -242,7 +242,9 @@ export default class LinkmarkPlugin extends Plugin {
   private confirmRefreshAll() {
     confirm(this.t("refreshAll"), this.t("refreshAllConfirm"), (dialog) => {
       dialog.destroy();
-      void this.refreshAllCachedDomains();
+      void this.client.startBulkRefresh().then(({ refresh }) => {
+        showMessage(this.t("bulkRefresh_started").replace("{total}", String(refresh.total)));
+      });
     });
   }
 
@@ -293,26 +295,10 @@ export default class LinkmarkPlugin extends Plugin {
     showRefreshResult(this.t, await this.client.refreshDomains(targets));
   }
 
-  private async refreshAllCachedDomains() {
-    const targets = new Map(Object.entries(this.client.entries())
-      .filter(([, entry]) => !entry.pinned)
-      .map(([key, entry]) => {
-        const scope = scopeFromCacheKey(key, entry.domain, entry.pathPrefix);
-        const targetUrl = entry.targetUrl ?? `https://${scope.domain}${scope.pathPrefix ?? "/"}`;
-        return [key, { scope, targetUrl }] as const;
-      }));
-    if (targets.size === 0) {
-      showMessage(this.t(this.client.entryCount() === 0 ? "cacheEmpty" : "noRefreshableDomains"));
-      return;
-    }
-    showMessage(this.t("refreshStarted").replace("{count}", String(targets.size)));
-    showRefreshResult(this.t, await this.client.refreshDomains(targets));
-  }
-
-  private async restoreAutomaticIcon(key: string) {
+  private async restoreAutomaticIcon(key: string, guard?: { epoch: string; entryToken: string }) {
     const entry = this.client.entryFor(key);
     if (!entry?.pinned) return;
-    await this.client.remove(key);
+    await this.client.remove(key, guard);
     this.scheduleScan();
     showMessage(this.t("automaticRestored").replace("{domain}", entry.domain ?? key.split("::")[0]));
   }
@@ -324,22 +310,21 @@ export default class LinkmarkPlugin extends Plugin {
       settings: this.settings,
       actions: {
         refreshCurrentDocument: () => this.refreshCurrentDocument(),
-        refreshAllCachedDomains: () => this.refreshAllCachedDomains(),
-        restoreAutomaticIcon: (key) => this.restoreAutomaticIcon(key),
-        openIconPicker: (scope, targetUrl, afterChange) => this.openIconPicker(scope, targetUrl, afterChange),
+        openIconPicker: (scope, targetUrl, afterChange, guard) => this.openIconPicker(scope, targetUrl, afterChange, guard),
         scheduleScan: () => this.scheduleScan(),
         currentDocumentTargetUrl: (key) => this.currentDocumentTargetUrl(key),
       },
     });
   }
 
-  private openIconPicker(selectedScope: LinkScope, targetUrl: string, afterChange: () => void) {
+  private openIconPicker(selectedScope: LinkScope, targetUrl: string, afterChange: () => void, entryGuard?: { epoch: string; entryToken: string }) {
     new IconPickerDialog({
       t: (key) => this.t(key),
       client: this.client,
       settings: this.settings,
       selectedScope,
       targetUrl,
+      entryGuard,
       afterChange,
       actions: {
         restoreAutomaticIcon: (key) => this.restoreAutomaticIcon(key),
@@ -481,6 +466,7 @@ export default class LinkmarkPlugin extends Plugin {
     } else {
       for (const [key, { scope }] of domains) this.presentScopes.set(key, scope);
     }
+    void this.client.setPresentScopes(this.presentScopes.values());
     const reconciled = reconcilePresentBindings({
       discovery: this.presentScopes.values(),
       context,
@@ -512,6 +498,7 @@ export default class LinkmarkPlugin extends Plugin {
   private rebuildBindings() {
     if (!this.settings.enabled) {
       this.presentScopes.clear();
+      void this.client.setPresentScopes([]);
       this.iconBindings.clear();
       this.pendingMarkerBindings.clear();
       this.pendingFullMarkerReconcile = true;

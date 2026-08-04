@@ -132,5 +132,17 @@
   "openSettings": "Open plugin settings",
   "feedback": "GitHub Issues",
   "pluginEnabled": "Linkmark enabled",
-  "pluginDisabled": "Linkmark disabled"
+  "pluginDisabled": "Linkmark disabled",
+  "cancelRefreshAll": "Cancel refresh",
+  "cacheLoading": "Loading cache entries…",
+  "previousPage": "Previous",
+  "nextPage": "Next",
+  "cachePageSummary": "{start}–{end} of {total}",
+  "cacheEntryChanged": "This entry changed. The list was refreshed.",
+  "cacheActionFailed": "The cache action could not be completed.",
+  "bulkRefresh_started": "Refreshing {total} cache entries",
+  "bulkRefresh_running": "Refreshing {completed} of {total}",
+  "bulkRefresh_cancelling": "Cancelling after {completed} of {total}",
+  "bulkRefresh_cancelled": "Refresh cancelled after {completed} of {total}",
+  "bulkRefresh_completed": "Refresh completed for {total} entries"
 }
