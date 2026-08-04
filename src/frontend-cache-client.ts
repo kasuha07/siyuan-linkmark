@@ -63,6 +63,7 @@ const MANUAL_FAILURE_WINDOW = 60 * 1000;
  */
 export class FrontendCacheClient {
   private readonly cache: Record<string, CacheEntry> = {};
+  private readonly entryTokens = new Map<string, string>();
   private cacheEntryCount = 0;
   private readonly pendingDomains = new Set<string>();
   private readonly pendingFetches = new Map<string, PendingFetch>();
@@ -297,10 +298,13 @@ export class FrontendCacheClient {
   }
 
   /**
-   * Removes an entry that a scan decided is expired, guarding against
-   * concurrent removal through the in-flight scope set. `onSettled` runs in
-   * the same finally as the guard release so the caller can re-scan exactly
-   * when the original plugin method did.
+   * Removes an entry that a scan decided is expired, guarded by the
+   * authoritative epoch and entry token captured with the local view. The
+   * kernel re-asserts the guard inside its mutation queue, so a pin committed
+   * after this decision but before the removal executes keeps the entry
+   * instead of being deleted. `onSettled` runs in the same finally as the
+   * guard release so the caller can re-scan exactly when the original plugin
+   * method did.
    */
   async expire(key: string, expected: CacheEntry, onSettled?: () => void) {
     if (this.options.settings.pauseAutomaticFetch) return;
@@ -308,8 +312,19 @@ export class FrontendCacheClient {
     this.pendingDomains.add(key);
     try {
       if (this.cache[key] !== expected) return;
-      const receipt = await this.callKernel<CacheMutationReceipt>("cache.remove", key);
-      await this.applyMutationReceipt(receipt, [key]);
+      const epoch = this.lastCacheEpoch;
+      const entryToken = this.entryTokens.get(key);
+      if (!epoch || !entryToken) return;
+      try {
+        const receipt = await this.callKernel<CacheMutationReceipt>("cache.remove", key, { epoch, entryToken });
+        await this.applyMutationReceipt(receipt, [key]);
+      } catch (error) {
+        // The authoritative entry no longer matches the stale local view (for
+        // example a pin landed in the race window). Keep the new entry and
+        // let the next working-set refresh reconcile the local view.
+        if (isCacheEntryChangedError(error)) return;
+        throw error;
+      }
     } finally {
       this.pendingDomains.delete(key);
       onSettled?.();
@@ -420,6 +435,10 @@ export class FrontendCacheClient {
     const changedKeys = [...new Set([...Object.keys(previous), ...Object.keys(next)])];
     for (const key of Object.keys(this.cache)) delete this.cache[key];
     for (const [key, entry] of Object.entries(next)) this.cache[key] = entry;
+    this.entryTokens.clear();
+    for (const match of Object.values(result.matches)) {
+      if (match) this.entryTokens.set(match.cacheKey, match.entryToken);
+    }
     for (const key of this.manualRefreshKeys.keys()) {
       if (this.cache[key]) this.manualRefreshKeys.delete(key);
     }
@@ -469,6 +488,7 @@ export class FrontendCacheClient {
         const entry = result.entry;
         const previous = this.cache[scope.key];
         this.cache[scope.key] = { ...entry };
+        this.entryTokens.set(scope.key, result.entryToken);
         this.failedDomains.delete(scope.key);
         this.failureReasons.delete(scope.key);
         this.manualRefreshKeys.delete(scope.key);
@@ -524,4 +544,8 @@ function eventPayload(params: unknown): Record<string, unknown> {
     return record.params as Record<string, unknown>;
   }
   return record;
+}
+
+function isCacheEntryChangedError(error: unknown) {
+  return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "cache_entry_changed");
 }

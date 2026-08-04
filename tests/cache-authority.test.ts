@@ -198,6 +198,46 @@ describe("KernelCacheAuthority", () => {
     expect(received.at(-1)).toEqual({ epoch: receipt.epoch, revision: receipt.revision });
   });
 
+  it("keeps a freshly pinned entry when an expiry removal arrives with a stale guard", async () => {
+    const resolve = vi.fn(async () => null);
+    const authority = new KernelCacheAuthority(new MemoryStorage(), { resolve }, () => 100);
+    await authority.initialize();
+    await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
+    const page = await authority.query({ query: "", offset: 0, limit: 100 });
+    // A pin committed after the expiry decision but before the removal runs.
+    await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([2]).buffer);
+
+    await expect(authority.remove(scope().key, { epoch: page.epoch, entryToken: page.items[0].entryToken }))
+      .rejects.toMatchObject({ code: "cache_entry_changed" });
+    expect(snapshotCache(authority)[scope().key]).toMatchObject({ pinned: true });
+
+    // The rejected removal must not leave the key invalidated: the pinned
+    // entry still serves as a ready hit instead of being re-resolved.
+    const result = await authority.getOrQueue(scope(), false, true);
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ pinned: true }), entryToken: expect.any(String) });
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it("lets a pin committed after an expiry removal still land", async () => {
+    const storage = new BlockingCacheIndexStorage();
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+    await authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([1]).buffer);
+    const page = await authority.query({ query: "", offset: 0, limit: 100 });
+
+    // The expiry removal is enqueued and blocks on its index write while the
+    // user submits a pin; the removal must not prevent the pin from landing.
+    const indexWriteStarted = storage.blockNextCacheIndexWrite();
+    const removal = authority.remove(scope().key, { epoch: page.epoch, entryToken: page.items[0].entryToken });
+    await indexWriteStarted;
+    const replacement = authority.putPinned(scope(), entry({ pinned: true }), "image/png", new Uint8Array([2]).buffer);
+    storage.releaseCacheIndexWrite();
+
+    await removal;
+    await replacement;
+    expect(snapshotCache(authority)[scope().key]).toMatchObject({ pinned: true });
+  });
+
   it("runs one cancellable bounded Bulk cache refresh for the captured automatic entries", async () => {
     const storage = new MemoryStorage();
     storage.files.set("favicon-cache-v2.json", JSON.stringify(Object.fromEntries(
@@ -238,8 +278,8 @@ describe("KernelCacheAuthority", () => {
     expect(fetchOutcomeFor(entry({ source: "FaviconKit" }))).toBe("success");
     expect(fetchOutcomeFor(entry({ source: "generated monogram" }))).toBe("fallback");
     expect(fetchOutcomeFor(null)).toBe("failure");
-    expect(outcomeForCacheRequest({ status: "ready", entry: entry({ source: "FaviconKit" }) })).toBe("success");
-    expect(outcomeForCacheRequest({ status: "ready", entry: entry({ source: "generated monogram" }) })).toBe("fallback");
+    expect(outcomeForCacheRequest({ status: "ready", entry: entry({ source: "FaviconKit" }), entryToken: "t" })).toBe("success");
+    expect(outcomeForCacheRequest({ status: "ready", entry: entry({ source: "generated monogram" }), entryToken: "t" })).toBe("fallback");
     expect(outcomeForCacheRequest({ status: "queued" })).toBe("queued");
     expect(outcomeForCacheRequest({ status: "unavailable" })).toBe("unavailable");
   });
@@ -262,7 +302,7 @@ describe("KernelCacheAuthority", () => {
 
     const result = await authority.getOrQueue(scope());
 
-    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: pinned.iconId, pinned: true }) });
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: pinned.iconId, pinned: true }), entryToken: expect.any(String) });
     expect(resolve).not.toHaveBeenCalled();
   });
 
@@ -279,7 +319,7 @@ describe("KernelCacheAuthority", () => {
     expect(resolve).toHaveBeenCalledTimes(1);
 
     const result = await authority.getOrQueue(scope());
-    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ source: "test resolver" }) });
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ source: "test resolver" }), entryToken: expect.any(String) });
     expect(resolve).toHaveBeenCalledTimes(1);
   });
 
@@ -317,6 +357,7 @@ describe("KernelCacheAuthority", () => {
     await expect(authority.getOrQueue(scope())).resolves.toEqual({
       status: "ready",
       entry: expect.objectContaining({ fetchedAt: 1_000 }),
+      entryToken: expect.any(String),
     });
     expect(resolve).toHaveBeenCalledTimes(1);
   });
@@ -517,7 +558,7 @@ describe("KernelCacheAuthority", () => {
 
     const result = await authority.getOrQueue(scope(), false, true);
 
-    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ pinned: true }) });
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ pinned: true }), entryToken: expect.any(String) });
     expect(resolve).not.toHaveBeenCalled();
   });
 
@@ -823,7 +864,7 @@ describe("KernelCacheAuthority", () => {
     expect(snapshotCache(authority)["example.com"]).toMatchObject({ iconId: first.iconId, pinned: true });
     await expect(authority.icon(first.iconId!)).resolves.toMatchObject({ contentType: "image/png" });
     const result = await authority.getOrQueue(scope());
-    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: first.iconId, pinned: true }) });
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: first.iconId, pinned: true }), entryToken: expect.any(String) });
     expect(resolve).not.toHaveBeenCalled();
   });
 
@@ -861,7 +902,7 @@ describe("KernelCacheAuthority", () => {
     await expect(replacement).rejects.toThrow("superseded");
     await removal;
     const result = await authority.getOrQueue(scope("first.example.com"));
-    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: original.iconId, pinned: true }) });
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: original.iconId, pinned: true }), entryToken: expect.any(String) });
     expect(resolve).not.toHaveBeenCalled();
   });
 
@@ -1240,7 +1281,7 @@ describe("shared-pin eligibility and legacy migration", () => {
     const pinned = snapshotCache(authority)["example.dev"];
 
     const result = await authority.getOrQueue(hostScope("example.dev"));
-    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: pinned.iconId, includeSubdomains: true }) });
+    expect(result).toEqual({ status: "ready", entry: expect.objectContaining({ iconId: pinned.iconId, includeSubdomains: true }), entryToken: expect.any(String) });
     expect(Object.keys(snapshotCache(authority))).toEqual(["example.dev"]);
   });
 

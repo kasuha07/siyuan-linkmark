@@ -61,7 +61,7 @@ export class ResolutionError extends Error {
  * resolution failure.
  */
 export type CacheRequestResult =
-  | { status: "ready"; entry: CacheEntry }
+  | { status: "ready"; entry: CacheEntry; entryToken: string }
   | { status: "queued" }
   | { status: "unavailable" };
 
@@ -98,7 +98,7 @@ export type CacheMutationReceipt =
   | { status: "unchanged"; epoch: string; revision: number };
 
 export type CacheLookupResult = CacheCursor & {
-  matches: Record<string, { cacheKey: string; entry: CacheEntry } | null>;
+  matches: Record<string, { cacheKey: string; entry: CacheEntry; entryToken: string } | null>;
 };
 
 export type CacheManagementQuery = { query: string; offset: number; limit: number };
@@ -249,7 +249,11 @@ export class KernelCacheAuthority {
     await this.initialize();
     const matches = Object.fromEntries(scopes.map((scope) => {
       const match = effectiveCacheMatch(this.cache, scope);
-      return [scope.key, match ? { cacheKey: match.cacheKey, entry: copyEntry(match.entry) } : null];
+      return [scope.key, match ? {
+        cacheKey: match.cacheKey,
+        entry: copyEntry(match.entry),
+        entryToken: entryToken(match.cacheKey, match.entry),
+      } : null];
     }));
     return { matches, epoch: this.cacheEpoch, revision: this.cacheRevision };
   }
@@ -329,9 +333,11 @@ export class KernelCacheAuthority {
       // A paused workspace policy cannot accept automatic work. Serve an
       // existing entry or decline explicitly so the Frontend client can
       // fail open without treating the pause as an icon failure.
-      return existing ? { status: "ready", entry: copyEntry(existing) } : { status: "unavailable" };
+      return existing ? { status: "ready", entry: copyEntry(existing), entryToken: entryToken(scope.key, existing) } : { status: "unavailable" };
     }
-    if (existing && !force && this.isFresh(existing)) return { status: "ready", entry: copyEntry(existing) };
+    if (existing && !force && this.isFresh(existing)) {
+      return { status: "ready", entry: copyEntry(existing), entryToken: entryToken(scope.key, existing) };
+    }
     const trigger: ResolutionTrigger = automatic ? "automatic" : "manual";
     const generation = this.generationFor(scope.key);
     const pending = this.inFlight.get(scope.key);
@@ -425,9 +431,17 @@ export class KernelCacheAuthority {
 
   async remove(key: string, guard?: CacheEntryGuard) {
     await this.initialize();
-    this.assertEntryGuard(key, guard);
     const generation = this.invalidate(key);
     return this.enqueueCacheMutation(async () => {
+      // The guard is asserted inside the mutation queue so an expiry removal
+      // cannot delete an entry that a concurrent pin replaced after the
+      // caller's stale local view was taken.
+      try {
+        this.assertEntryGuard(key, guard);
+      } catch (error) {
+        this.completeInvalidation(key, generation);
+        throw error;
+      }
       const previous = this.cache[key];
       if (!previous) {
         this.completeInvalidation(key, generation);
