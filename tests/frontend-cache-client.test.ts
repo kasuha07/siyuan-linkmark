@@ -259,6 +259,19 @@ describe("FrontendCacheClient fetch failure containment", () => {
     await expect(manual).resolves.toBe("unavailable");
     expect(getOrQueue).toHaveBeenCalledTimes(2);
   });
+
+  it("counts an unavailable get-or-queue as skipped in a manual domain refresh", async () => {
+    const { calls, client } = syncedClient();
+    calls["cache.get-or-queue"] = vi.fn(async () => ({ status: "unavailable" }));
+    await client.load();
+    const result = await client.refreshDomains(new Map([
+      ["example.dev", {
+        scope: { key: "example.dev", domain: "example.dev", targetUrl: "https://example.dev/" },
+        targetUrl: "https://example.dev/",
+      }],
+    ]));
+    expect(result).toEqual({ queued: 0, failed: 0, skipped: 1, failures: [] });
+  });
 });
 
 describe("FrontendCacheClient cursor rebaseline", () => {

@@ -55,6 +55,7 @@ Cache entry atomicity, pinned-icon protection, or same-scope coalescing.
 
 - The Cache authority remains the sole owner of resolution, private icon payloads, Cache entry commits, invalidation, and broadcasts, in accordance with the existing cache-authority architecture.
 - Cache-miss requests, including forced manual refreshes, return a three-state result: `ready` with a committed Cache entry, `queued` for accepted new or coalesced In-flight work, and `unavailable` only when the Cache authority cannot accept work. A queued response is neither a successful icon result nor a failure.
+- A Cache authority whose initialization failed cannot accept cache-miss work: `cache.get-or-queue` answers `unavailable` from the moment initialization fails until the kernel plugin reloads, while the remaining Kernel RPC methods keep failing open through RPC errors.
 - Resolution and persistence continue after `queued` in the kernel. A Cache entry becomes visible only after private payload validation and its durable cache-index commit succeed.
 - A successful commit uses the existing cache-state broadcast. An exhausted task broadcasts a resolution-failure event containing its Link scope and a sanitized failure category only.
 - Automatic failures remain silent and continue to use the existing failure cooldown. Manual failures may surface one localizable, actionable message after the failure event.

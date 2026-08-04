@@ -63,12 +63,12 @@ class LinkmarkKernel {
         onResolutionFailure: async (scope, category) => siyuan.rpc.broadcast("cache.resolution-failed", { key: scope.key, category }),
         onBulkRefreshChanged: async (state) => siyuan.rpc.broadcast("cache.refresh-all.changed", state),
       });
-      await this.authority.initialize();
       await siyuan.rpc.bind("cache.lookup", async (scopes: LinkScope[]) => this.requireAuthority().lookup(scopes.map(normalizeLookupScope)), "Returns effective Cache matches for requested Present scopes.");
       await siyuan.rpc.bind("cache.query", async (query: { query: string; offset: number; limit: number }) => this.requireAuthority().query(query), "Returns a revision-tagged Cache-management page.");
       await siyuan.rpc.bind("cache.stats", async () => this.requireAuthority().stats(), "Returns Cache count, cursor, and Bulk refresh status.");
       await siyuan.rpc.bind("cache.get-or-queue", async (scope: LinkScope, force = false, automatic = false) => {
-        if (!this.authority) return { status: "unavailable" as const };
+        // authority 未就绪（未初始化或初始化失败）时由 getOrQueue 以
+        // unavailable 显式应答，不在此处拦截为 RPC 内部错误。
         return this.requireAuthority().getOrQueue(normalizeScope(scope), force, automatic);
       }, "Returns a cached icon, a queue acknowledgement, or an explicit unavailable result.");
       await siyuan.rpc.bind("cache.remove", async (key: string, guard?: { epoch: string; entryToken: string }) => this.requireAuthority().remove(key, guard), "Removes one cache entry workspace-wide and returns its mutation receipt.");
@@ -95,6 +95,10 @@ class LinkmarkKernel {
           putPinned: (pinScope, entry, contentType, bytes, pinReplaceKey, pinGuard) => authority.putPinned(pinScope, entry, contentType, bytes, pinReplaceKey, pinGuard),
         }, normalizeScope(scope), iconUrl, includeSubdomains, replaceKey, guard);
       }, "Downloads and pins a custom icon URL workspace-wide and returns its mutation receipt.");
+      // 先注册全部 Kernel RPC 再初始化：初始化失败时绑定仍然存在，
+      // cache.get-or-queue 以 unavailable 显式应答，其余方法按既有 fail-open
+      // 语义以 RPC 错误响应；恢复路径是重载 kernel 插件（新实例重新初始化）。
+      await this.authority.initialize();
     } catch (error) {
       await siyuan.logger.error("Linkmark Kernel initialization failed", errorText(error)).catch(() => undefined);
     }

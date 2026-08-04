@@ -72,6 +72,14 @@ _Avoid_: direct cache-file access, frontend persistence API
 The immediate Kernel RPC response for a cache miss. It confirms that a new or coalesced In-flight task owns the Link scope, without representing an icon result or a failed resolution.
 _Avoid_: cache miss, icon result, resolution failure
 
+**Cache-miss result**:
+The three-state Kernel RPC response to a cache miss: `ready` with a committed Cache entry, `queued` for accepted new or coalesced In-flight work, and `unavailable` when the Cache authority cannot accept the work. A queued response is neither an icon result nor a resolution failure.
+_Avoid_: cache miss, icon result, resolution failure
+
+**Authority initialization**:
+The Cache authority's one-time load of the durable Cache index, including legacy-pin pruning. A failed initialization leaves the authority unable to accept cache-miss work, so it answers the `unavailable` Cache-miss result until the kernel plugin reloads.
+_Avoid_: startup migration, cache recovery
+
 **Interactive render pipeline**:
 The Frontend path from an editor DOM change through link discovery and Icon rule reconciliation to runtime stylesheet publication. It excludes plugin startup, Cache snapshot transport, favicon resolution, network retrieval, and cache persistence.
 _Avoid_: favicon resolution pipeline, plugin lifecycle, frontend performance in general

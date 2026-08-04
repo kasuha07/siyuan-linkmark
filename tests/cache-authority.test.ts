@@ -1585,6 +1585,21 @@ describe("shared-pin eligibility and legacy migration", () => {
     expect(storage.files.has("icons/keep-1.base64")).toBe(true);
     expect(storage.files.has("icons/drop-1.base64")).toBe(true);
   });
+
+  it("answers unavailable after a failed initialization instead of leaking an RPC error", async () => {
+    const storage = new FailingCacheIndexStorage();
+    preload(storage, [
+      ["example.dev", hostEntry("example.dev", { iconId: "keep-1", includeSubdomains: true })],
+      ["github.io", hostEntry("github.io", { iconId: "drop-1", includeSubdomains: true })],
+    ]);
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+
+    await expect(authority.initialize()).rejects.toThrow("cache-index write failed");
+    // 三态契约：初始化失败后 cache-miss 请求显式应答 unavailable。
+    await expect(authority.getOrQueue(hostScope("example.dev"))).resolves.toEqual({ status: "unavailable" });
+    // 其余方法保持既有 fail-open 语义：以 RPC 错误响应，而不是返回空结果。
+    await expect(authority.lookup([hostScope("example.dev")])).rejects.toThrow("cache-index write failed");
+  });
 });
 
 describe("ForwardProxyIconResolver", () => {

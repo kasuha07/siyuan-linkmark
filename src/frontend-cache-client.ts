@@ -259,7 +259,11 @@ export class FrontendCacheClient {
       else {
         const outcome = await this.fetchAndCache(scope, targetUrl, true, "manual");
         if (outcome === "queued" || outcome === "success" || outcome === "fallback") queued += 1;
-        else {
+        else if (outcome === "unavailable") {
+          // 与 kernel 批量刷新口径一致：authority 无法接受工作（初始化失败、
+          // 插件重载中等）计为跳过而非失败，不产生失败原因。
+          skipped += 1;
+        } else {
           failed += 1;
           const reason = this.failureReasons.get(key);
           if (reason && failures.length < 3) failures.push(reason);

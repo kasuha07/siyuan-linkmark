@@ -332,7 +332,14 @@ export class KernelCacheAuthority {
   }
 
   async getOrQueue(scope: LinkScope, force = false, automatic = false, expectedGeneration?: number): Promise<CacheRequestResult> {
-    await this.initialize();
+    try {
+      await this.initialize();
+    } catch {
+      // 初始化失败（如 legacy-pin 迁移的索引写入失败）后，本 authority 在
+      // kernel 插件重载前无法接受 cache-miss 工作。按三态契约显式应答
+      // unavailable，而不是把失败泄漏为 RPC 内部错误。
+      return { status: "unavailable" };
+    }
     const existing = this.invalidationGenerations.has(scope.key) ? undefined : this.cache[scope.key];
     if (automatic && this.policy.pauseAutomaticFetch) {
       // A paused workspace policy cannot accept automatic work. Serve an
