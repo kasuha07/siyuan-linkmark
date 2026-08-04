@@ -30,26 +30,31 @@ class FakeStyleRule {
 }
 
 class FakeStyleSheet {
-  readonly cssRules: FakeStyleRule[] = [];
+  private readonly rules: FakeStyleRule[] = [];
   failInsert = false;
 
   constructor(private readonly operations: string[]) {}
+
+  get cssRules() {
+    this.operations.push("rules:read");
+    return [...this.rules];
+  }
 
   insertRule(text: string, index: number) {
     this.operations.push("insert");
     if (this.failInsert) throw new Error("insert failed");
     const rule = parseRule(text, this.operations);
-    this.cssRules.splice(index, 0, rule);
+    this.rules.splice(index, 0, rule);
     return index;
   }
 
   deleteRule(index: number) {
     this.operations.push("delete");
-    this.cssRules.splice(index, 1);
+    this.rules.splice(index, 1);
   }
 
   replace(text: string) {
-    this.cssRules.splice(0, this.cssRules.length, ...parseRules(text, this.operations));
+    this.rules.splice(0, this.rules.length, ...parseRules(text, this.operations));
   }
 }
 
@@ -192,7 +197,39 @@ describe("RuntimeIconBindingPublisher", () => {
     publisher.replaceBindings(new Map([["next", "next.png"]]), 1);
     publisher.publish(new Map([[link as unknown as HTMLElement, "next"]]), true);
 
-    expect(document.operations).toEqual(["insert", "marker:set", "delete"]);
+    expect(document.operations).toEqual(["rules:read", "insert", "rules:read", "marker:set", "rules:read", "delete"]);
+  });
+
+  it("removes hundreds of departed rules from one cssRules snapshot", () => {
+    const document = new FakeDocument();
+    const publisher = createPublisher(document);
+    const bindings = new Map(Array.from({ length: 500 }, (_, index) => [
+      `scope-${index}`,
+      `https://icons.example/${index}.png`,
+    ]));
+    const markers = new Map<HTMLElement, string>();
+    for (let index = 0; index < 2_000; index += 1) {
+      markers.set(document.link() as unknown as HTMLElement, `scope-${index % 500}`);
+    }
+    publisher.replaceBindings(bindings, 1);
+    publisher.publish(markers, true);
+
+    publisher.replaceBindings(new Map([...bindings].slice(0, 10)), 1);
+    document.operations.length = 0;
+    publisher.publish(new Map([...markers.entries()].slice(0, 40)), true);
+
+    // The whole departure pass reads the stylesheet once, not once per departed rule.
+    expect(document.operations.filter((operation) => operation === "rules:read")).toHaveLength(1);
+
+    const rules = document.connectedStyle!.sheet.cssRules;
+    expect(rules).toHaveLength(11);
+    expect(rules[0].selectorText).toBe(`[${LINKMARK_BINDING_ATTRIBUTE}]::before`);
+    expect(rules.slice(1).map((rule) => rule.selectorText)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `[${LINKMARK_BINDING_ATTRIBUTE}="${index + 1}"]::before`),
+    );
+    for (const [element] of [...markers.entries()].slice(40)) {
+      expect(element.getAttribute(LINKMARK_BINDING_ATTRIBUTE)).toBeNull();
+    }
   });
 
   it("removes stale markers on full publication and all markers on clear", () => {

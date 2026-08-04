@@ -147,10 +147,18 @@ export class RuntimeIconBindingPublisher {
   private removeDepartedRules() {
     const sheet = this.style?.sheet;
     if (!sheet) throw new Error("Runtime icon stylesheet is unavailable");
-    const departed = [...this.published.entries()]
-      .filter(([key]) => !this.desired.has(key))
-      .map(([key, binding]) => ({ key, index: Array.from(sheet.cssRules).indexOf(binding.rule) }));
-    if (departed.some(({ index }) => index < 0)) throw new Error("Published icon rule is unavailable");
+    const rules = Array.from(sheet.cssRules);
+    const indexByRule = new Map<CSSRule, number>();
+    for (let index = 0; index < rules.length; index += 1) {
+      indexByRule.set(rules[index], index);
+    }
+    const departed: Array<{ key: string; index: number }> = [];
+    for (const [key, binding] of this.published) {
+      if (this.desired.has(key)) continue;
+      const index = indexByRule.get(binding.rule);
+      if (index === undefined) throw new Error("Published icon rule is unavailable");
+      departed.push({ key, index });
+    }
     departed.sort((left, right) => right.index - left.index);
     for (const { key, index } of departed) {
       sheet.deleteRule(index);
