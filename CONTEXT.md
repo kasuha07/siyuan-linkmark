@@ -156,6 +156,10 @@ _Avoid_: optional platform rule, user bypass
 The eTLD+1 boundary containing a Linkmark-recognized platform host: `docs.qq.com`, `docs.google.com`, `*.feishu.cn`, `*.larksuite.com`, or `nocode.host`; it is initially excluded from shared pins and each entry must carry provenance and regression coverage.
 _Avoid_: general platform blacklist, inferred hosting platform
 
+**Platform route icon**:
+A reviewed route-type icon attached to a Link scope for a recognized office platform. Tencent Docs and Google Docs use hosted HTTP(S) URLs (`platformIconUrl`); Feishu uses a locally generated composite SVG (`platformIconSvg`) that resolves without any network retrieval.
+_Avoid_: favicon, platform icon URL, data URI
+
 **Registrable parent**:
 The one eTLD+1 returned by PSL for a hostname when it differs from that hostname; it is the only parent Linkmark may probe or target with a shared pin.
 _Avoid_: immediate parent, parent chain

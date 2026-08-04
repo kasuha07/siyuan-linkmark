@@ -7,6 +7,7 @@ export type LinkScope = {
   pathPrefix?: string;
   platform?: PlatformFamily;
   platformIconUrl?: string;
+  platformIconSvg?: string;
   platformIconSource?: string;
   discoverPage?: boolean;
 };
@@ -14,7 +15,8 @@ export type LinkScope = {
 type RouteDefinition = {
   routeKey: string;
   pathPrefix: string;
-  iconUrl: string;
+  iconUrl?: string;
+  iconSvg?: string;
 };
 
 const TENCENT_ICON_ROOT =
@@ -84,8 +86,11 @@ export function scopeForUrl(value: string): LinkScope | null {
   }
   if (isFeishuDomain(domain) && segment && FEISHU_ROUTE_TYPES[segment]) {
     const type = FEISHU_ROUTE_TYPES[segment];
-    const definition = route(segment, segment, platformTypeSvg("feishu", type));
-    return routeScope(domain, "feishu", definition);
+    return routeScope(domain, "feishu", {
+      routeKey: segment,
+      pathPrefix: `/${segment}`,
+      iconSvg: platformTypeSvg("feishu", type),
+    });
   }
   if (domain === "nocode.host" && isNoCodeDeploymentSegment(segment)) {
     return {
@@ -137,6 +142,7 @@ function routeScope(domain: string, platform: PlatformFamily, definition: RouteD
     pathPrefix: definition.pathPrefix,
     platform,
     platformIconUrl: definition.iconUrl,
+    platformIconSvg: definition.iconSvg,
     platformIconSource: `platform type ${platform}:${definition.routeKey}`,
   };
 }
@@ -156,15 +162,19 @@ function isNoCodeDeploymentSegment(segment: string) {
   return /^[a-z0-9]{6}$/.test(segment);
 }
 
+/**
+ * Generates the composite route-type icon for a platform that has no
+ * reviewed, stable per-type icon URL (Feishu). The raw SVG travels in the
+ * Link scope and resolves locally in the kernel without network retrieval.
+ */
 function platformTypeSvg(platform: PlatformFamily, type: string) {
   const [primary, secondary] = TYPE_COLORS[type] ?? ["#3370FF", "#6750D8"];
   const glyph = TYPE_GLYPHS[type] ?? "F";
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
   <defs><linearGradient id="g" x1="8" y1="6" x2="56" y2="58" gradientUnits="userSpaceOnUse"><stop stop-color="${primary}"/><stop offset="1" stop-color="${secondary}"/></linearGradient></defs>
   <rect x="6" y="4" width="52" height="56" rx="13" fill="url(#g)"/>
   <path d="M39 4v13a5 5 0 0 0 5 5h14" fill="#fff" fill-opacity=".26"/>
   <text x="32" y="44" text-anchor="middle" font-family="Arial,sans-serif" font-size="28" font-weight="700" fill="#fff">${glyph}</text>
   <title>${platform} ${type}</title>
 </svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }

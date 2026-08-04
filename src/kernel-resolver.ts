@@ -20,7 +20,7 @@ export type KernelResolverPolicy = Pick<CachePolicyFields,
 export type ForwardResponse = { body: string; contentType?: string; headers?: Record<string, string | string[]>; status: number; url?: string };
 export type ForwardProxy = (url: string, responseEncoding: "text" | "base64", contentType: string, timeout?: number) => Promise<ForwardResponse | null>;
 
-type Candidate = { url: string; source: string };
+type Candidate = { url: string; source: string; localSvg?: string };
 const MAX_RESOLUTION_CANDIDATE_ATTEMPTS = 4;
 const MAX_RESOLUTION_BUDGET_MS = 10_000;
 const MAX_REDIRECTS = 3;
@@ -97,6 +97,11 @@ export class ForwardProxyIconResolver implements IconResolver {
     if (allowFullPageDiscovery) {
       candidates.push(...await this.discoverPageIcons(target, target, "page rel=icon", deadline));
       candidates.push(...await this.discoverPageIcons(root, target, "root rel=icon", deadline));
+    }
+    if (scope.platformIconSvg) {
+      // A reviewed locally generated platform icon resolves without any
+      // network retrieval; the url is only the candidate deduplication key.
+      candidates.push({ url: "", source: scope.platformIconSource ?? "platform type icon", localSvg: scope.platformIconSvg });
     }
     if (scope.platformIconUrl) {
       try {
@@ -184,6 +189,19 @@ export class ForwardProxyIconResolver implements IconResolver {
     candidate: Candidate,
     deadline: number,
   ): Promise<DownloadOutcome> {
+    if (candidate.localSvg !== undefined) {
+      if (!candidate.localSvg.trimStart().startsWith("<svg")) return { kind: "failed" };
+      const bytes = Buffer.from(candidate.localSvg, "utf8");
+      if (bytes.length === 0 || bytes.length > MAX_ICON_BYTES) return { kind: "failed" };
+      return {
+        kind: "resolved",
+        resolved: {
+          bytes: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
+          contentType: "image/svg+xml",
+          source: candidate.source,
+        },
+      };
+    }
     let response: ForwardResponse | null;
     try {
       response = await this.forwardFollowingRedirects(candidate.url, "base64", "application/octet-stream", deadline);

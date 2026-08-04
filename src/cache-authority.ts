@@ -1,5 +1,6 @@
 import { InvalidShareDomainError, isEligibleShareTarget, shareEligibilityOf } from "./parent-domain";
 import { effectiveCacheMatch } from "./cache-match";
+import { scopeFromCacheKey } from "./url-scope";
 import type { CachePolicyFields } from "./resolver-contract";
 
 export type CacheEntry = {
@@ -24,6 +25,7 @@ export type LinkScope = {
   routeKey?: string;
   pathPrefix?: string;
   platformIconUrl?: string;
+  platformIconSvg?: string;
   platformIconSource?: string;
   discoverPage?: boolean;
 };
@@ -856,13 +858,12 @@ function ordinalCompare(left: string, right: string) {
 }
 
 function scopeForEntry(key: string, entry: CacheEntry): LinkScope {
-  const domain = entry.domain ?? key.split("::", 1)[0];
+  // Reconstruct the full synthetic scope (platform icon, page-discovery
+  // flag) so refresh paths resolve routes exactly like first discovery.
+  const reconstructed = scopeFromCacheKey(key, entry.domain, entry.pathPrefix);
   return {
-    key,
-    domain,
-    targetUrl: entry.targetUrl ?? `https://${domain}${entry.pathPrefix ?? "/"}`,
-    routeKey: entry.routeKey,
-    pathPrefix: entry.pathPrefix,
+    ...reconstructed,
+    targetUrl: entry.targetUrl ?? `https://${reconstructed.domain}${reconstructed.pathPrefix ?? "/"}`,
   };
 }
 

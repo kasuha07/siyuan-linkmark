@@ -1699,3 +1699,41 @@ describe("ForwardProxyIconResolver", () => {
     await expect(resolver.resolve(scope())).resolves.toMatchObject({ source: "generated monogram", contentType: "image/svg+xml" });
   });
 });
+
+describe("refreshEntry scope reconstruction", () => {
+  it("rebuilds a Feishu route scope with its local platform SVG for refresh", async () => {
+    const storage = new MemoryStorage();
+    const scopes: LinkScope[] = [];
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async (scope) => { scopes.push(scope); return resolved("platform type feishu:docx"); },
+    }, () => 100);
+    await authority.initialize();
+
+    const feishuScope: LinkScope = {
+      key: "example.feishu.cn::docx",
+      domain: "example.feishu.cn",
+      targetUrl: "https://example.feishu.cn/docx/abc",
+      routeKey: "docx",
+      pathPrefix: "/docx",
+      platformIconSvg: "<svg xmlns='http://www.w3.org/2000/svg'/>",
+      platformIconSource: "platform type feishu:docx",
+    };
+    await expect(authority.getOrQueue(feishuScope)).resolves.toEqual({ status: "queued" });
+    await vi.waitFor(() => expect(snapshotCache(authority)["example.feishu.cn::docx"]).toBeDefined());
+
+    const page = await authority.query({ query: "", offset: 0, limit: 1 });
+    const item = page.items[0];
+    await expect(authority.refreshEntry("example.feishu.cn::docx", { epoch: page.epoch, entryToken: item.entryToken }))
+      .resolves.toMatchObject({ status: "queued" });
+    await vi.waitFor(() => expect(scopes).toHaveLength(2));
+
+    expect(scopes[1]).toMatchObject({
+      key: "example.feishu.cn::docx",
+      domain: "example.feishu.cn",
+      routeKey: "docx",
+      pathPrefix: "/docx",
+      platformIconSource: "platform type feishu:docx",
+    });
+    expect(scopes[1].platformIconSvg).toMatch(/^<svg/);
+  });
+});
