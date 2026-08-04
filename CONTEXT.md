@@ -197,7 +197,7 @@ The strictly increasing per-process number attached to authoritative cache reads
 _Avoid_: version number, cache generation
 
 **Cache epoch**:
-The per-process marker identifying a Cache authority instance, changing whenever the kernel plugin starts or reloads; a Frontend client uses it to detect that the per-process Cache revision was reset and resynchronize.
+The per-process marker identifying a Cache authority instance, changing whenever the kernel plugin starts or reloads; a Frontend client uses it to detect that the per-process Cache revision was reset and resynchronize. Any authoritative response or event carrying a new Cache epoch is accepted as the new baseline, while Cache entries are adopted only from responses whose cursor matches the current baseline.
 _Avoid_: version number, cache generation
 
 **Cache persistence batch**:

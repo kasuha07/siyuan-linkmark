@@ -411,12 +411,36 @@ export class FrontendCacheClient {
   private async runWorkingSetRefresh() {
     while (this.workingSetDirty) {
       this.workingSetDirty = false;
-      const result = await this.callKernel<CacheLookupResult>("cache.lookup", [...this.presentScopes.values()]);
-      if (this.lastCacheEpoch !== undefined && result.epoch !== this.lastCacheEpoch) {
+      let result: CacheLookupResult;
+      try {
+        result = await this.callKernel<CacheLookupResult>("cache.lookup", [...this.presentScopes.values()]);
+      } catch (error) {
+        // The kernel authority is unavailable, for example while it reloads.
+        // Stop this refresh and let the next trigger start a fresh one.
+        console.warn("[siyuan-linkmark] Kernel cache authority is unavailable", error);
+        return;
+      }
+      const verdict = cursorVerdict(
+        result.epoch,
+        result.revision,
+        this.lastCacheEpoch,
+        this.lastCacheRevision,
+        false,
+      );
+      if (verdict === "rebase") {
+        // The authority restarted and reset its revision domain: adopt the
+        // response's cursor as the new baseline but never its entries, then
+        // re-issue a lookup under the new baseline. A stale response from the
+        // previous epoch is corrected by the next rebase.
+        this.lastCacheEpoch = result.epoch;
+        this.lastCacheRevision = result.revision;
         this.workingSetDirty = true;
         continue;
       }
-      if (this.lastCacheRevision !== undefined && result.revision < this.lastCacheRevision) {
+      if (verdict === "reject") {
+        // The response predates the baseline revision; retry with the
+        // baseline intact. Revisions are monotonic within an epoch, so a
+        // retry necessarily converges.
         this.workingSetDirty = true;
         continue;
       }
@@ -449,7 +473,7 @@ export class FrontendCacheClient {
     if (!value || typeof value !== "object") return false;
     const cursor = value as Partial<CacheCursor>;
     if (typeof cursor.epoch !== "string" || typeof cursor.revision !== "number" || !Number.isFinite(cursor.revision)) return false;
-    if (this.lastCacheEpoch === cursor.epoch && this.lastCacheRevision !== undefined && cursor.revision <= this.lastCacheRevision) return false;
+    if (cursorVerdict(cursor.epoch, cursor.revision, this.lastCacheEpoch, this.lastCacheRevision, true) === "reject") return false;
     this.lastCacheEpoch = cursor.epoch;
     this.lastCacheRevision = cursor.revision;
     for (const listener of this.cursorListeners) listener({ epoch: cursor.epoch, revision: cursor.revision });
@@ -535,6 +559,29 @@ export class FrontendCacheClient {
   private notifyCount() {
     this.options.callbacks.onEntryCountChange(this.cacheEntryCount);
   }
+}
+
+type CursorVerdict = "rebase" | "reject" | "accept";
+
+/**
+ * The shared cursor acceptance rule for authoritative responses and events.
+ * An undefined baseline is always accepted. A different epoch means the
+ * kernel authority restarted and reset its revision domain, so the caller
+ * rebaselines and discards the response. Within one epoch a response is stale
+ * when its revision does not advance the baseline; events require a strict
+ * advance while idempotent lookups may repeat the baseline revision.
+ */
+function cursorVerdict(
+  epoch: string,
+  revision: number,
+  baselineEpoch: string | undefined,
+  baselineRevision: number | undefined,
+  strictEqualRevision: boolean,
+): CursorVerdict {
+  if (baselineEpoch === undefined || baselineRevision === undefined) return "accept";
+  if (epoch !== baselineEpoch) return "rebase";
+  if (strictEqualRevision ? revision <= baselineRevision : revision < baselineRevision) return "reject";
+  return "accept";
 }
 
 function eventPayload(params: unknown): Record<string, unknown> {
