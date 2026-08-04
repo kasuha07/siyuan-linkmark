@@ -18,6 +18,7 @@ export class RuntimeIconBindingPublisher {
   private layoutRule: CSSStyleRule | null = null;
   private iconSize = 1;
   private publishedIconSize = 1;
+  private readonly marked = new Set<HTMLElement>();
   private nextToken = 1;
   private failureLogged = false;
 
@@ -134,13 +135,17 @@ export class RuntimeIconBindingPublisher {
         if (element.getAttribute(LINKMARK_BINDING_ATTRIBUTE) !== token) {
           element.setAttribute(LINKMARK_BINDING_ATTRIBUTE, token);
         }
+        this.marked.add(element);
       } else {
         element.removeAttribute(LINKMARK_BINDING_ATTRIBUTE);
+        this.marked.delete(element);
       }
     }
     if (!seen) return;
-    for (const element of this.markedElements()) {
-      if (!seen.has(element)) element.removeAttribute(LINKMARK_BINDING_ATTRIBUTE);
+    for (const element of this.marked) {
+      if (seen.has(element)) continue;
+      element.removeAttribute(LINKMARK_BINDING_ATTRIBUTE);
+      this.marked.delete(element);
     }
   }
 
@@ -191,12 +196,11 @@ export class RuntimeIconBindingPublisher {
     this.publishedIconSize = this.iconSize;
   }
 
-  private markedElements() {
-    return this.document.querySelectorAll<HTMLElement>(`[${LINKMARK_BINDING_ATTRIBUTE}]`);
-  }
-
   private removeAllMarkers() {
-    for (const element of this.markedElements()) element.removeAttribute(LINKMARK_BINDING_ATTRIBUTE);
+    for (const element of this.marked) {
+      element.removeAttribute(LINKMARK_BINDING_ATTRIBUTE);
+      this.marked.delete(element);
+    }
   }
 
   private removeStylesheet() {

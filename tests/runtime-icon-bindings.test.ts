@@ -123,10 +123,6 @@ class FakeDocument {
     return new FakeStyleElement(this, this.operations);
   }
 
-  querySelectorAll() {
-    return this.elements.filter((element) => element.getAttribute(LINKMARK_BINDING_ATTRIBUTE) !== null);
-  }
-
   link() {
     const element = new FakeElement(this.operations);
     this.elements.push(element);
@@ -237,7 +233,13 @@ describe("RuntimeIconBindingPublisher", () => {
     const publisher = createPublisher(document);
     const current = document.link();
     const stale = document.link();
-    stale.setAttribute(LINKMARK_BINDING_ATTRIBUTE, "stale");
+    publisher.replaceBindings(new Map([["scope", "icon.png"], ["stale", "stale.png"]]), 1);
+    publisher.publish(new Map([
+      [current as unknown as HTMLElement, "scope"],
+      [stale as unknown as HTMLElement, "stale"],
+    ]), true);
+    expect(stale.getAttribute(LINKMARK_BINDING_ATTRIBUTE)).not.toBeNull();
+
     publisher.replaceBindings(new Map([["scope", "icon.png"]]), 1);
     publisher.publish(new Map([[current as unknown as HTMLElement, "scope"]]), true);
     expect(stale.getAttribute(LINKMARK_BINDING_ATTRIBUTE)).toBeNull();
@@ -267,16 +269,21 @@ describe("RuntimeIconBindingPublisher", () => {
 
   it("fails invisible when normal and compact publication both fail", () => {
     const document = new FakeDocument();
-    const stale = document.link();
-    stale.setAttribute(LINKMARK_BINDING_ATTRIBUTE, "stale");
+    const publisher = createPublisher(document);
+    const link = document.link();
+    publisher.replaceBindings(new Map([["scope", "icon.png"]]), 1);
+    publisher.publish(new Map([[link as unknown as HTMLElement, "scope"]]), true);
+    document.connectedStyle!.sheet.failInsert = true;
     document.failStyleText = true;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const publisher = createPublisher(document);
-    publisher.replaceBindings(new Map([["scope", "icon.png"]]), 1);
 
-    publisher.publish(new Map([[stale as unknown as HTMLElement, "scope"]]), true);
+    publisher.replaceBindings(new Map([["scope", "icon.png"], ["next", "next.png"]]), 1);
+    publisher.publish(new Map([
+      [link as unknown as HTMLElement, "scope"],
+      [document.link() as unknown as HTMLElement, "next"],
+    ]), true);
 
-    expect(stale.getAttribute(LINKMARK_BINDING_ATTRIBUTE)).toBeNull();
+    expect(link.getAttribute(LINKMARK_BINDING_ATTRIBUTE)).toBeNull();
     expect(document.connectedStyle).toBeNull();
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
