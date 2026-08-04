@@ -102,6 +102,18 @@ export type CacheMutationReceipt =
   | ({ status: "committed" } & CacheCursor)
   | { status: "unchanged"; epoch: string; revision: number };
 
+/**
+ * One appended Cache journal record: the Cache revision allocated at append
+ * time, the upserted Cache entries, and the removed Cache keys of one
+ * Cache persistence batch. Records are appended in Cache revision order and
+ * replayed in that order over the Index checkpoint at initialization.
+ */
+type JournalRecord = {
+  revision: number;
+  upserts: Record<string, CacheEntry>;
+  removed: string[];
+};
+
 export type CacheLookupResult = CacheCursor & {
   matches: Record<string, { cacheKey: string; entry: CacheEntry; entryToken: string } | null>;
 };
@@ -157,6 +169,7 @@ export type CacheAuthorityOptions = {
   cacheEpoch?: string;
   cachePolicy?: CachePolicy;
   resolverVersion?: number;
+  journalCompactBytes?: number;
   privateIconUrl?: (iconId: string) => string;
   onCacheChanged?: (event: CacheChangeEvent) => Promise<void> | void;
   onCacheChangedError?: (error: unknown) => Promise<void> | void;
@@ -165,6 +178,10 @@ export type CacheAuthorityOptions = {
 };
 
 const CACHE_INDEX_FILE = "favicon-cache-v2.json";
+const CACHE_JOURNAL_FILE = "favicon-cache.journal.ndjson";
+const JOURNAL_COMPACT_BYTES = 1024 * 1024;
+const RESOLVED_BATCH_WINDOW_MS = 32;
+const BULK_REFRESH_BATCH_WINDOW_MS = 250;
 const ICON_DIRECTORY = "icons";
 const MAX_RESOLUTION_CONCURRENCY = 4;
 // Batches larger than this send a null `changedKeys` sentinel instead of the
@@ -204,6 +221,8 @@ export class KernelCacheAuthority {
   private iconSequence = 0;
   private cacheRevision = 0;
   private readonly cacheEpoch: string;
+  private readonly journalCompactBytes: number;
+  private journalText = "";
   private sortedKeys?: { revision: number; keys: string[] };
   private bulkRefresh?: BulkRefreshState;
   private bulkRefreshSequence = 0;
@@ -216,14 +235,19 @@ export class KernelCacheAuthority {
   ) {
     this.policy = options.cachePolicy ?? { cacheDays: 30 };
     this.cacheEpoch = options.cacheEpoch ?? newCacheEpoch();
+    this.journalCompactBytes = options.journalCompactBytes ?? JOURNAL_COMPACT_BYTES;
   }
 
   async initialize() {
     if (this.initializing) return this.initializing;
     this.initializing = (async () => {
-      const stored = await this.storage.get(CACHE_INDEX_FILE);
-      if (!stored) return;
+      const [stored, journal] = await Promise.all([
+        this.storage.get(CACHE_INDEX_FILE),
+        this.storage.get(CACHE_JOURNAL_FILE),
+      ]);
       const loaded = parseCache(stored);
+      const { records, validText } = parseJournal(journal);
+      this.journalText = validText;
       const removed: CacheEntry[] = [];
       const pruned = Object.fromEntries(
         Object.entries(loaded).filter(([key, entry]) => {
@@ -234,15 +258,18 @@ export class KernelCacheAuthority {
           return true;
         }),
       );
-      if (removed.length === 0) {
-        this.cache = loaded;
-        return;
+      this.cache = pruned;
+      // 按 revision 顺序在 checkpoint 之上重放 journal；已被折叠进更新的
+      // checkpoint 的记录重放是幂等的。
+      for (const record of records) {
+        this.applyDelta(record.upserts, record.removed);
+        this.cacheRevision = record.revision;
       }
+      if (removed.length === 0) return;
       // The pruned index must be durable before any payload leaves the
       // workspace; a failed index write fails initialization and preserves
       // every old record and payload.
-      await this.persist(pruned);
-      this.cache = pruned;
+      await this.persist(this.cache);
       for (const entry of removed) {
         if (entry.iconId) await this.storage.remove(this.iconPath(entry.iconId));
       }
@@ -435,8 +462,9 @@ export class KernelCacheAuthority {
       };
       const upserts = { [scope.key]: nextEntry };
       const removed = replaceKey && replaceKey !== scope.key ? [replaceKey] : [];
+      let revision: number;
       try {
-        await this.persistDelta(upserts, removed);
+        revision = await this.persistDelta(upserts, removed);
       } catch (error) {
         completeInvalidations();
         await this.storage.remove(this.iconPath(iconId));
@@ -450,7 +478,7 @@ export class KernelCacheAuthority {
       }
       this.applyDelta(upserts, removed);
       completeInvalidations();
-      const receipt = await this.publishChange(upserts, removed);
+      const receipt = await this.publishChange(upserts, removed, revision);
       await this.removePayload(previous, iconId);
       await this.removePayload(replaced, iconId);
       return receipt;
@@ -475,15 +503,16 @@ export class KernelCacheAuthority {
         this.completeInvalidation(key, generation);
         return this.unchangedReceipt();
       }
+      let revision: number;
       try {
-        await this.persistDelta({}, [key]);
+        revision = await this.persistDelta({}, [key]);
       } catch (error) {
         this.completeInvalidation(key, generation);
         throw error;
       }
       this.applyDelta({}, [key]);
       this.completeInvalidation(key, generation);
-      const receipt = await this.publishChange({}, [key]);
+      const receipt = await this.publishChange({}, [key], revision);
       await this.removePayload(previous);
       return receipt;
     });
@@ -511,15 +540,16 @@ export class KernelCacheAuthority {
         for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
         return this.unchangedReceipt();
       }
+      let revision: number;
       try {
-        await this.persistDelta({}, removed);
+        revision = await this.persistDelta({}, removed);
       } catch (error) {
         for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
         throw error;
       }
       this.applyDelta({}, removed);
       for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
-      const receipt = await this.publishChange({}, removed);
+      const receipt = await this.publishChange({}, removed, revision);
       for (const [, entry] of removable) await this.removePayload(entry);
       return receipt;
     });
@@ -546,15 +576,16 @@ export class KernelCacheAuthority {
         return this.unchangedReceipt();
       }
       const removed = generated.map(([key]) => key);
+      let revision: number;
       try {
-        await this.persistDelta({}, removed);
+        revision = await this.persistDelta({}, removed);
       } catch (error) {
         for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
         throw error;
       }
       this.applyDelta({}, removed);
       for (const [key, generation] of invalidations) this.completeInvalidation(key, generation);
-      const receipt = await this.publishChange({}, removed);
+      const receipt = await this.publishChange({}, removed, revision);
       for (const [, entry] of generated) await this.removePayload(entry);
       return receipt;
     });
@@ -589,6 +620,15 @@ export class KernelCacheAuthority {
     return Object.values(this.cache).find((candidate) => candidate.iconId === iconId);
   }
 
+  /**
+   * 解析完成到提交之间的 batch 窗口：交互路径 32ms，Bulk cache refresh
+   * 运行期间 250ms，以摊薄每次追加的固定写入开销。计时器不被后续到达
+   * 的解析重置（ADR 0008）。
+   */
+  private resolvedBatchWindowMs() {
+    return this.bulkRefresh?.state === "running" ? BULK_REFRESH_BATCH_WINDOW_MS : RESOLVED_BATCH_WINDOW_MS;
+  }
+
   private async commitResolved(
     scope: LinkScope,
     resolved: ResolvedIcon,
@@ -601,7 +641,7 @@ export class KernelCacheAuthority {
       this.resolvedCommitBatchTimer = setTimeout(() => {
         this.resolvedCommitBatchTimer = undefined;
         void this.flushResolvedCommitBatch();
-      }, 32);
+      }, this.resolvedBatchWindowMs());
     });
   }
 
@@ -620,6 +660,7 @@ export class KernelCacheAuthority {
       generation: number;
       key: string;
       previous: CacheEntry | undefined;
+      reusedIcon: boolean;
       entry: CacheEntry;
     }> = [];
     try {
@@ -631,52 +672,70 @@ export class KernelCacheAuthority {
           entries[index] = copyEntry(previous);
           continue;
         }
-        const iconId = this.nextIconId(scope.key);
-        await this.storage.put(this.iconPath(iconId), bytesToBase64(resolved.bytes));
-        if (!this.isCurrentGeneration(scope.key, generation)) {
-          await this.storage.remove(this.iconPath(iconId));
-          continue;
+        // 图标字节与现有 payload 相同时复用其 iconId：不写新 payload，
+        // Immutable private icon URL 保持（同 URL 永远同字节），省去刷新
+        // 未变化图标时的 payload 写入与删除。复用条目的 payload 归属于
+        // previous，因此它被 superseded 时绝不删除该 payload。
+        let iconId: string | undefined;
+        let url: string | undefined;
+        if (previous?.iconId) {
+          const stored = await this.storage.get(this.iconPath(previous.iconId));
+          if (!this.isCurrentGeneration(scope.key, generation)) continue;
+          if (stored !== undefined && stored === bytesToBase64(resolved.bytes)) {
+            iconId = previous.iconId;
+            url = previous.url;
+          }
+        }
+        if (iconId === undefined) {
+          iconId = this.nextIconId(scope.key);
+          await this.storage.put(this.iconPath(iconId), bytesToBase64(resolved.bytes));
+          if (!this.isCurrentGeneration(scope.key, generation)) {
+            await this.storage.remove(this.iconPath(iconId));
+            continue;
+          }
+          url = this.privateIconUrl(iconId);
         }
         prepared.push({
           index,
           generation,
           key: scope.key,
           previous,
+          reusedIcon: iconId === previous?.iconId,
           entry: {
-            url: this.privateIconUrl(iconId), iconId, fetchedAt: this.now(), source: resolved.source,
+            url: url!, iconId, fetchedAt: this.now(), source: resolved.source,
             targetUrl: scope.targetUrl, domain: scope.domain, routeKey: scope.routeKey,
             pathPrefix: scope.pathPrefix, contentType: resolved.contentType, resolverVersion: this.options.resolverVersion,
           },
         });
       }
     } catch (error) {
-      await Promise.all(prepared.map(({ entry }) => this.storage.remove(this.iconPath(entry.iconId!))));
+      await Promise.all(prepared.filter((pending) => !pending.reusedIcon).map(({ entry }) => this.storage.remove(this.iconPath(entry.iconId!))));
       throw error;
     }
 
     const current = prepared.filter(({ key, generation }) => this.isCurrentGeneration(key, generation));
     for (const pending of prepared) {
-      if (!current.includes(pending)) {
+      if (!current.includes(pending) && !pending.reusedIcon) {
         await this.storage.remove(this.iconPath(pending.entry.iconId!));
       }
     }
     if (current.length === 0) return entries;
 
     const upserts = Object.fromEntries(current.map(({ key, entry }) => [key, entry]));
+    let revision: number;
     try {
-      await this.persistDelta(upserts, []);
+      revision = await this.persistDelta(upserts, []);
     } catch (error) {
-      await Promise.all(current.map(({ entry }) => this.storage.remove(this.iconPath(entry.iconId!))));
+      await Promise.all(current.filter((pending) => !pending.reusedIcon).map(({ entry }) => this.storage.remove(this.iconPath(entry.iconId!))));
       throw error;
     }
+    // 追加之后才被 superseded 的条目仍保留在已追加的记录里：触发
+    // invalidate 的后续 mutation（删除、替换）会各自追加修正记录，
+    // 重放顺序保证最终一致，无需撤回记录。
     const committed = current.filter(({ key, generation }) => this.isCurrentGeneration(key, generation));
-    if (committed.length !== current.length) {
-      const finalUpserts = Object.fromEntries(committed.map(({ key, entry }) => [key, entry]));
-      await this.persistDelta(finalUpserts, []);
-      for (const pending of current) {
-        if (!committed.includes(pending)) {
-          await this.storage.remove(this.iconPath(pending.entry.iconId!));
-        }
+    for (const pending of current) {
+      if (!committed.includes(pending) && !pending.reusedIcon) {
+        await this.storage.remove(this.iconPath(pending.entry.iconId!));
       }
     }
 
@@ -684,7 +743,7 @@ export class KernelCacheAuthority {
       // A batch publishes one isolated event, so connected clients reconcile
       // once even when several scopes resolve together.
       this.applyDelta(Object.fromEntries(committed.map(({ key, entry }) => [key, entry])), []);
-      await this.publishChange(Object.fromEntries(committed.map(({ key, entry }) => [key, entry])), []);
+      await this.publishChange(Object.fromEntries(committed.map(({ key, entry }) => [key, entry])), [], revision);
       for (const pending of committed) {
         entries[pending.index] = copyEntry(pending.entry);
         await this.removePayload(pending.previous, pending.entry.iconId);
@@ -721,29 +780,78 @@ export class KernelCacheAuthority {
     return task;
   }
 
+  /**
+   * 把内存 Cache 整体固化为新的 Index checkpoint，并清空已折叠进该
+   * checkpoint 的 Cache journal。仅 Index compaction、legacy-pin 迁移和
+   * superseded Pinned 兜底路径使用；普通变更走 persistDelta 追加。
+   */
   private persist(cache = this.cache) {
-    const snapshot = JSON.stringify(cache);
-    return this.persistSerialized(snapshot);
+    const write = this.persistTail.catch(() => undefined).then(async () => {
+      await this.storage.put(CACHE_INDEX_FILE, JSON.stringify(cache));
+      if (this.journalText.length > 0) {
+        this.journalText = "";
+        try {
+          await this.storage.remove(CACHE_JOURNAL_FILE);
+        } catch {
+          // 残留 journal 与 checkpoint 内容重叠，重放幂等；由下一次整体覆盖消除。
+        }
+      }
+    });
+    this.persistTail = write;
+    return write;
   }
 
   private persistDelta(upserts: Record<string, CacheEntry>, removed: string[]) {
-    const removedKeys = new Set(removed);
-    const serialized: string[] = [];
-    for (const [key, entry] of Object.entries(this.cache)) {
-      if (removedKeys.has(key)) continue;
-      const replacement = Object.prototype.hasOwnProperty.call(upserts, key) ? upserts[key] : entry;
-      serialized.push(`${JSON.stringify(key)}:${JSON.stringify(replacement)}`);
-    }
-    for (const [key, entry] of Object.entries(upserts)) {
-      if (!(key in this.cache)) serialized.push(`${JSON.stringify(key)}:${JSON.stringify(entry)}`);
-    }
-    return this.persistSerialized(`{${serialized.join(",")}}`);
+    // 追加前分配 Cache revision：磁盘记录与广播事件一一对应；追加失败
+    // 留下的空洞按既有 gap 语义由客户端全量重查。
+    const revision = ++this.cacheRevision;
+    const record: JournalRecord = { revision, upserts, removed };
+    return this.appendJournal(`${JSON.stringify(record)}`).then(() => revision);
   }
 
-  private persistSerialized(snapshot: string) {
-    const write = this.persistTail.catch(() => undefined).then(() => this.storage.put(CACHE_INDEX_FILE, snapshot));
+  private appendJournal(recordText: string) {
+    const write = this.persistTail.catch(() => undefined).then(async () => {
+      const next = this.journalText ? `${this.journalText}\n${recordText}` : recordText;
+      await this.storage.put(CACHE_JOURNAL_FILE, next);
+      this.journalText = next;
+      if (next.length >= this.journalCompactBytes) {
+        // 压缩失败不使已成功的追加失败；journal 仍超阈值时下一次追加重试。
+        void this.compactJournal(false).catch(() => undefined);
+      }
+    });
     this.persistTail = write;
     return write;
+  }
+
+  private compactJournal(force: boolean) {
+    const write = this.persistTail.catch(() => undefined).then(async () => {
+      if (this.journalText.length === 0) return;
+      if (!force && this.journalText.length < this.journalCompactBytes) return;
+      await this.doCompact();
+    });
+    this.persistTail = write;
+    return write;
+  }
+
+  private async doCompact() {
+    await this.storage.put(CACHE_INDEX_FILE, JSON.stringify(this.cache));
+    this.journalText = "";
+    try {
+      await this.storage.remove(CACHE_JOURNAL_FILE);
+    } catch {
+      // 残留 journal 与 checkpoint 内容重叠，重放幂等；由下一次覆盖消除。
+    }
+  }
+
+  /**
+   * Kernel 插件卸载前调用：flush 未到期的 resolved batch，等待全部
+   * mutation 与磁盘写排空，然后压缩 journal 使 checkpoint 保持最新。
+   */
+  async shutdown() {
+    if (this.resolvedCommitBatch.length > 0) this.flushResolvedCommitBatch();
+    await this.cacheMutationTail;
+    await this.persistTail;
+    await this.compactJournal(true);
   }
 
   private applyDelta(upserts: Record<string, CacheEntry>, removed: string[]) {
@@ -758,15 +866,15 @@ export class KernelCacheAuthority {
     return { status: "unchanged", epoch: this.cacheEpoch, revision: this.cacheRevision };
   }
 
-  private async publishChange(upserts: Record<string, CacheEntry>, removed: string[]): Promise<CacheMutationReceipt> {
-    this.cacheRevision += 1;
+  private async publishChange(upserts: Record<string, CacheEntry>, removed: string[], revision: number): Promise<CacheMutationReceipt> {
+    // 不在此递增：revision 由 persistDelta 在 journal 追加前分配并传入。
     // Enumerate the batch keys so unrelated Frontend clients can skip their
     // working-set lookup; a bulk operation too broad to enumerate sends the
     // null sentinel so every client refreshes unconditionally.
     const changedKeys = [...new Set([...Object.keys(upserts), ...removed])];
     const change: CacheChangeEvent = {
       epoch: this.cacheEpoch,
-      revision: this.cacheRevision,
+      revision,
       changedKeys: changedKeys.length > MAX_EVENT_CHANGED_KEYS ? null : changedKeys,
     };
     try {
@@ -841,6 +949,15 @@ export class KernelCacheAuthority {
     await Promise.all(Array.from({ length: Math.min(MAX_RESOLUTION_CONCURRENCY, scopes.length) }, worker));
     refresh.state = refresh.state === "cancelling" ? "cancelled" : "completed";
     await this.notifyBulkRefresh(refresh);
+    // 刷新结束：flush 未到期的 resolved batch，排空写链，压缩 journal 使
+    // 下一次启动无需重放本次刷新的全部记录。压缩失败不影响刷新结果。
+    try {
+      if (this.resolvedCommitBatch.length > 0) this.flushResolvedCommitBatch();
+      await this.cacheMutationTail;
+      await this.compactJournal(true);
+    } catch {
+      // 批量刷新结果已提交；仅压缩未完成，后续追加或卸载时重试。
+    }
   }
 
   private async notifyBulkRefresh(refresh: BulkRefreshState) {
@@ -898,6 +1015,38 @@ export class KernelCacheAuthority {
   private privateIconUrl(iconId: string) {
     return (this.options.privateIconUrl ?? ((id) => `/api/plugin/private/siyuan-linkmark/icon/${encodeURIComponent(id)}`))(iconId);
   }
+}
+
+/**
+ * 解析 Cache journal：按行顺序校验，第一条无法解析或形状非法的记录
+ * 起截断尾部（该记录及其后全部丢弃）。validText 是有效记录的重组文本，
+ * 作为后续追加的内存镜像基线。
+ */
+function parseJournal(value: string | undefined): { records: JournalRecord[]; validText: string } {
+  if (!value) return { records: [], validText: "" };
+  const records: JournalRecord[] = [];
+  let validText = "";
+  for (const line of value.split("\n")) {
+    if (!line) continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      break;
+    }
+    if (!isJournalRecord(record)) break;
+    records.push(record);
+    validText = validText ? `${validText}\n${line}` : line;
+  }
+  return { records, validText };
+}
+
+function isJournalRecord(value: unknown): value is JournalRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Partial<JournalRecord>;
+  return typeof record.revision === "number"
+    && !!record.upserts && typeof record.upserts === "object" && !Array.isArray(record.upserts)
+    && Array.isArray(record.removed);
 }
 
 function parseCache(value: string | undefined): Record<string, CacheEntry> {

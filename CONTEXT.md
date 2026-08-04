@@ -216,12 +216,28 @@ _Avoid_: version number, cache generation
 The per-process marker identifying a Cache authority instance, changing whenever the kernel plugin starts or reloads; a Frontend client uses it to detect that the per-process Cache revision was reset and resynchronize. Any authoritative response or event carrying a new Cache epoch is accepted as the new baseline, while Cache entries are adopted only from responses whose cursor matches the current baseline.
 _Avoid_: version number, cache generation
 
+**Cache index**:
+The durable persistence system of the authoritative Cache, composed of an Index checkpoint and a Cache journal; the Cache authority rebuilds its in-memory Cache from it at initialization.
+_Avoid_: favicon-cache file, disk snapshot
+
+**Index checkpoint**:
+The Cache index's durable full-Cache snapshot file (`favicon-cache-v2.json`), loaded at Cache authority initialization and replaced atomically by Index compaction.
+_Avoid_: snapshot, Cache snapshot
+
+**Cache journal**:
+The append-only Cache index file of revision-tagged Cache entry deltas whose records correspond one-to-one with Cache change events; the Cache authority replays it in order over the Index checkpoint at initialization.
+_Avoid_: WAL, log file
+
+**Index compaction**:
+The Cache-authority operation that folds the Cache journal into a new Index checkpoint and clears the journal, triggered by journal growth beyond a size threshold, the end of a Bulk cache refresh, or Kernel plugin unload.
+_Avoid_: journal merge, log rotation
+
 **Cache persistence batch**:
-One durable cache-index write that commits all compatible cache-entry changes collected during a short scheduling window. Each committed resolution publishes state only after that write succeeds; its earlier Queue acknowledgement does not represent a commit.
+One durable Cache journal record that commits all compatible cache-entry changes collected during a short scheduling window. Each committed resolution publishes state only after that append succeeds; its earlier Queue acknowledgement does not represent a commit.
 _Avoid_: deferred best-effort save, per-entry index write
 
 **Incremental cache hot path**:
-The ordinary Cache entry mutation path in which work scales with the changed entries, except for one whole-index persistence write per Cache persistence batch. Complete Cache snapshots remain internal; Frontend synchronization uses Cache lookup, Cache-management queries, and compact invalidations.
+The ordinary Cache entry mutation path in which work scales with the changed entries and each Cache persistence batch appends one Cache journal record; only Index compaction rewrites the whole index. Complete Cache snapshots remain internal; Frontend synchronization uses Cache lookup, Cache-management queries, and compact invalidations.
 _Avoid_: fully incremental persistence, frontend snapshot synchronization
 
 **Legacy cache**:

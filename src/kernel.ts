@@ -113,6 +113,13 @@ class LinkmarkKernel {
     for (const method of methods) {
       await siyuan.rpc.unbind(method);
     }
+    // SiYuan 同步等待 onunload Promise，因此这里 flush 未到期的 resolved
+    // batch 并压缩 journal 是硬保证：卸载后磁盘 checkpoint 保持最新。
+    try {
+      await this.authority?.shutdown();
+    } catch (error) {
+      await siyuan.logger.error("Linkmark Kernel shutdown persistence flush failed", errorText(error)).catch(() => undefined);
+    }
   }
 
   private async setPolicy(policy: Partial<CachePolicyFields>) {

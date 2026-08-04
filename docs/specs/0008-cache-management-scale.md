@@ -129,7 +129,8 @@ are guaranteed never to be reused.
   with simpler focus, keyboard, mutation, and revision invalidation behavior.
 - Existing Pinned-icon safety, Cache policy, Display preferences, fail-open
   rendering, private route authentication, and fixed 32-millisecond persistence
-  batching remain unchanged unless explicitly described above.
+  batching (250 milliseconds during a Bulk cache refresh) remain unchanged
+  unless explicitly described above.
 
 ## Testing Decisions
 
@@ -182,8 +183,9 @@ are guaranteed never to be reused.
 - Historical pagination snapshots, cursor sessions, or MVCC.
 - A reverse dependency index for targeted Present-scope invalidation. The changed-keys hint in Cache change events (ADR 0018) is not a reverse dependency index: the Kernel never tracks which Frontend clients hold which scopes, and the client-side candidate-key predicate is computed locally.
 - Persisting or resuming Bulk cache refresh across Kernel reload.
-- General cache persistence partitioning, journaling, or removal of the current
-  whole-index write per Cache persistence batch.
+- Cache index partitioning (sharding) or removal of the whole-index Index
+  checkpoint write per Index compaction; Cache journaling is adopted instead
+  (ADR 0019).
 - Changing Cache freshness policy, Link scope identity, Pinned precedence,
   Shared-pin eligibility, route fallback, automatic-fetch behavior, or
   fail-open rendering.

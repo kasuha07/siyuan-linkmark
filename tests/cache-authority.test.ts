@@ -12,6 +12,9 @@ import { INVALID_SHARE_DOMAIN } from "../src/parent-domain";
 import { fetchOutcomeFor, outcomeForCacheRequest } from "../src/refresh-outcome";
 import { ForwardProxyIconResolver, type ForwardProxy, type KernelResolverPolicy } from "../src/kernel-resolver";
 
+const CACHE_INDEX_FILE = "favicon-cache-v2.json";
+const CACHE_JOURNAL_FILE = "favicon-cache.journal.ndjson";
+
 class MemoryStorage implements CacheStorage {
   readonly files = new Map<string, string>();
   failNextPut = false;
@@ -51,7 +54,7 @@ class BlockingCacheIndexStorage extends MemoryStorage {
   }
 
   override async put(path: string, content: string) {
-    if (path === "favicon-cache-v2.json" && this.blockNextIndexWrite) {
+    if (path === CACHE_JOURNAL_FILE && this.blockNextIndexWrite) {
       this.blockNextIndexWrite = false;
       this.resolveIndexWriteStarted();
       await new Promise<void>((resolve) => { this.releaseIndexWrite = resolve; });
@@ -64,7 +67,7 @@ class CountingCacheIndexStorage extends MemoryStorage {
   cacheIndexWrites = 0;
 
   override async put(path: string, content: string) {
-    if (path === "favicon-cache-v2.json") {
+    if (path === CACHE_JOURNAL_FILE) {
       this.cacheIndexWrites += 1;
     }
     await super.put(path, content);
@@ -73,11 +76,23 @@ class CountingCacheIndexStorage extends MemoryStorage {
 
 class FailingCacheIndexStorage extends CountingCacheIndexStorage {
   override async put(path: string, content: string) {
-    if (path === "favicon-cache-v2.json") {
+    if (path === CACHE_JOURNAL_FILE || path === CACHE_INDEX_FILE) {
       this.cacheIndexWrites += 1;
       throw new Error("cache-index write failed");
     }
     this.files.set(path, content);
+  }
+}
+
+class FailingJournalStorage extends MemoryStorage {
+  failJournalAppend = true;
+
+  override async put(path: string, content: string) {
+    if (path === CACHE_JOURNAL_FILE && this.failJournalAppend) {
+      this.failJournalAppend = false;
+      throw new Error("simulated journal append failure");
+    }
+    await super.put(path, content);
   }
 }
 
@@ -1255,7 +1270,10 @@ describe("KernelCacheAuthority", () => {
     const received: CacheChangeEvent[] = [];
     let byte = 1;
     const authority = new KernelCacheAuthority(storage, {
-      resolve: async () => resolved(`test resolver ${byte++}`),
+      resolve: async () => {
+        const value = byte++;
+        return { bytes: new Uint8Array([value]).buffer, contentType: "image/png", source: `test resolver ${value}` };
+      },
     }, () => 100, {
       onCacheChanged: (event) => { received.push(event); },
     });
@@ -1500,7 +1518,10 @@ describe("KernelCacheAuthority", () => {
     const received: CacheChangeEvent[] = [];
     let byte = 1;
     const authority = new KernelCacheAuthority(storage, {
-      resolve: async () => resolved(`test resolver ${byte++}`),
+      resolve: async () => {
+        const value = byte++;
+        return { bytes: new Uint8Array([value]).buffer, contentType: "image/png", source: `test resolver ${value}` };
+      },
     }, () => 100, {
       onCacheChanged: (event) => { received.push(event); },
     });
@@ -1548,6 +1569,275 @@ describe("KernelCacheAuthority", () => {
     await expect(authority.icon(encodedIconId)).resolves.toMatchObject({ contentType: "image/png" });
     await expect(authority.icon(legacyIconId)).resolves.toMatchObject({ contentType: "image/png" });
     await expect(authority.icon(`${encodedIconId.slice(0, encodedIconId.lastIndexOf("-"))}-zzz`)).resolves.toBeUndefined();
+  });
+
+  it("replays the journal over the checkpoint and restores the revision", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set(CACHE_INDEX_FILE, JSON.stringify({
+      "seed.example.com": entry({ domain: "seed.example.com", url: "seed", iconId: "seed-1" }),
+    }));
+    const record = (revision: number, upserts: Record<string, CacheEntry>, removed: string[]) => JSON.stringify({ revision, upserts, removed });
+    storage.files.set(CACHE_JOURNAL_FILE, [
+      record(1, { "first.example.com": entry({ domain: "first.example.com", url: "first", iconId: "first-1" }) }, []),
+      record(2, { "second.example.com": entry({ domain: "second.example.com", url: "second", iconId: "second-1" }) }, ["seed.example.com"]),
+    ].join("\n"));
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(snapshotCache(authority)).toEqual({
+      "first.example.com": expect.objectContaining({ domain: "first.example.com" }),
+      "second.example.com": expect.objectContaining({ domain: "second.example.com" }),
+    });
+    expect(authority.snapshot().revision).toBe(2);
+    // 后续追加基于重放后的镜像，revision 继续单调递增。
+    await authority.remove("first.example.com");
+    await vi.waitFor(() => expect(authority.snapshot().revision).toBe(3));
+    const lines = storage.files.get(CACHE_JOURNAL_FILE)!.split("\n");
+    expect(lines).toHaveLength(3);
+    expect(JSON.parse(lines[2])).toMatchObject({ revision: 3, removed: ["first.example.com"] });
+  });
+
+  it("replays a journal alone when no checkpoint exists yet", async () => {
+    // 崩溃发生在第一次压缩前：checkpoint 从未写过，journal 是唯一状态。
+    const storage = new MemoryStorage();
+    storage.files.set(CACHE_JOURNAL_FILE, JSON.stringify({
+      revision: 1,
+      upserts: { "only.example.com": entry({ domain: "only.example.com", url: "only", iconId: "only-1" }) },
+      removed: [],
+    }));
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(snapshotCache(authority)).toEqual({ "only.example.com": expect.objectContaining({ url: "only" }) });
+    expect(authority.snapshot().revision).toBe(1);
+  });
+
+  it("truncates a corrupt journal tail at the first unparseable record", async () => {
+    const storage = new MemoryStorage();
+    const record = (revision: number, upserts: Record<string, CacheEntry>) => JSON.stringify({ revision, upserts, removed: [] });
+    storage.files.set(CACHE_JOURNAL_FILE, [
+      record(1, { "kept.example.com": entry({ domain: "kept.example.com", url: "kept", iconId: "kept-1" }) }),
+      "this is not json",
+      record(3, { "dropped.example.com": entry({ domain: "dropped.example.com", url: "dropped", iconId: "dropped-1" }) }),
+    ].join("\n"));
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(snapshotCache(authority)).toEqual({ "kept.example.com": expect.objectContaining({ url: "kept" }) });
+    expect(authority.snapshot().revision).toBe(1);
+    // 截断后的有效文本成为后续追加的镜像：损坏尾部不再被保留。
+    await authority.remove("kept.example.com");
+    await vi.waitFor(() => expect(storage.files.get(CACHE_JOURNAL_FILE)!.split("\n")).toHaveLength(2));
+    const lines = storage.files.get(CACHE_JOURNAL_FILE)!.split("\n");
+    expect(JSON.parse(lines[0])).toMatchObject({ revision: 1 });
+    expect(JSON.parse(lines[1])).toMatchObject({ revision: 2, removed: ["kept.example.com"] });
+  });
+
+  it("replays a journal already folded into the checkpoint idempotently", async () => {
+    // 压缩崩溃在“写新 checkpoint 后、清空 journal 前”：checkpoint 已折叠
+    // 全部记录而 journal 原样保留；按序重放必须保持最终状态一致。
+    const storage = new MemoryStorage();
+    storage.files.set(CACHE_INDEX_FILE, JSON.stringify({
+      "a.example.com": entry({ domain: "a.example.com", url: "a-v2", iconId: "a-2" }),
+    }));
+    const records = [
+      { revision: 1, upserts: { "a.example.com": entry({ domain: "a.example.com", url: "a-v1", iconId: "a-1" }) }, removed: ["gone.example.com"] },
+      { revision: 2, upserts: { "a.example.com": entry({ domain: "a.example.com", url: "a-v2", iconId: "a-2" }) }, removed: [] },
+    ];
+    storage.files.set(CACHE_JOURNAL_FILE, records.map((r) => JSON.stringify(r)).join("\n"));
+    const authority = new KernelCacheAuthority(storage, { resolve: async () => null }, () => 100);
+    await authority.initialize();
+
+    expect(snapshotCache(authority)).toEqual({ "a.example.com": expect.objectContaining({ iconId: "a-2", url: "a-v2" }) });
+    expect(authority.snapshot().revision).toBe(2);
+  });
+
+  it("appends a journal record without rewriting the checkpoint on every batch", async () => {
+    const storage = new RecordingOrderStorage();
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async (requested) => resolved(requested.key),
+    }, () => 100, { onCacheChanged: (event) => { received.push(event); } });
+    await authority.initialize();
+
+    await authority.getOrQueue(scope());
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+
+    expect(storage.operations.filter((op) => op.startsWith(`write ${CACHE_INDEX_FILE}`))).toEqual([]);
+    expect(storage.operations).toContain(`write ${CACHE_JOURNAL_FILE}`);
+    expect(storage.files.has(CACHE_INDEX_FILE)).toBe(false);
+    const record = JSON.parse(storage.files.get(CACHE_JOURNAL_FILE)!.split("\n")[0]);
+    expect(record).toMatchObject({ revision: 1, removed: [] });
+    expect(record.upserts["example.com"]).toMatchObject({ source: "example.com" });
+  });
+
+  it("does not rewrite the whole index when appending to a 10,000-entry cache", async () => {
+    const storage = new RecordingOrderStorage();
+    const entries: Record<string, CacheEntry> = {};
+    for (let index = 0; index < 10_000; index += 1) {
+      const key = `domain-${index}.example.com`;
+      entries[key] = entry({ domain: key, url: `icon-${index}`, iconId: `id-${index}` });
+    }
+    const serialized = JSON.stringify(entries);
+    storage.files.set(CACHE_INDEX_FILE, serialized);
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async (requested) => resolved(requested.key),
+    }, () => 100, { onCacheChanged: (event) => { received.push(event); } });
+    await authority.initialize();
+
+    await authority.getOrQueue(scope("fresh.example.com"));
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+
+    expect(storage.operations.filter((op) => op.startsWith(`write ${CACHE_INDEX_FILE}`))).toEqual([]);
+    expect(storage.files.get(CACHE_INDEX_FILE)).toBe(serialized);
+  });
+
+  it("compacts the journal into the checkpoint beyond the size threshold", async () => {
+    const storage = new MemoryStorage();
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async (requested) => resolved(requested.key),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+      journalCompactBytes: 100,
+    });
+    await authority.initialize();
+
+    await authority.getOrQueue(scope("first.example.com"));
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    await vi.waitFor(() => expect(storage.files.has(CACHE_JOURNAL_FILE)).toBe(false));
+    expect(JSON.parse(storage.files.get(CACHE_INDEX_FILE)!)).toMatchObject({
+      "first.example.com": expect.objectContaining({ source: "first.example.com" }),
+    });
+    // 压缩后 checkpoint 与内存一致，后续追加继续工作。
+    await authority.remove("first.example.com");
+    await vi.waitFor(() => expect(storage.files.get(CACHE_JOURNAL_FILE)).toBeDefined());
+    expect(JSON.parse(storage.files.get(CACHE_JOURNAL_FILE)!.split("\n")[0])).toMatchObject({ revision: 2, removed: ["first.example.com"] });
+  });
+
+  it("flushes the pending batch and compacts the journal on shutdown", async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = new MemoryStorage();
+      const received: CacheChangeEvent[] = [];
+      const authority = new KernelCacheAuthority(storage, {
+        resolve: async (requested) => resolved(requested.key),
+      }, () => 100, { onCacheChanged: (event) => { received.push(event); } });
+      await authority.initialize();
+
+      await authority.getOrQueue(scope());
+      await vi.advanceTimersByTimeAsync(0);
+      // batch 仍在 32ms 窗口内：shutdown 必须 flush 它并压缩。
+      await authority.shutdown();
+      expect(received).toHaveLength(1);
+      expect(storage.files.has(CACHE_JOURNAL_FILE)).toBe(false);
+      expect(JSON.parse(storage.files.get(CACHE_INDEX_FILE)!)["example.com"]).toMatchObject({ source: "example.com" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves a revision gap when a journal append fails and the next commit continues", async () => {
+    const storage = new FailingJournalStorage();
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async (requested) => resolved(requested.key),
+    }, () => 100, {
+      onCacheChanged: (event) => { received.push(event); },
+    });
+    await authority.initialize();
+
+    await authority.getOrQueue(scope("first.example.com"));
+    // 等第一次 batch 的 append 失败完全结束，避免第二次 commit 合并进同一 batch。
+    await settle();
+    expect(received).toHaveLength(0);
+    expect(snapshotCache(authority)).toEqual({});
+    expect(storage.files.has(CACHE_JOURNAL_FILE)).toBe(false);
+
+    await authority.getOrQueue(scope("second.example.com"));
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+    // 失败的追加分配了 revision 1 但未持久化：下一次成功提交是 revision 2。
+    expect(received[0]).toMatchObject({ revision: 2, changedKeys: ["second.example.com"] });
+    const lines = storage.files.get(CACHE_JOURNAL_FILE)!.split("\n");
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0])).toMatchObject({ revision: 2 });
+    expect(snapshotCache(authority)).toEqual({ "second.example.com": expect.objectContaining({ source: "second.example.com" }) });
+  });
+
+  it("reuses the stored payload iconId when refreshed bytes are unchanged", async () => {
+    const storage = new MemoryStorage();
+    storage.files.set(CACHE_INDEX_FILE, JSON.stringify({
+      "example.com": entry({ domain: "example.com", iconId: "keep-1", url: "/plugin/private/siyuan-linkmark/icon/keep-1" }),
+    }));
+    storage.files.set("icons/keep-1.base64", Buffer.from([1, 2, 3]).toString("base64"));
+    const received: CacheChangeEvent[] = [];
+    const authority = new KernelCacheAuthority(storage, {
+      resolve: async () => ({ bytes: new Uint8Array([1, 2, 3]).buffer, contentType: "image/png", source: "refresh" }),
+    }, () => 100, { onCacheChanged: (event) => { received.push(event); } });
+    await authority.initialize();
+
+    await authority.getOrQueue(scope(), true);
+    await vi.waitFor(() => expect(received).toHaveLength(1));
+
+    const current = snapshotCache(authority)["example.com"];
+    expect(current.iconId).toBe("keep-1");
+    expect(current.url).toBe("/plugin/private/siyuan-linkmark/icon/keep-1");
+    expect(current.source).toBe("refresh");
+    // 未变化的刷新不产生新 payload，也不删除复用的 payload。
+    expect([...storage.files.keys()].filter((path) => path.startsWith("icons/"))).toEqual(["icons/keep-1.base64"]);
+    await expect(authority.icon("keep-1")).resolves.toMatchObject({ contentType: "image/png" });
+  });
+
+  it("uses the wider resolved batch window while a Bulk cache refresh is running", async () => {
+    vi.useFakeTimers();
+    try {
+      const storage = new MemoryStorage();
+      const received: CacheChangeEvent[] = [];
+      const blocked: Array<() => void> = [];
+      let first = true;
+      const authority = new KernelCacheAuthority(storage, {
+        resolve: async () => {
+          if (first) {
+            first = false;
+            return resolved("bulk");
+          }
+          await new Promise<void>((resolve) => { blocked.push(resolve); });
+          return resolved("bulk");
+        },
+      }, () => 100, { onCacheChanged: (event) => { received.push(event); } });
+      storage.files.set(CACHE_INDEX_FILE, JSON.stringify(Object.fromEntries(
+        Array.from({ length: 4 }, (_, index) => {
+          const domain = `bulk-${index}.example.dev`;
+          return [domain, entry({ domain, targetUrl: `https://${domain}/`, iconId: `old-${index}` })];
+        }),
+      )));
+      await authority.initialize();
+
+      const refresh = authority.startBulkRefresh();
+      await refresh;
+      await vi.advanceTimersByTimeAsync(1);
+      // 250ms 窗口：第一个 scope 完成后 100ms 仍无提交。
+      await vi.advanceTimersByTimeAsync(100);
+      expect(received).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(151);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(received).toHaveLength(1);
+      expect(received[0].changedKeys).toHaveLength(1);
+
+      blocked.splice(0).forEach((release) => release());
+      await vi.advanceTimersByTimeAsync(251);
+      await vi.advanceTimersByTimeAsync(0);
+      // 剩余 scope 合并进同一 250ms 窗口批次。
+      expect(received).toHaveLength(2);
+      expect(received[1].changedKeys).toHaveLength(3);
+      expect(authority.stats().bulkRefresh?.state).toBe("completed");
+      // 刷新结束 flush 尾部并压缩。
+      await vi.advanceTimersByTimeAsync(0);
+      expect(storage.files.has(CACHE_JOURNAL_FILE)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
