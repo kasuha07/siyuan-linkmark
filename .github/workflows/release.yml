@@ -55,8 +55,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          NOTES="docs/releases/${RELEASE_TAG}.md"
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" package.zip --clobber
+          elif [ -f "$NOTES" ]; then
+            gh release create "$RELEASE_TAG" package.zip --title "$RELEASE_TAG" --notes-file "$NOTES"
           else
             gh release create "$RELEASE_TAG" package.zip --title "$RELEASE_TAG" --generate-notes
           fi
