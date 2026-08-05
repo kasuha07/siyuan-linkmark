@@ -8,3 +8,6 @@ auto-favicon.zip
 Thumbs.db
 .idea/
 .vscode/
+
+# 本地参考：SiYuan 插件系统 API 声明（petal），不纳入版本控制
+petal/
