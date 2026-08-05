@@ -30,6 +30,9 @@ in `dist/`.
 - `i18n/`: English and Chinese strings; keep both key sets aligned.
 - `scripts/render-assets.mjs`: generated image assets.
 - `.github/workflows/release.yml`: tagged-release build and publication.
+- `docs/reference/API.md`: vendored copy of the official SiYuan HTTP API
+  reference (siyuan-note/siyuan `docs/API.md`). Treat as read-only; refresh
+  from upstream when the SiYuan API changes.
 
 ## Conventions
 
