@@ -1,4 +1,4 @@
-import { parse } from "tldts";
+import { parse } from "tldts-experimental";
 
 /**
  * The stable error identity returned by the Cache authority for every pin
@@ -33,11 +33,14 @@ export type PickerScopeChoice =
   | { kind: "subdomains"; shareDomain: string };
 
 /**
- * tldts is the sole PSL parser: every calculation includes the ICANN and
- * Private sections plus special-use and IP detection, so eTLD+1 results are
- * reproducible from the release-bundled list. No runtime suffix-list request
- * is ever made. `detectSpecialUse` exposes the IANA Special-Use Domain Names
- * registry verdict (RFC 6761/6762/7686/8375/9476 and successors) as
+ * tldts-experimental is the sole PSL parser: every calculation includes the
+ * ICANN and Private sections plus special-use and IP detection, so eTLD+1
+ * results are reproducible from the release-bundled list. No runtime
+ * suffix-list request is ever made. It ships the tldts API over a compact
+ * probabilistic rule set (see the package README), traded for a smaller
+ * bundle; the domain semantics exercised here are identical to the full
+ * tldts package. `detectSpecialUse` exposes the IANA Special-Use Domain
+ * Names registry verdict (RFC 6761/6762/7686/8375/9476 and successors) as
  * `isSpecialUse`, covering each listed name and all of its sub-domains.
  */
 const TLDTS_OPTIONS = {

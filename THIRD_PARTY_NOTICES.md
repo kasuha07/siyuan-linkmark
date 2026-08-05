@@ -24,8 +24,9 @@ Lark product artwork.
 
 ## tldts and Public Suffix List data
 
-The plugin bundles the [tldts](https://www.npmjs.com/package/tldts) domain
-parser, licensed under the MIT license with the following copyright notice:
+The plugin bundles the [tldts-experimental](https://www.npmjs.com/package/tldts-experimental)
+domain parser (the tldts API over a compact probabilistic rule set), licensed
+under the MIT license with the following copyright notice:
 
 > Copyright (c) 2017 Thomas Parisot, 2018 Rémi Berson
 

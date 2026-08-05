@@ -32,6 +32,6 @@
     "vitest": "^3.2.7"
   },
   "dependencies": {
-    "tldts": "^7.4.10"
+    "tldts-experimental": "^7.4.10"
   }
 }

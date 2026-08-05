@@ -1,4 +1,4 @@
-import { parse } from "tldts";
+import { parse } from "tldts-experimental";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   InvalidShareDomainError,
@@ -11,8 +11,8 @@ import {
   SHARED_PIN_EXCLUSIONS,
 } from "../src/parent-domain";
 
-vi.mock("tldts", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("tldts")>();
+vi.mock("tldts-experimental", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("tldts-experimental")>();
   return { ...actual, parse: vi.fn(actual.parse) };
 });
 
