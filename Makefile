@@ -1,7 +1,14 @@
 SIYUAN_CONTAINER ?= siyuan-linkmark-siyuan-dev
 SIYUAN_IMAGE ?= b3log/siyuan:latest
 SIYUAN_PORT ?= 6806
-SIYUAN_ACCESS_AUTH_CODE ?= siyuan-linkmark-dev
+# 必须保持为空：v3.7.3 的 InitPublishJWT 会覆盖 jwtKey 导致插件 JWT 签名无效，
+# 设置 accessAuthCode 后 CheckAuth 的 localhost 豁免失效，插件 forwardProxy 会全部
+# 401（见 src/cache-authority.ts 的 base64url 注释）。去掉后开发环境走 localhost 豁免。
+# 同时配合 SIYUAN_ACCESS_AUTH_CODE_BYPASS=true：Docker 端口映射下浏览器请求的
+# RemoteAddr 是 docker0 网关（非 127.0.0.1），无锁屏密码时会被 CheckAuth 拒绝；
+# 该环境变量跳过空锁屏密码检查（官方支持，https://github.com/siyuan-note/siyuan/issues/9709）。
+SIYUAN_ACCESS_AUTH_CODE ?= 
+SIYUAN_ACCESS_AUTH_CODE_BYPASS ?= true
 SIYUAN_WORKSPACE ?= $(CURDIR)/dev/siyuan-workspace
 DIST_DIR := $(CURDIR)/dist
 DEV_TMUX_SESSION ?= siyuan-linkmark-dev
@@ -31,6 +38,7 @@ dev-container: dev-build
 		docker run --detach \
 			--name "$(SIYUAN_CONTAINER)" \
 			--publish "127.0.0.1:$(SIYUAN_PORT):6806" \
+			--env "SIYUAN_ACCESS_AUTH_CODE_BYPASS=$(SIYUAN_ACCESS_AUTH_CODE_BYPASS)" \
 			--volume "$(DIST_DIR):/siyuan/workspace/data/plugins/siyuan-linkmark" \
 			--volume "$(SIYUAN_WORKSPACE):/siyuan/workspace" \
 			"$(SIYUAN_IMAGE)" serve \

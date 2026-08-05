@@ -292,7 +292,7 @@ export default class LinkmarkPlugin extends Plugin {
     }
     const targets = new Map([...domains].map(([key, item]) => [key, { scope: item.scope, targetUrl: item.targetUrl }]));
     showMessage(this.t("refreshStarted").replace("{count}", String(targets.size)));
-    showRefreshResult(this.t, await this.client.refreshDomains(targets));
+    showRefreshResult((key) => this.t(key), await this.client.refreshDomains(targets));
   }
 
   private async restoreAutomaticIcon(key: string, guard?: { epoch: string; entryToken: string }) {

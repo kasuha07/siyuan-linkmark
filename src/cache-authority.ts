@@ -1071,7 +1071,7 @@ function copyEntry(entry: CacheEntry): CacheEntry {
 }
 
 function entryToken(key: string, entry: CacheEntry) {
-  return Buffer.from(JSON.stringify([key, entry]), "utf8").toString("base64url");
+  return base64UrlEncode(JSON.stringify([key, entry]));
 }
 
 function ordinalCompare(left: string, right: string) {
@@ -1120,12 +1120,28 @@ function newCacheEpoch(): string {
 }
 
 /**
+ * base64url 编码：SiYuan 内核插件运行在 goja 环境，其 Buffer 只识别
+ * "base64Url"（大写 U）而不识别 Node 的 "base64url"（小写），因此这里
+ * 用两端都支持的 "base64" 编码后自行替换字母表并去掉填充，避免依赖
+ * Buffer 的 base64url 编码名。
+ */
+function base64UrlEncode(value: string) {
+  return Buffer.from(value, "utf8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlDecode(value: string) {
+  const padding = value.length % 4 === 0 ? "" : "=".repeat(4 - (value.length % 4));
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/") + padding;
+  return Buffer.from(base64, "base64").toString("utf8");
+}
+
+/**
  * Losslessly encodes a Link scope key for embedding in an iconId. The
  * base64url alphabet already matches the Private icon route's allowed
  * characters, so the encoded key round-trips through the URL untouched.
  */
 function encodeScopeKey(key: string) {
-  return Buffer.from(key, "utf8").toString("base64url");
+  return base64UrlEncode(key);
 }
 
 /**
@@ -1140,7 +1156,7 @@ function scopeKeyFromIconId(iconId: string): string | undefined {
   if (suffixDash <= 0) return undefined;
   const keyDash = iconId.lastIndexOf("-", suffixDash - 1);
   if (keyDash <= 0) return undefined;
-  return Buffer.from(iconId.slice(0, keyDash), "base64url").toString("utf8");
+  return base64UrlDecode(iconId.slice(0, keyDash));
 }
 
 function bytesToBase64(bytes: ArrayBuffer) {
