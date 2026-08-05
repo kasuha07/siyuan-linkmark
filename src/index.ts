@@ -1,4 +1,4 @@
-import { confirm, Menu, Plugin, showMessage, type IProtyle } from "siyuan";
+import { confirm, Menu, Plugin, showMessage, type IProtyle, type LinkMenu } from "siyuan";
 import "./style.css";
 import { FrontendCacheClient } from "./frontend-cache-client";
 import { CacheManagerDialog } from "./frontend-cache-manager";
@@ -11,6 +11,7 @@ import {
   linkHref,
   type LinkDiscoveryCandidate,
 } from "./frontend-link-discovery";
+import { LinkContextMenu } from "./frontend-link-menu";
 import {
   LINK_CONTENT_OBSERVER_OPTIONS,
   LINK_IDENTITY_ATTRIBUTES,
@@ -81,6 +82,7 @@ export default class LinkmarkPlugin extends Plugin {
   private readonly renderWork = new FrontendRenderWorkQueue<Element>((outer, inner) => outer.contains(inner));
   private topBarElement?: HTMLElement;
   private client!: FrontendCacheClient;
+  private linkMenu?: LinkContextMenu;
   private settingsPanel?: SettingsPanel;
   private readonly protyleRegisterListener = (event: CustomEvent<{ protyle: IProtyle }>) => {
     this.registerProtyleContent(event.detail.protyle);
@@ -88,6 +90,9 @@ export default class LinkmarkPlugin extends Plugin {
   private readonly protyleDestroyListener = (event: CustomEvent<{ protyle: IProtyle }>) => {
     this.unregisterProtyleContent(event.detail.protyle);
     this.scheduleScan();
+  };
+  private readonly linkMenuListener = (event: CustomEvent<{ menu: LinkMenu; protyle: IProtyle; element: HTMLElement }>) => {
+    this.linkMenu?.handleOpenMenu(event);
   };
 
   async onload() {
@@ -122,6 +127,11 @@ export default class LinkmarkPlugin extends Plugin {
       },
     });
     this.settingsPanel.updateCacheCount(this.client.entryCount());
+    this.linkMenu = new LinkContextMenu({
+      t: (key) => this.t(key),
+      client: this.client,
+      openIconPicker: (scope, targetUrl) => this.openIconPicker(scope, targetUrl, () => undefined),
+    });
     this.setting = this.settingsPanel.setting;
     this.startObserver();
     // The initial scan runs immediately instead of on the scan debounce so
@@ -387,6 +397,7 @@ export default class LinkmarkPlugin extends Plugin {
     this.eventBus.on("switch-protyle", this.protyleRegisterListener);
     this.eventBus.on("switch-protyle-mode", this.protyleRegisterListener);
     this.eventBus.on("destroy-protyle", this.protyleDestroyListener);
+    this.eventBus.on("open-menu-link", this.linkMenuListener);
   }
 
   private removeProtyleEventListeners() {
@@ -395,6 +406,7 @@ export default class LinkmarkPlugin extends Plugin {
     this.eventBus.off("switch-protyle", this.protyleRegisterListener);
     this.eventBus.off("switch-protyle-mode", this.protyleRegisterListener);
     this.eventBus.off("destroy-protyle", this.protyleDestroyListener);
+    this.eventBus.off("open-menu-link", this.linkMenuListener);
   }
 
   private scheduleDiscoveryTimer() {

@@ -256,6 +256,10 @@ _Avoid_: frontend refresh loop, refresh current page, unbounded refresh queue
 The lifetime of a shared cache management operation independent of its initiating Frontend: it may continue after that client disconnects, can be observed and cooperatively cancelled by another client, and is terminated by Kernel plugin reload.
 _Avoid_: dialog lifetime, frontend task, durable background job
 
+**Per-link refresh**:
+A manual Workspace cache operation initiated from a link's context menu that re-queues resolution for that link's Link scope without an Entry token, skipping Pinned matches.
+_Avoid_: single-entry refresh, document refresh, refresh-one
+
 **Cache policy**:
 The workspace-wide settings that determine favicon resolution, fallback generation, automatic retrieval, and entry freshness.
 _Avoid_: frontend preference, device setting

@@ -1,8 +1,13 @@
 import { resolve } from "node:path";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 
 export default defineConfig(({ mode }) => ({
+  test: {
+    // The `siyuan` npm package ships type declarations only; tests resolve it
+    // to a runtime stub through this alias.
+    alias: { siyuan: resolve(__dirname, "tests/stubs/siyuan.ts") },
+  },
   plugins: [
     viteStaticCopy({
       targets: [

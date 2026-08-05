@@ -44,12 +44,18 @@ declare module "siyuan" {
     wysiwyg?: { element: HTMLDivElement };
   }
 
+  export type LinkMenu = {
+    addItem(menu: MenuItem): void;
+    addSeparator(): void;
+  };
+
   type ProtyleEventMap = {
     "destroy-protyle": { protyle: IProtyle };
     "loaded-protyle-dynamic": { protyle: IProtyle; position: "afterend" | "beforebegin" };
     "loaded-protyle-static": { protyle: IProtyle };
     "switch-protyle": { protyle: IProtyle };
     "switch-protyle-mode": { protyle: IProtyle };
+    "open-menu-link": { menu: LinkMenu; protyle: IProtyle; element: HTMLElement };
   };
 
   export class EventBus {
