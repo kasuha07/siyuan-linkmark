@@ -37,7 +37,7 @@ export type FrontendCacheClientCallbacks = {
 
 export type KernelRpc = {
   call: Record<string, (...args: unknown[]) => Promise<unknown>>;
-  bind: (name: string, handler: (params: unknown) => void) => void;
+  bind: (name: string, handler: (...args: unknown[]) => void) => void;
 };
 
 export type FrontendCacheClientOptions = {

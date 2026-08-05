@@ -1,4 +1,4 @@
-import { showMessage, type LinkMenu } from "siyuan";
+import { showMessage, type IMenuBaseDetail } from "siyuan";
 import type { FrontendCacheClient } from "./frontend-cache-client";
 import { cachedIconForScope } from "./frontend-cache-state";
 import { linkHref } from "./frontend-link-discovery";
@@ -21,7 +21,7 @@ export type LinkContextMenuOptions = {
 export class LinkContextMenu {
   constructor(private readonly options: LinkContextMenuOptions) {}
 
-  handleOpenMenu(event: CustomEvent<{ menu: LinkMenu; element: HTMLElement }>) {
+  handleOpenMenu(event: CustomEvent<IMenuBaseDetail>) {
     const href = linkHref(event.detail.element);
     const scope = scopeForUrl(href);
     if (!scope) return;

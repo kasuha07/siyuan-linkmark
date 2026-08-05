@@ -10,10 +10,6 @@
     "noEmit": true,
     "strict": true,
     "types": ["node", "vite/client"],
-    "baseUrl": ".",
-    "paths": {
-      "siyuan": ["src/siyuan.d.ts"]
-    }
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "vite.config.ts", "vite.kernel.config.ts"]
 }

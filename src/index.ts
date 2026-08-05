@@ -1,4 +1,4 @@
-import { confirm, Menu, Plugin, showMessage, type IProtyle, type LinkMenu } from "siyuan";
+import { confirm, Menu, Plugin, showMessage, type IMenuBaseDetail, type IProtyle } from "siyuan";
 import "./style.css";
 import { FrontendCacheClient } from "./frontend-cache-client";
 import { CacheManagerDialog } from "./frontend-cache-manager";
@@ -91,7 +91,7 @@ export default class LinkmarkPlugin extends Plugin {
     this.unregisterProtyleContent(event.detail.protyle);
     this.scheduleScan();
   };
-  private readonly linkMenuListener = (event: CustomEvent<{ menu: LinkMenu; protyle: IProtyle; element: HTMLElement }>) => {
+  private readonly linkMenuListener = (event: CustomEvent<IMenuBaseDetail>) => {
     this.linkMenu?.handleOpenMenu(event);
   };
 

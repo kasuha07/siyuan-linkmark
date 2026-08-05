@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { showMessage } from "siyuan";
+import { showMessage, type IMenu, type IProtyle } from "siyuan";
 import { LinkContextMenu } from "../src/frontend-link-menu";
 import type { FrontendCacheClient } from "../src/frontend-cache-client";
 import type { LinkScope } from "../src/url-scope";
@@ -11,6 +11,7 @@ type RecordedItem = { label?: string; click?: () => void | Promise<void> };
 function makeMenu() {
   const record = { items: [] as RecordedItem[], separators: 0 };
   const menu = {
+    menus: [] as IMenu[],
     addItem: (item: RecordedItem) => void record.items.push(item),
     addSeparator: () => void (record.separators += 1),
   };
@@ -21,9 +22,9 @@ function linkElement(href: string) {
   return { dataset: { href }, getAttribute: () => null } as unknown as HTMLElement;
 }
 
-function openMenu(menu: LinkContextMenu, menuLike: { addItem: (item: RecordedItem) => void; addSeparator: () => void }, element: HTMLElement) {
+function openMenu(menu: LinkContextMenu, menuLike: { menus: IMenu[]; addItem: (item: RecordedItem) => void; addSeparator: () => void }, element: HTMLElement) {
   menu.handleOpenMenu(new CustomEvent("open-menu-link", {
-    detail: { menu: menuLike, protyle: {}, element },
+    detail: { menu: menuLike, protyle: {} as IProtyle, element },
   }));
 }
 
