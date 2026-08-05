@@ -355,7 +355,13 @@ function attributesFor(tag: string) {
 function isImagePayload(bytes: Buffer, contentType?: string) {
   const normalized = contentType?.split(";", 1)[0].toLowerCase();
   if (normalized?.startsWith("image/")) return true;
-  return bytes.subarray(0, 4).toString("hex") === "89504e47" || bytes.subarray(0, 3).toString("hex") === "ffd8ff" || bytes.subarray(0, 4).toString("ascii") === "GIF8" || bytes.subarray(0, 4).toString("ascii") === "<svg";
+  // 字节级魔数检查，不依赖 Buffer 编码支持面：goja 运行时的 buffer 模块
+  // 仅支持有限的编码名（无 "ascii"），字符串比较会抛 TypeError。
+  const head = bytes.subarray(0, 4);
+  return (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) // PNG
+    || (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) // JPEG
+    || (head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x38) // GIF8
+    || (head[0] === 0x3c && head[1] === 0x73 && head[2] === 0x76 && head[3] === 0x67); // <svg
 }
 
 function isWellFormedBase64(value: string) {
@@ -367,8 +373,9 @@ function isWellFormedBase64(value: string) {
 function imageContentType(bytes: Buffer, contentType?: string) {
   const normalized = contentType?.split(";", 1)[0].toLowerCase();
   if (normalized?.startsWith("image/")) return normalized;
-  if (bytes.subarray(0, 4).toString("hex") === "89504e47") return "image/png";
-  if (bytes.subarray(0, 3).toString("hex") === "ffd8ff") return "image/jpeg";
-  if (bytes.subarray(0, 4).toString("ascii") === "GIF8") return "image/gif";
+  const head = bytes.subarray(0, 4);
+  if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return "image/png";
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "image/jpeg";
+  if (head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x38) return "image/gif";
   return "image/svg+xml";
 }

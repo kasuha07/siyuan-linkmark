@@ -121,4 +121,23 @@ describe("ForwardProxyIconResolver platform icons", () => {
     await expect(resolver.resolve(scope())).rejects.toMatchObject({ category: "exhausted" });
     expect(forward).toHaveBeenCalledTimes(4);
   });
+
+  it("skips HTML fallback payloads served at icon paths without throwing", async () => {
+    // 静态站（如 S3/EdgeOne 托管）对不存在的 /favicon.ico 返回 200 + 首页
+    // HTML；字节魔数检测必须跳过而非抛错，并继续后续候选。
+    const html = "<!doctype html><html><body>fallback</body></html>";
+    const svg = "<svg xmlns='http://www.w3.org/2000/svg'/>";
+    const forward = vi.fn<ForwardProxy>(async (url) => {
+      if (url.endsWith("/favicon.svg")) {
+        return { body: Buffer.from(svg, "utf8").toString("base64"), contentType: "image/svg+xml", status: 200 };
+      }
+      return { body: Buffer.from(html, "utf8").toString("base64"), contentType: "text/html", status: 200 };
+    });
+    const resolver = new ForwardProxyIconResolver(forward, () => resolverPolicy);
+
+    const candidates = await resolver.candidates(scope());
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ contentType: "image/svg+xml", source: "root favicon.svg" });
+  });
 });
