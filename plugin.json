@@ -2,7 +2,7 @@
   "name": "siyuan-linkmark",
   "author": "霞葉 (Kasuha)",
   "url": "https://github.com/kasuha07/siyuan-linkmark",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "minAppVersion": "3.7.0",
   "kernels": ["all"],
   "backends": ["all"],
